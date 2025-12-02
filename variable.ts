@@ -1,309 +1,367 @@
-Public Class MT_103
-    Private Const tipoOperacion As String = "MT-103"
+Public Class MT_103_MXN
+    Private Const tipoOperacion As String = "MT-103_MXN"
     Private Shared goMW_TipoOperacion As T24_MW_Connection.MW_Tipo_operacion
 
     Shared Function procesaOperacion(ByVal icn As String, datos As Dictionary(Of String, Object)) As Boolean
         Dim lsAliasProceso As String
         Dim lbProcesado As Boolean
+        Dim llFolioMW As Long
 
-        write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Iniciando el registro de la operación, folio_unico='" & datos("folio_unico") & "'.")
+        ' Obtención de los datos de la familia de la operacion
+        'goMW_TipoOperacion = T24_MW_Connection.MW_DatosOperacion("SWF_IN")
+
+        write_Log(
+            "INFO|" & tipoOperacion & ".procesaOperacion|Iniciando el registro de la operación, folio_unico='" &
+            datos("folio_unico") & "'.")
 
         ' Tipo de Operacion
         goMW_TipoOperacion = goT24_Connection.MW_DatosOperacion("SWF_IN")
 
-        ' Proceso a ejecutar
+        ' Registro de E/S
         lsAliasProceso = dameUltimoProceso_SWF(goTOMI_Database, icn, gsTipoOperacion)
 
         ' E/S
-        If lsAliasProceso = "TOMI_ENTRADAS/SALIDAS" Then
-            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A realizar el registro de E/S.")
+        If lsAliasProceso = "TOMI_ENTRADAS/SALIDAS" Or lsAliasProceso = "T24_REGISTRO" Or lsAliasProceso = "CONCILIAR" _
+            Then
+            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en TOMI.")
 
             ' Inicio el proceso
             iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
 
-            ' Entrada salida
-            Dim loDatos_E_S As New Dictionary(Of String, Object)
-            Dim lbRegistro As Boolean
-
-            ' Datos de referencia
-            loDatos_E_S.Add("icn", icn)
-            ' Datos
-            loDatos_E_S.Add("referencia", datos("folio_unico"))
-            loDatos_E_S.Add("num_cliente", datos("num_cliente"))
-            loDatos_E_S.Add("ordenante", datos("nombre_cliente"))
-            loDatos_E_S.Add("operacion", 218)
-            loDatos_E_S.Add("operacion_desc", "Entrada (TTS)")
-            loDatos_E_S.Add("tipo", "I")
-            loDatos_E_S.Add("tipo_desc", "Internacional")
-            loDatos_E_S.Add("cuenta", datos("num_cuenta"))
-            loDatos_E_S.Add("nombre", datos("nombre_cliente"))
-            loDatos_E_S.Add("moneda", goT24_Connection.valida_moneda(datos("cve_moneda")))
-            loDatos_E_S.Add("via", 810) ' Subaplicacion
-            loDatos_E_S.Add("via_desc", "TRF RECIBIDA")
-            loDatos_E_S.Add("importe", datos("des_importe"))
-            loDatos_E_S.Add("saldo", 0)
-            loDatos_E_S.Add("comentarios", "")
-            loDatos_E_S.Add("fec_captura", Format(Now, "yyyy-MM-dd"))
-            loDatos_E_S.Add("fec_valor", gsFechaSistema.Substring(0, 4) & "-" & gsFechaSistema.Substring(4, 2) & "-" & gsFechaSistema.Substring(6, 2))
-            loDatos_E_S.Add("hora", Format(Now, "hh:mm:ss AMPM"))
-            loDatos_E_S.Add("capturista", "JEAI")
-            loDatos_E_S.Add("fad", 0)
-            loDatos_E_S.Add("ref_control", "")
-            loDatos_E_S.Add("ref_control_cont", 0)
-            lbRegistro = Registra_E_S(loDatos_E_S)
-            If Not lbRegistro Then
-                Throw New Exception("No se pudo registrar la operación como entrada/salida")
-            End If
-
-            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Se realizó el registro de E/S exitosamente.")
-
-            ' Actualización de la operación
-            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-
-            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Se termina el registro E/S e inicia siguiente tarea.")
-
-            ' Siguiente proceso
-            lsAliasProceso = dameUltimoProceso_SWF(goTOMI_Database, icn, gsTipoOperacion)
-        End If
-
-        '' Registro de la operación en T24
-        If lsAliasProceso = "T24_REGISTRO" Then
-            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en T24.")
-
-            ' Inicio el proceso
-            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-
-            ' Operacion a T24
-            lbProcesado = T24_REGISTRO(icn, datos)
-            If lbProcesado = False And Not IsNothing(gexUltimaExcepcion) Then
-                Throw gexUltimaExcepcion
-            End If
-
-            If Not lbProcesado Then
-                Throw New Exception("Error en procesamiento de registro MT-103 T24_REGISTRO con folio: " & icn)
-            End If
-        End If
-
-        ' Conciliación
-        If lsAliasProceso = "CONCILIAR" Then
-            Dim lsFolioT24 As String
-            Dim lbEs_Igual_en_T24 As Boolean
-            Dim lsMoneda As String, lsCuentaDeb As String, lsCuentaCred As String
-            Dim lrsDatos As DbDataReader
-
-            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A conciliar operaciones (por estatus) entre TOMI y T24.")
-
-            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-
-            ' Busco la operacion en T24
-            lsFolioT24 = goT24_Connection.obtener_folioAsignado(datos("folio_unico"))
-            If IsNothing(lsFolioT24) Then
-                Throw New Exception("No existe folio asignado para el folio_unico='" & datos("folio_unico") & "'")
-            End If
-
-            ' Valida contra los datos de TOMI - T24
-            lbEs_Igual_en_T24 = False
-            lsMoneda = goT24_Connection.valida_moneda(datos("cve_moneda"))
-            If lsMoneda = goT24_Connection.MonedaDefaultMN Then
-                lsCuentaDeb = Right(datos("cta_vostro_emisor"), 7)
-                lsCuentaCred = datos("num_cuenta")
-                If lsCuentaCred.Length = 7 Then
-                    lsCuentaCred = lsCuentaCred
-                ElseIf lsCuentaCred = 18 Then
-                    lsCuentaCred = lsCuentaCred.Substring(11, 7)
-                Else
-                    Throw New Exception("La cuenta a acreditar no es válida")
+            If lsAliasProceso = "TOMI_ENTRADAS/SALIDAS" Then
+                llFolioMW = 0
+                lbProcesado = TOMI_REGISTRO(icn, datos, llFolioMW)
+                If lbProcesado = False And Not IsNothing(gexUltimaExcepcion) Then
+                    Throw gexUltimaExcepcion
                 End If
-            Else
-                lsCuentaDeb = busca_valor_xml(datos("des_variables_xml"), "debit_account")
-                lsCuentaCred = datos("num_cuenta")
-            End If
-            lrsDatos = goVistasT24_Database.Execute_Query("SELECT CUR_ID,DEBIT_ACCT_NO,DEBIT_CURRENCY,DEBIT_AMOUNT,CREDIT_ACCT_NO,SATEL_SYS_REF FROM VW_T24_FUNDS_TRANSFER_ID WHERE CUR_ID = '" & lsFolioT24 & "'")
-            If Not IsNothing(lrsDatos) Then
-                While lrsDatos.Read
-                    If (lsFolioT24 = lrsDatos.Item("CUR_ID") And
-                            datos("folio_unico") = lrsDatos.Item("SATEL_SYS_REF") And
-                            datos("des_importe") = lrsDatos.Item("DEBIT_AMOUNT") And
-                            lsMoneda = lrsDatos.Item("DEBIT_CURRENCY") And
-                            lsCuentaDeb = lrsDatos.Item("DEBIT_ACCT_NO") And
-                            lsCuentaCred = lrsDatos.Item("CREDIT_ACCT_NO")) Then
-                        lbEs_Igual_en_T24 = True
-                    End If
-                End While
-                lrsDatos.Close()
-                lrsDatos = Nothing
+
+                If Not lbProcesado Then
+                    Throw New Exception("Error en procesamiento de registro TOMI_REGISTRO con folio: " & icn)
+                End If
+
+                write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Fin del registro de la operación.")
+
+                ' Actualización de la operación
+                terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
             End If
 
-            If Not lbEs_Igual_en_T24 Then
-                Throw New Exception("Los datos de conciliación entre TOMI y T24 son diferentes")
-            End If
+            ' Inicio el proceso
+            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, "T24_REGISTRO")
+            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, "T24_REGISTRO")
 
-            ' Actualizo el estatus
-            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
+            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, "CONCILIAR")
+            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, "CONCILIAR")
 
             ' Marca la operación como finalizada total
             marca_op_terminada(icn, "PROC", "JEAI")
 
-            ' Verificamos la última operación no realizada
+            ' Siguiente proceso
             lsAliasProceso = ""
         End If
-
-        write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Fin del registro de la operación.")
 
         ' Termina el proceso del folio
         Return True
     End Function
 
-    ' Inserta registro en T24
-    Private Shared Function T24_REGISTRO(ByVal icn As String, datos As Dictionary(Of String, Object)) As Boolean
+    Private Shared Function TOMI_REGISTRO(ByVal icn As String, datos As Dictionary(Of String, Object),
+                                          ByRef folioMW As Long) As Boolean
         Try
-            Dim loTrxMaster As T24_MW_TrxMaster = Nothing
-            Dim loTrxDetailFT As T24_MW_TrxDetail = Nothing
-            Dim lsT24_Internal_Type As String
-            'Dim lsDireccion As String, lsCuenta As String
-            Dim lsMoneda As String, lsDescripcion As String, lsDetailCharges As String, lsOrderingBank As String
-            Dim lsCIF_Inst_Ordenante As String, lsSwiftInstOrdenante As String, lsNombreInstOrdenante As String, lsDireccionInstOrdenante As String
-            Dim lsBeneficiario As String, lsCuentaDeb As String, lsCuentaCred As String
-            Dim lsOrderingCust As String = String.Empty
-            Dim lsSW_END2END_REF As String, lsSLA_UETR As String
+            Dim lrsDatos_T24 As DataTable
+            Dim lrsDatos_TOMI As DbDataReader
+            Dim loCmd_TOMI As DbCommand
+            Dim lsCuentaCompletaVostro As String, laCuentaSeparadaVostro() As String
+            Dim liTipoAppAnterior As Integer, lsTipoOpDesc As String, lsDetailCharges As String, lbCuentaT24 As Boolean
+            Dim lsNumeroCliente As String, lsNombreCliente As String, lsNombreCuenta As String
+            Dim lsCuentaPrincipal As String,
+                lsCuentaComisiones As String,
+                lsBeneficiario As String,
+                lsDescripcion As String
+            'Dim ldTC As Decimal, ldUSD_Comision As Decimal, ldUSD_ComIVA As Decimal
+            Dim lbRegistro As Boolean, lsNombreBancoBene As String
+            Dim liSalida As Integer, llFolioRegreso As Long, lsSQL As String
 
-            write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Inicia registro en T24.")
+            ' Inicio de variables
+            lsNumeroCliente = String.Empty
+            lsNombreCliente = String.Empty
+            lsNombreCuenta = String.Empty
 
-            ' Asignacion de Valores
-            lsMoneda = goT24_Connection.valida_moneda(datos("cve_moneda"))
-            lsSwiftInstOrdenante = ""
-            lsNombreInstOrdenante = ""
-            lsDireccionInstOrdenante = ""
-            ' Datos de la institución ordenante
-            lsNombreInstOrdenante = busca_valor_xml(datos("des_variables_xml"),"order_inst_name_addr_1")
-            If lsNombreInstOrdenante <> "" Then
-                lsDireccionInstOrdenante = busca_valor_xml(datos("des_variables_xml"), "order_inst_name_addr_2") & " " & busca_valor_xml(datos("des_variables_xml"), "order_inst_name_addr_3")
-                lsSwiftInstOrdenante = busca_valor_xml(datos("des_variables_xml"), "order_inst_party")
-                ' Corto los campos
-                lsNombreInstOrdenante = quita_linea(lsNombreInstOrdenante, 50)
-                lsDireccionInstOrdenante = quita_linea(lsDireccionInstOrdenante, 80)
-                write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Se encontró la información del ordenante por institución ordenante.")
-            Else
-                ' No hay banco ordenante, busco el cif ordenante
-                lsCIF_Inst_Ordenante = busca_valor_xml(datos("des_variables_xml"), "order_inst_cif")
-                If lsCIF_Inst_Ordenante <> "" Then
-                    ' Busca los valores
-                    busca_cif_datos(lsCIF_Inst_Ordenante, lsSwiftInstOrdenante, lsNombreInstOrdenante, lsDireccionInstOrdenante)
-                    lsNombreInstOrdenante = quita_linea(lsNombreInstOrdenante, 50)
-                    lsDireccionInstOrdenante = quita_linea(lsDireccionInstOrdenante, 80)
-                    write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Encontró: Swift='" & lsSwiftInstOrdenante & "', Nombre='" & lsNombreInstOrdenante & "', Calle='" & lsDireccionInstOrdenante & "'.")
-                Else
-                    write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|No se encontró el cif de la institución ordenante ewn el catálogo.")
-                End If
-            End If
-            'Armado de la descricpión
-            lsDescripcion = "RECEPCION TRANSFERENCIA INTERNACIONAL MT-103."
-            If lsNombreInstOrdenante <> "" Then
-                lsDescripcion &= ", BANCO ORDENANTE: " & lsNombreInstOrdenante
-            Else
-                If busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor") <> "" Then
-                    lsDescripcion &= ", BANCO ORIGEN: " & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor")
-                End If
-            End If
-            If busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_1") <> "" Then
-                lsDescripcion &= ", ORDENANTE: " & busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_1")
-            End If
-            If busca_valor_xml(datos("des_variables_xml"), "detail_charges") <> "" Then
-                lsDescripcion &= ", DET. CHARGES: " & busca_valor_xml(datos("des_variables_xml"), "detail_charges")
-            End If
-            If busca_valor_xml(datos("des_variables_xml"), "remmitance_information") <> "" Then
-                lsDescripcion &= ", POR CONCEPTO DE: " & busca_valor_xml(datos("des_variables_xml"), "remmitance_information")
-            End If
+            ' TC para el procesamiento
+            'ldTC = 0
+            'lrsDatos_TOMI = goTOMI_Database.Execute_Query("SELECT valortasa FROM tb_srv_parametros_salidas_swift WHERE tipo=0 AND fecha=" & fechaSQL(gsFechaSistema))
+            'If Not IsNothing(lrsDatos_TOMI) Then
+            '    While lrsDatos_TOMI.Read
+            '        ldTC = lrsDatos_TOMI(0)
+            '    End While
+            '    lrsDatos_TOMI.Close()
+            '    lrsDatos_TOMI = Nothing
+            'End If
+            'If ldTC > 0 Then
+            '    write_Log("INFO|" & tipoOperacion & ".TOMI_REGISTRO|TC encontrado='" & ldTC & "'.")
+            'Else
+            '    Throw New Exception("No existe Tipo de Cambio de Venta registrado en el sistema para la fecha '" & gsFechaSistema & "'.")
+            'End If
 
-            ' Es OUR?
+            ' Comision general para USD (tal vez en T24 no es necesario)
+            'ldUSD_Comision = 0
+            'ldUSD_ComIVA = 0
+            'lrsDatos_TOMI = goTOMI_Database.Execute_Query("SELECT valorcom,valoriva FROM tb_srv_parametros_salidas_swift WHERE id_parametro='MUFG (NEW YORK)'")
+            'If Not IsNothing(lrsDatos_TOMI) Then
+            '    While lrsDatos_TOMI.Read
+            '        ldUSD_Comision = lrsDatos_TOMI("valorcom")
+            '        ldUSD_ComIVA = lrsDatos_TOMI("valoriva")
+            '    End While
+            '    lrsDatos_TOMI.Close()
+            '    lrsDatos_TOMI = Nothing
+            'End If
+
+            ' Datos del registro
+            lsBeneficiario = Trim(busca_valor_xml(datos("des_variables_xml"), "beneficiary_name_addr"))
+            If lsBeneficiario = "" Then
+                lsBeneficiario = Trim(busca_valor_xml(datos("des_variables_xml"), "beneficiary_name_addr_1"))
+            End If
+            If lsBeneficiario.Length > 100 Then
+                lsBeneficiario = lsBeneficiario.Substring(0, 100)
+            End If
+            lsCuentaCompletaVostro = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_emisor")
+            laCuentaSeparadaVostro = lsCuentaCompletaVostro.Split("-")
+            lsCuentaPrincipal = laCuentaSeparadaVostro(2)
+            lsCuentaComisiones = lsCuentaPrincipal
+            lsDescripcion = busca_valor_xml(datos("des_variables_xml"), "remmitance_information")     'Descripción
             lsDetailCharges = busca_valor_xml(datos("des_variables_xml"), "detail_charges")
-            If lsDetailCharges = "OUR" Then
-                ' Sin comisión
-                write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Es registro con DetailCharges='OUR' (sin comisiones).")
-                lsT24_Internal_Type = "MT103"
-                lsOrderingBank = busca_valor_xml(datos("des_variables_xml"), "btmum_cve_swift_emisor")
-            Else
-                ' Comisiones
-                write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Inicia busqueda de comisiones.")
-                lsT24_Internal_Type = "MT103_COM"
-                lsOrderingBank = busca_valor_xml(datos("des_variables_xml"), "btmum_cve_swift_emisor")
+
+            ' Datos de la cuenta en T24
+            lbCuentaT24 = False
+            lrsDatos_T24 = goT24_Connection.datos_cuenta_VW(lsCuentaPrincipal)
+            If lrsDatos_T24.Rows.Count > 0 Then
+                lsNumeroCliente = lrsDatos_T24(0)("CUSTOMER")  'CUSTOMER_CODE
+                lsNombreCliente = lrsDatos_T24(0)("NAME_1")
+                lsNombreCuenta = lrsDatos_T24(0)("ACCOUNT_TITLE_1")
+                lbCuentaT24 = True
+            End If
+            lrsDatos_T24.Dispose()
+
+            If Not lbCuentaT24 Then
+                Throw New Exception("No se encontró o está inactiva la cuenta en T24 '" & lsCuentaPrincipal & "'")
             End If
 
-            ' Prepatamos los datos para el registro del FT
-            loTrxMaster = New T24_MW_TrxMaster
-            With loTrxMaster
-                .TrxOperation_Specific_Type = "SWF_IN"
-                .TrxOperation_SubType = lsT24_Internal_Type
-                .TrxOperation_Folio = icn
-                .TrxOperation_Acct = datos("num_cuenta")
-            End With
-            loTrxDetailFT = New T24_MW_TrxDetail
-            With loTrxDetailFT
-                If lsMoneda = goT24_Connection.MonedaDefaultMN Then
-                    lsCuentaDeb = Right(datos("cta_vostro_emisor"), 7)
-                    lsCuentaCred = datos("num_cuenta")
-                    If lsCuentaCred.Length = 7 Then
-                        lsCuentaCred = lsCuentaCred
-                    ElseIf lsCuentaCred = 18 Then
-                        lsCuentaCred = lsCuentaCred.Substring(11, 7)
-                    Else
-                        Throw New Exception("La cuenta a acreditar no es válida")
-                    End If
+            ' Valido las comisiones o tipo de operacion
+            If busca_valor_xml(datos("des_variables_xml"), "btmum_cve_swift_emisor") = "BOTKUS33" Then
+                ' Es NY
+                If lsDetailCharges = "OUR" Then
+                    write_Log(
+                        "INFO|" & tipoOperacion &
+                        ".TOMI_REGISTRO|Es registro de NY, swift='BOTKUS33' y DetailCharges='OUR'.")
+                    liTipoAppAnterior = 804           ' TRF ENVIADA MXN SPEI, COMISION USD
+                    lsTipoOpDesc = "TRF ENVIADA MXN SPEI (COM USD)"
+                    'lsCuentaComisiones = "0037046019"
+                    'NF_ClienteComision = NF_Cliente
+                    'lsMonedaComision = "USD"
+                    'ldMontoComision = Math.Round(ldUSD_Comision, 2)
+                    'ldMontoIVA_Comision = Math.Round(ldUSD_ComIVA, 2)
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
                 Else
-                    lsCuentaDeb = busca_valor_xml(datos("des_variables_xml"), "debit_account")
-                    lsCuentaCred = datos("num_cuenta")
+                    write_Log("INFO|" & tipoOperacion & ".TOMI_REGISTRO|BTMU NY, comisión diferente a OUR.")
+                    liTipoAppAnterior = 800           'TRF ENVIADA MXN SPEI
+                    lsTipoOpDesc = "TRF ENVIADA MXN SPEI"
+                    'lsCuentaComisiones = "2277001081"
+                    'NF_ClienteComision = NF_Cliente
+                    'lsMonedaComision = MonedaDefaultMN
+                    'ldMontoComision = Math.Round(ldUSD_Comision * ldTC, 2)
+                    'ldMontoIVA_Comision = Math.Round(ldUSD_ComIVA * ldTC, 2)
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
                 End If
-                .debit_acct_no = lsCuentaDeb
-                .debit_currency = lsMoneda
-                .debit_amount = String.Format("{0:0.##}", datos("des_importe"))
-                .debit_their_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
-                .credit_their_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
-                .credit_acct_no = lsCuentaCred
-                .credit_currency = lsMoneda
-                .ben_our_charges = lsDetailCharges
-                .ordering_bank = lsOrderingBank
-                ' Beneficiario
-                lsBeneficiario = busca_valor_xml(datos("des_variables_xml"), "beneficiary_name_addr")
-                If lsBeneficiario = "" Then
-                    lsBeneficiario = busca_valor_xml(datos("des_variables_xml"), "beneficiary_name_addr_1")
-                End If
-                .Beneficiary_Name = lsBeneficiario
-                
-                ' Información del ordenante
-                lsOrderingCust = "AC" & IIf(LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_account"))) = "", "", LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_account")))) & _
-                                IIf(LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_1"))) = "", "", goT24_Connection.MW_SeparadorMultivalor & LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_1")))) & _
-                                IIf(LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_2"))) = "", "", goT24_Connection.MW_SeparadorMultivalor & LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_2")))) & _
-                                IIf(LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_3"))) = "", "", goT24_Connection.MW_SeparadorMultivalor & LTrim(RTrim(busca_valor_xml(datos("des_variables_xml"), "ordering_name_addr_3"))))
-
-                .ordering_cust = IIf(lsOrderingCust.Substring(lsOrderingCust.Length - 1, 1) = goT24_Connection.MW_SeparadorMultivalor, Mid(lsOrderingCust, 1, lsOrderingCust.Length - 1), lsOrderingCust)
-
-                ' Datos de la institución ordenante
-                lsCIF_Inst_Ordenante = busca_valor_xml(datos("des_variables_xml"), "order_inst_cif")
-                write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Buscando datos de la institución ordenante en el catálogo, cif='" & lsCIF_Inst_Ordenante & "'.")
-                If lsNombreInstOrdenante <> "" Then
-                    write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Encontró: Swift='" & lsSwiftInstOrdenante & "', Nombre='" & lsNombreInstOrdenante & "', Calle='" & lsDireccionInstOrdenante & "'.")
-                    .Cust_Ref1 = lsNombreInstOrdenante
-                    .Cust_Ref2 = lsSwiftInstOrdenante
-                    .Cust_Ref3 = lsCIF_Inst_Ordenante
+            Else
+                ' No es NY
+                write_Log("INFO|" & tipoOperacion & ".TOMI_REGISTRO|Subaplicación 800.")
+                If lsDetailCharges = "OUR" Then
+                    write_Log("INFO|" & tipoOperacion & ".TOMI_REGISTRO|No es NY, comisión OUR.")
+                    liTipoAppAnterior = 800           'TRF ENVIADA MXN SPEI
+                    lsTipoOpDesc = "TRF ENVIADA MXN SPEI"
+                    'lsCuentaComisiones = lsCuentaPrincipal
+                    'NF_ClienteComision = NF_Cliente
+                    'lsMonedaComision = MonedaDefaultMN
+                    'ldMontoComision = Math.Round(ldUSD_Comision * ldTC, 2)
+                    'ldMontoIVA_Comision = Math.Round(ldUSD_ComIVA * ldTC, 2)
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
                 Else
-                    write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|No se encontró el cif de la institución ordenante ewn el catálogo.")
+                    write_Log("INFO|" & tipoOperacion & ".TOMI_REGISTRO|No es NY, comisión diferente a OUR.")
+                    liTipoAppAnterior = 800           'TRF ENVIADA MXN SPEI
+                    lsTipoOpDesc = "TRF ENVIADA MXN SPEI"
+                    'lsCuentaComisiones = "2277001081"
+                    'NF_ClienteComision = NF_Cliente
+                    'lsMonedaComision = MonedaDefaultMN
+                    'ldMontoComision = Math.Round(ldUSD_Comision * ldTC, 2)
+                    'ldMontoIVA_Comision = Math.Round(ldUSD_ComIVA * ldTC, 2)
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
+                    'ldComisionTotal = ldMontoComision + ldMontoIVA_Comision
                 End If
-                
-                .related_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
-                .Instructions = lsDescripcion
-                .Satel_Sys_Ref = datos("folio_unico")
-                .folio_tomi = datos("folio_unico")
-                lsSW_END2END_REF = busca_valor_xml(datos("des_variables_xml"), "UETR").Trim
-                If lsSW_END2END_REF <> "" Then
-                    lsSLA_UETR = busca_valor_xml(datos("des_variables_xml"), "SLA_UETR").Trim
-                    .SW_END2END_REF = lsSW_END2END_REF
-                End If
-            End With
-            Return goT24_Connection.registra_TRX(datos("folio_unico"), gsFechaSistema_T24_Juliana, goMW_TipoOperacion.tabla_trabajo, "SWF_IN", icn, goMW_TipoOperacion.T24_Operation_ID, loTrxMaster, loTrxDetailFT)
-        Catch lexError As Exception
-            write_Log("ERROR|" & tipoOperacion & ".T24_REGISTRO|Se presenta exception: " & lexError.ToString)
-            gexUltimaExcepcion = lexError
+            End If
+
+            write_Log(
+                "INFO|" & tipoOperacion &
+                ".TOMI_REGISTRO|Inicia registro en base de TOIMI con llamado 'usp_TOMBIN_INSERT_FORMATO_FXD_LOCAL'.")
+
+            write_Log("INFO|" & tipoOperacion & ".TOMI_REGISTRO|T24_CUSTOMER_CODE='" & lsNumeroCliente & "'.")
+            write_Log(
+                "INFO|" & tipoOperacion & ".TOMI_REGISTRO|A buscar el nombre del banco para la cuenta CLABE '" &
+                datos("num_cuenta") & "'.")
+            lsNombreBancoBene = dame_banco(datos("num_cuenta"))
+            write_Log("INFO|" & tipoOperacion & ".TOMI_REGISTRO|Banco='" & lsNombreBancoBene & "'.")
+
+            If lsNombreBancoBene = "" Then
+                ' El banco beneficiario no existe
+                Throw New Exception("El banco asociado a la cuenta " & datos("num_cuenta") & " no existe")
+            End If
+
+            Dim activeAutomation As Boolean = AutomationIsActive()
+            ' Inserción de la operacion en TOMI
+            goTOMI_Database.BeginTransaction("MT103_FXD_Local")
+
+            ' Genero FXD_Local
+            loCmd_TOMI = goTOMI_Database.newCommand_Transaction("usp_TOMBIN_INSERT_FORMATO_FXD_LOCAL")
+            loCmd_TOMI.CommandType = CommandType.StoredProcedure
+            'Definición de parámetros
+            loCmd_TOMI.Parameters.Clear()
+
+            Dim status = If(activeAutomation,
+                            If(Replace(Format(Now.Date, "yyyy-MM-dd"), "-", "") <= datos("fec_valor"),
+                               "SCNP", "CONF"),
+                            "PEND")
+
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_FOLIO_UNICO", datos("folio_unico"), DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_TIPO", "FXD", DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_FOLIO", DBNull.Value, DbType.Int32)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_CUSTOMER_CODE", lsNumeroCliente, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_DEBIT_ACCT_NO", lsCuentaPrincipal, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_ESTATUS", status, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_USUARIO_CAPTURA", "JEAI", DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_USUARIO_AUTORIZA", IIf(activeAutomation, "TOMI", DbNull.Value),
+                                         DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_FECHA_CAPTURA", Now.Date, DbType.DateTime)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_FECHA_AUTORIZA", IIf(activeAutomation, Now.Date, DbNull.Value),
+                                         DbType.DateTime)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_DEBIT_AMOUNT", datos("des_importe"), DbType.Decimal)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_SHORT_NAME", lsNombreCliente, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_FOREX_RELACIONADO", "", DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_DEBIT_CURRENCY", goT24_Connection.MonedaDefaultMN,
+                                         DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_BANCO_BENEF", lsNombreBancoBene, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_BEN_ACCT_NO", datos("num_cuenta"), DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_TIPO_CUENTA", "CUENTA DE CHEQUES(CLABE)", DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_BEN_CUST_NAME", lsBeneficiario, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_RFC_BENEFICIARIO", DBNull.Value, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_TASA_RETENCION", DBNull.Value, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_FECHA_EJECUCION", datos("fec_valor"), DbType.Int32)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@T24_DEBIT_THEIR_REF", icn, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@NF_MONTO_ENVIAR", datos("des_importe"), DbType.Decimal)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@ID_PLANTILLA", DBNull.Value, DbType.String)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@ID_FORMATO_PLANTILLA", DBNull.Value, DbType.Int64)
+            goTOMI_Database.AddParameter(loCmd_TOMI, "@Salida", 0, DbType.Int16, , ParameterDirection.Output)
+            'Termina Definición de parámetros y hace el llamado
+            write_Log(
+                "INFO|" & tipoOperacion &
+                ".TOMI_REGISTRO|usp_TOMBIN_INSERT_FORMATO_FXD_LOCAL pasaron parametros, inicia ejecución.")
+            liSalida = -1
+            llFolioRegreso = 0
+            lrsDatos_TOMI = loCmd_TOMI.ExecuteReader()
+            If Not IsNothing(lrsDatos_TOMI) Then
+                While lrsDatos_TOMI.Read
+                    llFolioRegreso = lrsDatos_TOMI.Item(0)
+                End While
+                lrsDatos_TOMI.Close()
+                lrsDatos_TOMI = Nothing
+            End If
+            liSalida = loCmd_TOMI.Parameters("@Salida").Value
+            loCmd_TOMI = Nothing
+            write_Log(
+                "INFO|" & tipoOperacion & ".TOMI_REGISTRO|Paso la ejecución, Salida=" & liSalida & ", folioRegreso=" &
+                llFolioRegreso & ".")
+
+            ' Regreso la salida
+            If liSalida <> 0 Or llFolioRegreso = 0 Then
+                Throw New Exception("No se pudo registrar la operación como FXD_Local")
+            End If
+
+            ' Actualización de datos de la operación
+            lsSQL = "UPDATE tb_tombin_nf_fxd_local SET nf_charge=" & textoSQL(lsDetailCharges) & " WHERE nf_folio=" &
+                    llFolioRegreso & ";" & vbCrLf &
+                    "UPDATE tb_srv_swf_trabajo SET mw_trx_id='" & llFolioRegreso &
+                    "' WHERE nf_tipo='SWIFT_IN' AND nf_folio='" & icn & "';"
+            goTOMI_Database.Execute_Command_Transaction(lsSQL)
+
+            'Registro de la Entrada/Salida
+            Dim loDatos_E_S As New Dictionary(Of String, Object)
+            ' Datos de referencia
+            loDatos_E_S.Add("icn", icn)
+            ' Datos
+            loDatos_E_S.Add("referencia", datos("folio_unico"))
+            loDatos_E_S.Add("num_cliente", lsNumeroCliente)
+            loDatos_E_S.Add("ordenante", lsNombreCliente)
+            loDatos_E_S.Add("operacion", 218)
+            loDatos_E_S.Add("operacion_desc", "Salida (TTS)")
+            loDatos_E_S.Add("tipo", "D")
+            loDatos_E_S.Add("tipo_desc", "Doméstica")
+            loDatos_E_S.Add("cuenta", lsCuentaPrincipal)
+            loDatos_E_S.Add("nombre", lsNombreCuenta)
+            loDatos_E_S.Add("moneda", goT24_Connection.MonedaDefaultMN)
+            loDatos_E_S.Add("via", liTipoAppAnterior) ' Subaplicacion
+            loDatos_E_S.Add("via_desc", lsTipoOpDesc)
+            loDatos_E_S.Add("importe", datos("des_importe"))
+            loDatos_E_S.Add("saldo", 0)
+            loDatos_E_S.Add("comentarios", "")
+            loDatos_E_S.Add("fec_captura", Format(Now.Date, "yyyy-MM-dd"))
+            loDatos_E_S.Add("fec_valor",
+                            gsFechaSistema.Substring(0, 4) & "-" & gsFechaSistema.Substring(4, 2) & "-" &
+                            gsFechaSistema.Substring(6, 2))
+            loDatos_E_S.Add("hora", Format(Now.Date, "hh:mm:ss AMPM"))
+            loDatos_E_S.Add("capturista", "JEAI")
+            loDatos_E_S.Add("fad", 0)
+            loDatos_E_S.Add("ref_control", "")
+            loDatos_E_S.Add("ref_control_cont", 0)
+            lbRegistro = Registra_E_S(loDatos_E_S, True)
+            If Not lbRegistro Then
+                Throw New Exception("No se pudo registrar la operación como entrada/salida")
+            End If
+
+            'lbRegistro = actualiza_operacion(icn)
+            'If Not lbRegistro Then
+            '    Throw New Exception("No se pudo actualizar los datos de la operación")
+            'End If
+            'lbRegistro = termina_registro(icn, datos)
+            'If Not lbRegistro Then
+            '    Throw New Exception("No se pudo terminar el registro de la operación")
+            'End If
+
+            ' Folio del MW
+            folioMW = llFolioRegreso
+
+            goTOMI_Database.Commit_Transaction()
+            Return True
+        Catch lexTOMI_REGISTRO As Exception
+            write_Log("ERROR|" & tipoOperacion & ".TOMI_REGISTRO|Se presenta exception: " & lexTOMI_REGISTRO.ToString)
+            gexUltimaExcepcion = lexTOMI_REGISTRO
+            If Not IsNothing(goTOMI_Database) Then
+                goTOMI_Database.Rollback_Transaction()
+            End If
+            'inserta_alerta(Nothing, Nothing, gsNombre_Servicio, "ERROR", lexInterfase_Giros.ToString, giPID, gsProcessName, lexInterfase_Giros, goTOMI_Database)
         End Try
         Return False
+    End Function
+
+    Private Shared Function AutomationIsActive() As Boolean
+        Dim cmd =
+                goTOMI_Database.Execute_Query(
+                    "SELECT op_automatica FROM tb_srv_swf_automation_control where tipo_operacion='SWIFT_IN' AND cve_mensaje='MT-103' AND message_category_id=4")
+        Dim automaticOp As Boolean = False
+        If Not IsNothing(cmd) Then
+            While cmd.Read
+                automaticOp = cmd("op_automatica")
+            End While
+            cmd.Close()
+        End If
+        return automaticOp
     End Function
 End Class
