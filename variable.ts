@@ -1,229 +1,366 @@
-Imports System.Globalization
-Imports System.Net
-Imports System.Net.Http
-Imports System.Security.Policy
-Imports System.Text
-Imports Newtonsoft.Json
-
-Public Class MT_191
-    Private Const tipoOperacion As String = "MT191"
+Public Class MT_202
+    Private Const tipoOperacion As String = "MT-202"
     Private Shared goMW_TipoOperacion As T24_MW_Connection.MW_Tipo_operacion
+    'Private Shared folio_unico As String = ""
 
     Shared Function procesaOperacion(ByVal icn As String, datos As Dictionary(Of String, Object)) As Boolean
         Dim lsAliasProceso As String
-        write_Log(
-            "INFO|" & tipoOperacion & ".procesaOperacion|Iniciando el registro de la operación, folio_unico='" &
-            datos("folio_unico") & "'.")
+        Dim lbProcesado As Boolean
+        Dim lsCuentaVostroBene As String
+
+        'Confirmo que se encuentre el certificado y llave para la firma digital de lo contrario no se inicia el proceso
+        write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Confirmando que el certificado se encuentre.")
+        If Not CertificadoEncontrado() Then
+            Throw New Exception("Error en procesamiento de SPEI: No se encontro el certificado y/o llave para realizar la firma de la transacción")
+        End If
+
+        write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Iniciando el registro de la operación, folio_unico='" & datos("folio_unico") & "'.")
 
         ' Tipo de Operacion
         goMW_TipoOperacion = goT24_Connection.MW_DatosOperacion("SWF_IN")
 
         ' Proceso a ejecutar
         lsAliasProceso = dameUltimoProceso_SWF(goTOMI_Database, icn, gsTipoOperacion)
-        write_Log("INFO|MT191.procesaOperacion|A procesar el paso " & lsAliasProceso)
-        
+
+        '' Registro de la operación en T24
+        If lsAliasProceso = "SPEI_REGISTRO" Then
+            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en SPEI (si aplica).")
+
+            ' Inicio el proceso
+            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
+
+            ' Valido el tipo de operacion MT-202 (hay caso para salida SPEI y caso de traspaso entre cuentas vostro internas)
+            lsCuentaVostroBene = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_vostro")
+            If lsCuentaVostroBene = "" Then
+                ''''' SPEI
+                write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en SPEI.")
+                ' SPEI
+                lbProcesado = registra_SPEI(icn, datos)
+
+                If lbProcesado = False And Not IsNothing(gexUltimaExcepcion) Then
+                    Throw gexUltimaExcepcion
+                End If
+
+                If Not lbProcesado Then
+                    ' No se registro la operacion SPEI
+                    Throw New Exception("No se pudo registrar la operación en SPEI")
+                End If
+            Else
+                ''''' Traspaso
+                write_Log("INFO|" & tipoOperacion & ".procesaOperacion|No aplica el registrar operación en SPEI.")
+            End If
+
+            ' Termino del proceso
+            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, "SPEI_REGISTRO")
+
+            ' Nuevo alias del proceso
+            lsAliasProceso = dameUltimoProceso_SWF(goTOMI_Database, icn, gsTipoOperacion)
+        End If
+
         '' Registro de la operación en T24
         If lsAliasProceso = "T24_REGISTRO" Then
             write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en T24.")
+
+            ' Inicio el proceso
             iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-            ' Operacion a T24
-            Dim alreadyInsertedInT24 As Result(Of String) = GetFT(icn)
             
-            ' Inicializamos como fallo, esto puede cambiar si la consulta es exitosa y no tiene datos.
-            Dim res As Result(Of String) = Result (Of String).Failed(String.Empty)
-            
-            If alreadyInsertedInT24.IsSuccess
-                write_Log("INFO|MT_191.procesaOperacion|La búsqueda de FT fue exitosa.")
-                ' Si no tenemos nada en la consulta registramos en T24, de otra manera recuperamos el FT de la consulta.
-                If String.IsNullOrWhiteSpace(alreadyInsertedInT24.Data)
-                    Dim resultT24Insert As Result(Of String) = T24_REGISTRO(icn, datos)
-                    If Not resultT24Insert.IsSuccess
-                        If Not resultT24Insert.ErrorCode = ErrorCodeEnum.NoCode
-                            marca_op_con_error(icn, resultT24Insert.Reason)
-                            Throw New Exception("Error en procesamiento de registro MT-191 T24_REGISTRO con folio: " & icn)
-                        Else 
-                            Throw New Exception("Error en procesamiento de registro MT-191 T24_REGISTRO con folio: " & icn)
-                        End If
-                    End If
-                    
-                    write_Log("INFO|MT_191.procesaOperacion|No se encontró ningún FT, se procede a hacer el registro en T24.")
-                    res = resultT24Insert
-                Else 
-                    write_Log("INFO|MT_191.procesaOperacion|Se encontró un FT asociado al mensaje: " & alreadyInsertedInT24.Data)
-                    res = alreadyInsertedInT24  
+            ' Valido el tipo de operacion MT-202 (hay caso para salida SPEI y caso de traspaso entre cuentas vostro internas)
+            lsCuentaVostroBene = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_vostro")
+            If lsCuentaVostroBene = "" Then
+                ''''' SPEI
+                ' Valido la operacion en T24
+                write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en T24 con salida SPEI.")
+                lbProcesado = T24_REGISTRO(icn, datos)
+                If lbProcesado = False And Not IsNothing(gexUltimaExcepcion) Then
+                    Throw gexUltimaExcepcion
+                End If
+                If Not lbProcesado Then
+                    Throw New Exception("Error en procesamiento de registro MT-202 T24_REGISTRO con folio: " & icn)
+                End If
+            Else
+                ''''' Traspaso
+                write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en T24 como traspaso entre VOSTROS.")
+                lbProcesado = T24_REGISTRO_VOSTROS(icn, datos)
+                If lbProcesado = False And Not IsNothing(gexUltimaExcepcion) Then
+                    Throw gexUltimaExcepcion
+                End If
+                If Not lbProcesado Then
+                    Throw New Exception("Error en procesamiento de registro MT-202 T24_REGISTRO_VOSTROS con folio: " & icn)
                 End If
             End If
-
-            ' Actualizamos el Contexto del evento que maneja estas operaciones.
-            Dim updatedCommission As Result(Of String) = UpdateCommissionContext(icn, res.Data)
-            If Not updatedCommission.IsSuccess Then
-                Throw New Exception("No se pudo enviar el FT asociado al cobro de esta comision: " & icn & vbCrLf & 
-                                    "Razon: " & updatedCommission.Reason)
-            End If
-            
-            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-            lsAliasProceso = dameUltimoProceso_SWF(goTOMI_Database, icn, gsTipoOperacion)
         End If
-        
-        If lsAliasProceso = "SPEI_REGISTRO" Then
-            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A registrar operación en SPEI.")
 
-            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-            Dim processed = registra_SPEI(icn, datos)
-
-            If processed = False And Not IsNothing(gexUltimaExcepcion) Then
-                Throw gexUltimaExcepcion
-            End If
-            
-            If Not processed Then
-                Throw New Exception("No se pudo registrar la operación en SPEI")
-            End If
-
-            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, "SPEI_REGISTRO")
-            lsAliasProceso = dameUltimoProceso_SWF(goTOMI_Database, icn, gsTipoOperacion)
-        End If
-        
-        '' Creacion de MT-202
-        If lsAliasProceso = "SWIFT_REGISTRO" Then
-            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A generar el mensaje MT-202.")
-            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-            
-            Dim dispatchResult As Result(Of String) = DispatchMT202(icn)
-            If Not dispatchResult.IsSuccess Then
-                write_Log("ERROR|MT_191.ProcesaOperacion|" & dispatchResult.Reason)
-                marca_op_con_error(icn, "No se pudo enviar el MT202 asociado al cobro de esta comision")
-                Throw New Exception("No se pudo enviar el MT202 asociado al cobro de esta comision: " & icn)
-            End If
-            ' La API generada cierra el proceso aqui.
-            Return False
-        End If
-        
-        lsAliasProceso = dameUltimoProceso_SWF(goTOMI_Database, icn, gsTipoOperacion)
         ' Conciliación
         If lsAliasProceso = "CONCILIAR" Then
-            write_Log(
-                "INFO|" & tipoOperacion & ".procesaOperacion|A conciliar operaciones (por estatus) entre TOMI y T24.")
-            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
-            marca_op_terminada(icn, "PROC", "JEAI")
-        End If
+            Dim lsFolioT24 As String
+            Dim lbEs_Igual_en_T24 As Boolean
+            Dim lsMoneda As String
+            Dim lrsDatos As DbDataReader
+            Dim lsCuentaCompletaVostro As String, laCuentaSeparadaVostro() As String, lsCuentaDeb As String
+            Dim lsBen_Subaplicacion As String, lsBen_Cuenta As String
 
-        write_Log("INFO|" & tipoOperacion & ".procesaOperacion|Fin del registro de la operación.")
+            write_Log("INFO|" & tipoOperacion & ".procesaOperacion|A conciliar operaciones (por estatus) entre TOMI y T24.")
+            iniciaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
+            write_Log("INFO|Folio Unico " & datos("folio_unico"))
+            ' Busco la operacion en T24
+            lsFolioT24 = goT24_Connection.obtener_folioAsignado(datos("folio_unico"))
+            write_Log("INFO|Folio T24 " & lsFolioT24)
+            If IsNothing(lsFolioT24) Then
+                Throw New Exception("No existe folio asignado para el folio_unico='" & datos("folio_unico") & "'")
+            End If
+
+            ' Valida contra los datos de TOMI - T24
+            lbEs_Igual_en_T24 = False
+            lsMoneda = goT24_Connection.valida_moneda(datos("cve_moneda"))
+
+            ' Ordenante
+            lsCuentaCompletaVostro = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_emisor")
+            laCuentaSeparadaVostro = lsCuentaCompletaVostro.Split("-")
+            lsCuentaDeb = laCuentaSeparadaVostro(2)      'datos("num_cuenta")
+
+            ' Beneficiario
+            lsCuentaVostroBene = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_vostro")
+            If lsCuentaVostroBene = "" Then
+                ''''' SPEI
+                lsBen_Cuenta = goT24_Connection.T24_BanxicoAcct
+            Else
+                ''''' Traspaso
+                laCuentaSeparadaVostro = lsCuentaVostroBene.Split("-")
+                lsBen_Subaplicacion = laCuentaSeparadaVostro(1)
+                lsBen_Cuenta = laCuentaSeparadaVostro(2)
+            End If
+
+            lrsDatos = goVistasT24_Database.Execute_Query("SELECT CUR_ID,DEBIT_ACCT_NO,DEBIT_CURRENCY,DEBIT_AMOUNT,CREDIT_ACCT_NO,SATEL_SYS_REF FROM VW_T24_FUNDS_TRANSFER_ID WHERE CUR_ID = '" & lsFolioT24 & "'")
+            If Not IsNothing(lrsDatos) Then
+                While lrsDatos.Read
+                    If (lsFolioT24 = lrsDatos.Item("CUR_ID") And
+                            datos("folio_unico") = lrsDatos.Item("SATEL_SYS_REF") And
+                            datos("des_importe") = lrsDatos.Item("DEBIT_AMOUNT") And
+                            lsMoneda = lrsDatos.Item("DEBIT_CURRENCY") And
+                            lsCuentaDeb = lrsDatos.Item("DEBIT_ACCT_NO") And
+                            lsBen_Cuenta = lrsDatos.Item("CREDIT_ACCT_NO")) Then
+                        lbEs_Igual_en_T24 = True
+                    End If
+                End While
+                lrsDatos.Close()
+                lrsDatos = Nothing
+            End If
+
+            If Not lbEs_Igual_en_T24 Then
+                Throw New Exception("Los datos de conciliación entre TOMI y T24 son diferentes")
+            End If
+
+            ' Actualizo el estatus
+            terminaProceso_SWF(goTOMI_Database, icn, gsTipoOperacion, lsAliasProceso)
+
+            ' Marca la operación como finalizada total
+            marca_op_terminada(icn, "PROC", "JEAI")
+
+            ' Verificamos la última operación no realizada
+            lsAliasProceso = ""
+        End If
 
         ' Termina el proceso del folio
         Return True
     End Function
 
-    Private Shared Function T24_REGISTRO(icn As String, datos As Dictionary(Of String, Object)) As Result(Of String)
+    ' Inserta registro en T24
+    Private Shared Function T24_REGISTRO(ByVal icn As String, datos As Dictionary(Of String, Object)) As Boolean
         Try
-            Const t24InternalType = "MT191"
-            Dim xmlData As String = datos("des_variables_xml")
+            Dim loTrxMaster As T24_MW_TrxMaster = Nothing
+            Dim loTrxDetailFT As T24_MW_TrxDetail = Nothing
+            Dim lsMoneda As String, lsDescripcion As String
+            Dim lsBanco As String, lsNombre_Beneficiario As String, lsNumero_Cuenta_Beneficiario As String
+            Dim lsCuentaCompletaVostro As String, laCuentaSeparadaVostro() As String, lsCuentaDeb As String
+            Dim lbRegreso As Boolean
+            Dim lsSW_END2END_REF As String, lsSLA_UETR As String
 
             write_Log("INFO|" & tipoOperacion & ".T24_REGISTRO|Inicia registro en T24.")
-            Dim commission As InternationalCommission = InternationalCommission.Map(xmlData)
-            Dim loTrxMaster As New T24_MW_TrxMaster With 
-                    {
-                    .TrxOperation_Specific_Type = "SWF_IN",
-                    .TrxOperation_SubType = t24InternalType,
-                    .TrxOperation_Folio = icn,
-                    .TrxOperation_Acct = commission.DebitAccountNumber
-                    }
 
-            Dim instructions As New StringBuilder("COMISION BANCO BENEFICIARIO" & vbCrLf)
-            instructions.Append(commission.OriginalReference & vbTab)
-            instructions.Append(commission.OriginalDate & vbTab)
-            instructions.Append("COMM:" & vbTab &
-                                commission.CreditAmount.ToString("C", CultureInfo.CreateSpecificCulture("en-US")))
-            instructions.Append(vbTab & commission.CreditCurrency)
+            ' Inicio de variables
+            lsMoneda = goT24_Connection.valida_moneda(datos("cve_moneda"))
+            lsDescripcion = busca_valor_xml(datos("des_variables_xml"), "related_reference")
+            lsBanco = busca_valor_xml(datos("des_variables_xml"), "btmum_cve_casfim_spei") & " - " & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_banco_spei")
+            lsNombre_Beneficiario = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_banco_spei")
+            lsNumero_Cuenta_Beneficiario = busca_valor_xml(datos("des_variables_xml"), "btmum_cve_casfim_spei")
+            lsCuentaCompletaVostro = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_emisor")
+            laCuentaSeparadaVostro = lsCuentaCompletaVostro.Split("-")
+            lsCuentaDeb = laCuentaSeparadaVostro(2)      'datos("num_cuenta")
+            'Armado de la descricpión
+            lsDescripcion = "RECEPCION TRANSFERENCIA INTERNACIONAL MT-202 SALIDA SPEI."
+            If busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor") <> "" Then
+                lsDescripcion &= ", BANCO ORIGEN: " & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor")
+            End If
+            ' Vostro
+            If busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_vostro") <> "" Then
+                lsDescripcion &= ", BANCO DESTINO: " & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_vostro")
+            End If
+            'SPEI
+            If busca_valor_xml(datos("des_variables_xml"), "btmum_cve_casfim_spei") <> "" Then
+                lsDescripcion &= ", PAGO SPEI A: " & busca_valor_xml(datos("des_variables_xml"), "btmum_cve_casfim_spei") & "-" & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_banco_spei")
+            End If
+            ' Referencia
+            If busca_valor_xml(datos("des_variables_xml"), "related_reference") <> "" Then
+                lsDescripcion &= ", REL. REFERENCE: " & busca_valor_xml(datos("des_variables_xml"), "related_reference")
+            End If
 
-            Dim loTrxDetailFT As New T24_MW_TrxDetail With
-                    {
-                    .credit_acct_no = goT24_Connection.T24_NOSTRO_Account(commission.CreditCurrency),
-                    .credit_currency = commission.CreditCurrency,
-                    .credit_amount = commission.CreditAmount,
-                    .debit_acct_no = commission.DebitAccountNumber,
-                    .ordering_cust = commission.OrderingCustomer,
-                    .Instructions = instructions.ToString(),
-                    .Satel_Sys_Ref = datos("folio_unico"),
-                    .folio_tomi = datos("folio_unico")
-                    }
+            ' Validación de la moneda
+            If lsMoneda <> goT24_Connection.MonedaDefaultMN Then
+                Throw New Exception("No hay referencia del mensaje MT-202 para la moneda '" & lsMoneda & "'.")
+            End If
 
-            Return _
-                registra_TRX_WS_Result(icn,tipoOperacion,
-                                       loTrxMaster, loTrxDetailFT, datos("des_variables_xml"))
-        Catch ex As Exception
-            write_Log("ERROR|" & tipoOperacion & ".T24_REGISTRO|Se presenta exception: " & ex.ToString)
-            gexUltimaExcepcion = ex
-        End Try
-        Return Result (Of String).Failed("Hubo un error al intentar registrar la operacion.")
-    End Function
+            ' Prepatamos los datos para el registro del FT
+            loTrxMaster = New T24_MW_TrxMaster
+            With loTrxMaster
+                '.TrxCompany_ID = T24_MW_Connection.MW_CompanyId
+                '.TrxSystem_ID = T24_MW_Connection.MW_SystemId
+                .TrxOperation_Specific_Type = "SWF_IN"
+                .TrxOperation_SubType = "MT202_SPEI"
+                .TrxOperation_Folio = icn
+                .TrxOperation_Acct = lsCuentaDeb
+            End With
 
-    Private Shared Function UpdateCommissionContext(originalReference As String, ourReference As String) _
-        As Result(Of String)
-        If String.IsNullOrWhiteSpace(ourReference)  Then
-            write_Log("ERROR|MT191.UpdateCommissionContext|No T24 reference passed to update commission context.")
-            Return Result (Of String).Failed("No T24 reference passed to update commission context.")
-        End If
-        
-        If String.IsNullOrWhiteSpace(originalReference)  Then
-            write_Log("ERROR|MT191.UpdateCommissionContext|No SAMH reference passed to update commission context")
-            Return Result (Of String).Failed("No SAMH reference passed to update commission context.")
-        End If
-        Try
-            write_Log("INFO|MT_191.UpdateCommissionContext|To update the Commission Context with the T24 reference")
-            Dim creditConfirmation As New ChargesPaymentUpdateDto With 
-                    {
-                    .OriginalReference = originalReference,
-                    .T24Reference = ourReference
-                    }
-            Dim json As String = JsonConvert.SerializeObject(creditConfirmation)
-            write_Log("INFO|MT191.UpdateCommissionContext|Payload:\n" & json)
-            Using _client As New HttpClient()
-                Dim _content AS New StringContent(json, Encoding.UTF8, "application/json")
-                write_Log(
-                    "INFO|MT191.UpdateCommissionContext|To update Commission Context with context ref " &
-                    creditConfirmation.OriginalReference)
-                Dim response AS HttpResponseMessage = _client.PutAsync(ApiNewMdwUrl, _content).Result
-                write_Log("INFO|MT191.UpdateCommissionContext|Server's answer: " & response.ReasonPhrase)
-                If response.StatusCode = HttpStatusCode.Accepted Then
-                    Return Result (Of String).Success(response.ReasonPhrase)
+            loTrxDetailFT = New T24_MW_TrxDetail
+            With loTrxDetailFT
+                .debit_acct_no = lsCuentaDeb
+                .debit_currency = lsMoneda
+                .debit_amount = String.Format("{0:0.##}", datos("des_importe"))
+                .debit_their_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
+                .credit_their_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
+                .credit_acct_no = goT24_Connection.T24_BanxicoAcct
+                .credit_currency = lsMoneda
+                '.credit_amount = lrsDatos.Item("nf_monto_enviar")
+                '.ben_acct_no = lsNumero_Cuenta_Beneficiario
+                '.ben_customer = lsNombre_Beneficiario
+                '.payment_details = lsDescripcion
+                .ordering_cust = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor")
+                .related_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
+                .Instructions = lsDescripcion   'goT24_Connection.convierteTexto_a_Multivalor(lsDescripcion, 65)
+                .Satel_Sys_Ref = datos("folio_unico")
+                .folio_tomi = datos("folio_unico")
+
+                .Beneficiary_Name = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_banco_spei")
+                lsSW_END2END_REF = busca_valor_xml(datos("des_variables_xml"), "UETR").Trim
+                If lsSW_END2END_REF <> "" Then
+                    lsSLA_UETR = busca_valor_xml(datos("des_variables_xml"), "SLA_UETR").Trim
+                    'If lsSLA_UETR <> "" Then
+                    '    lsSW_END2END_REF &= " " & lsSLA_UETR
+                    'End If
+                    .SW_END2END_REF = lsSW_END2END_REF
                 End If
-                Return Result (Of String).Failed(response.ReasonPhrase)
-            End Using
-        Catch ex As Exception
-            write_Log("ERROR|MT191.UpdateCommissionContext|An error occurred:" & vbCrLf & ex.Message)
-            Return Result (Of String).Failed(ex.Message)
+            End With
+
+            ' Realización del giro
+            'lbRegreso = goT24_Connection.registra_FT(goVistasT24_Database, datos("folio_unico"), gsFechaSistema_T24_Juliana, gsTablaTrabajo, icn, "SWF", loTrxMaster, loTrxDetailFT)
+            lbRegreso = goT24_Connection.registra_TRX(datos("folio_unico"), gsFechaSistema_T24_Juliana, goMW_TipoOperacion.tabla_trabajo, "SWF_IN", icn, goMW_TipoOperacion.T24_Operation_ID, loTrxMaster, loTrxDetailFT)
+
+            'If lbRegreso Then
+            '    'Registra_SPEI_Participantes(icn, datos)
+            '    actualiza_operacion(icn)
+            'End If
+            Return lbRegreso
+        Catch lexErrorReg202SPEI As Exception
+            write_Log("ERROR|" & tipoOperacion & ".T24_REGISTRO|Se presenta exception: " & lexErrorReg202SPEI.ToString)
+            gexUltimaExcepcion = lexErrorReg202SPEI
         End Try
+        Return False
     End Function
 
-    Private Shared Function DispatchMT202(ref As String) As Result(Of String)
+    ' Inserta registro en T24 para traspaso entre cuentas VOSTRO
+    Private Shared Function T24_REGISTRO_VOSTROS(ByVal icn As String, datos As Dictionary(Of String, Object)) As Boolean
         Try
-            write_Log("ERROR|MT_191.DispatchMT202|A enviar MT202 para terminar el cobro de la comision.")
-            Dim creditConfirmation As New FiToFiCommissionCreditConfirmationDto With 
-                    {
-                    .TheirReference = ref
-                    }
-            Dim json As String = JsonConvert.SerializeObject(creditConfirmation)
-            write_Log("INFO|MT191.DispatchMT202|Payload:\n" & json)
-            Using _client As New HttpClient()
-                Dim _content AS New StringContent(json, Encoding.UTF8, "application/json")
-                write_Log(
-                    "INFO|MT191.DispatchMT202|To enqueue dispatching of MT202 with context ref " &
-                    creditConfirmation.TheirReference)
-                Dim response AS HttpResponseMessage = _client.PostAsync(ApiNewMdwUrl & "/confirmation", _content).Result
-                write_Log("INFO|MT191.DispatchMT202|Respuesta del servidor: " & response.ReasonPhrase)
-                
-                If response.StatusCode = HttpStatusCode.Accepted Then
-                    Return Result (Of String).Success(response.ReasonPhrase)
+            Dim loTrxMaster As T24_MW_TrxMaster = Nothing
+            Dim loTrxDetailFT As T24_MW_TrxDetail = Nothing
+            Dim lsMoneda As String, lsDescripcion As String
+            Dim lsCuentaCompletaVostro As String, laCuentaSeparadaVostro() As String
+            Dim lsOrd_Subaplicacion As String, lsOrd_Cuenta As String, lsOrd_Nombre As String
+            Dim lsBen_Subaplicacion As String, lsBen_Cuenta As String, lsBen_Nombre As String
+            Dim lbRegreso As Boolean
+            Dim lsSW_END2END_REF As String, lsSLA_UETR As String
+
+            lsMoneda = goT24_Connection.valida_moneda(datos("cve_moneda"))
+            ' Ordenante
+            lsCuentaCompletaVostro = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_emisor")
+            laCuentaSeparadaVostro = lsCuentaCompletaVostro.Split("-")
+            lsOrd_Subaplicacion = laCuentaSeparadaVostro(1)
+            lsOrd_Cuenta = laCuentaSeparadaVostro(2)
+            lsOrd_Nombre = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor")
+            ' Beneficiario
+            lsCuentaCompletaVostro = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_vostro")
+            laCuentaSeparadaVostro = lsCuentaCompletaVostro.Split("-")
+            lsBen_Subaplicacion = laCuentaSeparadaVostro(1)
+            lsBen_Cuenta = laCuentaSeparadaVostro(2)
+            lsBen_Nombre = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_vostro")
+            'Armado de la descricpión
+            lsDescripcion = "RECEPCION TRANSFERENCIA INTERNACIONAL MT-202 VOSTROS."
+            If busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor") <> "" Then
+                lsDescripcion &= ", BANCO ORIGEN: " & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor")
+            End If
+            ' Vostro
+            If busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_vostro") <> "" Then
+                lsDescripcion &= ", BANCO DESTINO: " & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_vostro")
+            End If
+            'SPEI
+            If busca_valor_xml(datos("des_variables_xml"), "btmum_cve_casfim_spei") <> "" Then
+                lsDescripcion &= ", PAGO SPEI A: " & busca_valor_xml(datos("des_variables_xml"), "btmum_cve_casfim_spei") & "-" & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_banco_spei")
+            End If
+            ' Referencia
+            If busca_valor_xml(datos("des_variables_xml"), "related_reference") <> "" Then
+                lsDescripcion &= ", REL. REFERENCE: " & busca_valor_xml(datos("des_variables_xml"), "related_reference")
+            End If
+
+            ' Prepatamos los datos para el registro del FT
+            loTrxMaster = New T24_MW_TrxMaster
+            With loTrxMaster
+                '.TrxCompany_ID = T24_MW_Connection.MW_CompanyId
+                '.TrxSystem_ID = T24_MW_Connection.MW_SystemId
+                .TrxOperation_Specific_Type = "SWF_IN"
+                .TrxOperation_SubType = "MT202_VOSTROS"
+                .TrxOperation_Folio = icn
+                .TrxOperation_Acct = lsOrd_Cuenta
+            End With
+
+            loTrxDetailFT = New T24_MW_TrxDetail
+            With loTrxDetailFT
+                .debit_acct_no = lsOrd_Cuenta
+                .debit_currency = lsMoneda
+                .debit_amount = String.Format("{0:0.##}", datos("des_importe"))
+                .debit_their_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
+                .credit_their_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
+                .credit_acct_no = lsBen_Cuenta
+                .credit_currency = lsMoneda
+                '.payment_details = lsDescripcion
+                .related_ref = busca_valor_xml(datos("des_variables_xml"), "sender_reference")
+                .Instructions = lsDescripcion   'goT24_Connection.convierteTexto_a_Multivalor(lsDescripcion, 65)
+                .Satel_Sys_Ref = datos("folio_unico")
+                .folio_tomi = datos("folio_unico")
+                .Beneficiary_Name = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_vostro")
+                lsSW_END2END_REF = busca_valor_xml(datos("des_variables_xml"), "UETR").Trim
+                If lsSW_END2END_REF <> "" Then
+                    lsSLA_UETR = busca_valor_xml(datos("des_variables_xml"), "SLA_UETR").Trim
+                    'If lsSLA_UETR <> "" Then
+                    '    lsSW_END2END_REF &= " " & lsSLA_UETR
+                    'End If
+                    .SW_END2END_REF = lsSW_END2END_REF
                 End If
-                Return Result (Of String).Failed(response.ReasonPhrase)
-            End Using
-        Catch ex As Exception
-            write_Log("INFO|MT191.DispatchMT202|An error occurred:" & vbCrLf & ex.Message)
-            Return Result (Of String).Failed(ex.Message)
+            End With
+
+            ' Realización del FT
+            'lbRegreso = goT24_Connection.registra_FT(goVistasT24_Database, datos("folio_unico"), gsFechaSistema_T24_Juliana, gsTablaTrabajo, icn, "SWF", loTrxMaster, loTrxDetailFT)
+            lbRegreso = goT24_Connection.registra_TRX(datos("folio_unico"), gsFechaSistema_T24_Juliana, goMW_TipoOperacion.tabla_trabajo, "SWF_IN", icn, goMW_TipoOperacion.T24_Operation_ID, loTrxMaster, loTrxDetailFT)
+            'If lbRegreso Then
+            '    'Registra_SPEI_Participantes(icn, datos)
+            '    actualiza_operacion(icn)
+            'End If
+
+            Return lbRegreso
+        Catch lexErrorReg202Vostros As Exception
+            write_Log("ERROR|" & tipoOperacion & ".T24_REGISTRO_VOSTROS|Se presenta exception: " & lexErrorReg202Vostros.ToString)
+            gexUltimaExcepcion = lexErrorReg202Vostros
         End Try
+        Return False
     End Function
-    
+
     Private Shared Function registra_SPEI(ByVal icn As String, ByRef datos As Dictionary(Of String, Object)) As Boolean
         Dim loSPEI_Database As MSSQL_Database
         Dim lrsDatos_SPEI As DbDataReader
@@ -275,7 +412,7 @@ Public Class MT_191
         lsConcepto = "FROM " & busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor")
 
         'Proceso para Generar la firma digital
-        If Not GeneraFirmaDigital(datos, liTipoPago, "TB_SRV_SWF_TRABAJO_MX", icn) Then
+        If Not GeneraFirmaDigital(datos, liTipoPago, "TB_SRV_SWF_TRABAJO", icn) Then
             Throw New Exception("Se presentó un error al generar la firma digital del folio: " & icn)
         End If
 
@@ -311,8 +448,17 @@ Public Class MT_191
         If liTipoPago <> 7 Then ' No enviar los parametros para Participante - Participante
             ' Nombre del beneficiario
             lsNomBeneficiario = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_banco_spei")  ' Nombre del banco beneficiario (por default)
-            If busca_valor_xml(datos("des_variables_xml"), "ben_int_cif") <> "" Then
-                lrsDatos = goTOMI_Database.Execute_Query("SELECT des_nombre FROM tb_srv_swf_cat_cif_datos WHERE cve_swift = '" & busca_valor_xml(datos("des_variables_xml"), "ben_int_cif") & "'")
+            Dim beneficiaryIdentifier = busca_valor_xml(datos("des_variables_xml"), "ben_int_cif")
+            Dim queryBankName = "SELECT des_nombre FROM tb_srv_swf_cat_cif_datos WHERE "
+            If beneficiaryIdentifier <> "" Then
+                If EsSWIFT(beneficiaryIdentifier) Then
+                    If beneficiaryIdentifier.Length = 8 Then ' El BIC tiene 8 caracteres entonces no tiene branch, se busca limpio y con <bic>XXX.
+                        queryBankName = queryBankName & "cve_swift='" & beneficiaryIdentifier & "XXX' OR " 
+                    End If
+                    lrsDatos = goTOMI_Database.Execute_Query(queryBankName & "cve_swift='" & beneficiaryIdentifier & "'") 
+                Else
+                    lrsDatos = goTOMI_Database.Execute_Query(queryBankName & "num_cif=" & beneficiaryIdentifier)
+                End If
                 If Not IsNothing(lrsDatos) Then
                     While lrsDatos.Read
                         lsNomBeneficiario = lrsDatos("des_nombre")
@@ -322,6 +468,25 @@ Public Class MT_191
                 End If
             End If
 
+            Dim orderingCustomerName = busca_valor_xml(datos("des_variables_xml"), "btmum_nombre_emisor")
+            Dim lpOp_nom_ord As DbParameter = loCmd.CreateParameter()
+            lpOp_nom_ord.ParameterName = "@op_nom_ord"
+            lpOp_nom_ord.DbType = DbType.String
+            lpOp_nom_ord.Size = 40
+            lpOp_nom_ord.Direction = ParameterDirection.Input
+            lpOp_nom_ord.Value = texto_SPEI(orderingCustomerName)
+            loCmd.Parameters.Add(lpOp_nom_ord)
+
+            Dim rawAccount = busca_valor_xml(datos("des_variables_xml"), "btmum_cta_vostro_emisor")
+            Dim orderingAccount = rawAccount.Replace("-", "") ' Se le quitan los guiones a la cuenta vostro.
+            Dim lpOp_cuenta_ord As DbParameter = loCmd.CreateParameter()
+            lpOp_cuenta_ord.ParameterName = "@op_cuenta_ord"
+            lpOp_cuenta_ord.DbType = DbType.String
+            lpOp_cuenta_ord.Size = 20
+            lpOp_cuenta_ord.Direction = ParameterDirection.Input
+            lpOp_cuenta_ord.Value = texto_SPEI(orderingAccount) 
+            loCmd.Parameters.Add(lpOp_cuenta_ord)
+            
             ' Parametro 4
             Dim lpOp_nom_ben As DbParameter = loCmd.CreateParameter()
             lpOp_nom_ben.ParameterName = "@op_nom_ben"
@@ -379,7 +544,7 @@ Public Class MT_191
 
         'Parametro 11
         Dim opFirmaDigital As String = String.Empty
-        lrsDatos = goTOMI_Database.Execute_Query("SELECT OP_FIRMA_DIG FROM TB_SRV_SWF_TRABAJO_MX WHERE NF_FOLIO = '" & icn & "'")
+        lrsDatos = goTOMI_Database.Execute_Query("SELECT OP_FIRMA_DIG FROM TB_SRV_SWF_TRABAJO WHERE NF_FOLIO = '" & icn & "'")
         If Not IsNothing(lrsDatos) Then
             While lrsDatos.Read
                 If Not IsDBNull(lrsDatos("OP_FIRMA_DIG")) Then
@@ -414,7 +579,7 @@ Public Class MT_191
             lrsDatos_SPEI = Nothing
             write_Log("INFO|registra_SPEI|Cadena_Regreso='" & lsCadena_Regreso & "'.")
         End If
-        loCmd = Nothing
+        
         '=================================================================================================================
         'TERMINA SP
         '=================================================================================================================
@@ -425,31 +590,5 @@ Public Class MT_191
         Else
             Return False
         End If
-    End Function
-    
-    Private Shared Function GetFT(rfk As String) As Result(Of String)
-            write_Log("INFO|MT_191.GetFT|A buscar FT para la comision.")
-            Dim query As String =
-                    "SELECT [T24_Ref] FROM [dbo].[tb_srv_swf_plan_trabajo_maestro] WITH (NOLOCK) WHERE [folio]=" &
-                    textoSQL(rfk) & " AND [tipo_operacion]='SWIFT_IN'"
-            Try
-                Using reader As DbDataReader = goTOMI_Database.Execute_Query(query)
-                    write_Log("INFO|MT_191.GetFT|Se ejecuto el query.")
-                    If IsNothing(reader) Then
-                        Return Result (Of String).Failed(String.Empty)
-                    End If
-
-                    If Not reader.Read() Then
-                        write_Log("INFO|MT_191.GetFT|No se encontró ningún FT asociado al MT-191.")
-                        Return Result (Of String).Success(String.Empty)
-                    End If
-
-                    Dim ft As String = If (IsDBNull(reader.Item(0)), String.Empty, reader.Item(0))
-                    Return Result (Of String).Success(ft) 
-                End Using
-            Catch ex As Exception
-                write_Log("ERROR|MT_191.GetFT|Se presenta la excepción: " & ex.Message)
-                Return Result (Of String).Failed(ex.Message)
-            End Try
     End Function
 End Class
