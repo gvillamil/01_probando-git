@@ -1,946 +1,2734 @@
-using Aplicacion.DTOs;
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using Aplicacion.Modelos;
-using Aplicacion.Servicios;
-using MUFG_T24.Aplicacion.Conversiones;
 using MUFG_T24.Comunes;
-using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
 using MUFG_T24.Enums_utilidades;
-using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Inicializacion_dtos;
 using MUFG_T24.Interfaces_utilidades;
 using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
 using System;
-using System.Collections.Generic;
-using System.Linq;
+using System.Data;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Aplicacion
+namespace MUFG_T24.Inicializacion_utilidades
 {
     /// <summary>
-    /// Clase que contiene el flujo principal del procesamiento (equivalente a Definiciones).
+    /// Implementación de control operativo de servicio (estado de proceso/puerto en BD).
+    /// No administra el arranque o detención de servicios Windows.
     /// </summary>
-    public class OperacionServicio
+    public class ControlServicio : RepositorioMaestro, IControlServicio
     {
-        private readonly Configuracion _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly IAlertas _alertas;      
-        private readonly IParametrizacion _parametrizacion;
-        private readonly IRecuperacionDatos<OperacionDTO> _recuperacionDatos;
-        private readonly IDetallesCiseSpidDao _detallesCiseSpidDao;
-        private readonly ENT_SPID _entSpid;
-        private readonly ENT_SPID_PART _entSpidPart;
-        private readonly EstadoHorarioOperacion _estadoHorarioOperacion;
-
         /// <summary>
         /// Constructor.
         /// </summary>
-        public OperacionServicio(Configuracion configuracion, IControlServicio controlServicio, IAlertas alertas, IParametrizacion parametrizacion, IRecuperacionDatos<OperacionDTO> recuperacionDatos, IDetallesCiseSpidDao detallesCiseSpidDao, ENT_SPID entSpid, ENT_SPID_PART entSpidPart, EstadoHorarioOperacion estadoHorarioOperacion)
+        public ControlServicio()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        { }
+
+        /// <summary>
+        /// Marca estado operativo del servicio en BD.
+        /// Con valores (pid/proceso/display) marca servicio operando; con valores nulos libera el estado al apagar.
+        /// </summary>
+        public Task<bool> MarcarPuertoEnUsoAsync(int? pid, string nombreProceso, string nombreDisplay, string nombreServicio)
         {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _alertas = alertas;
-            _parametrizacion = parametrizacion;
-            _recuperacionDatos = recuperacionDatos;
-            _detallesCiseSpidDao = detallesCiseSpidDao;
-            _entSpid = entSpid;
-            _entSpidPart = entSpidPart;
-            _estadoHorarioOperacion = estadoHorarioOperacion;
+            return MarcarPuertoEnUsoAsync(pid, nombreProceso, nombreDisplay, nombreServicio, CancellationToken.None);
         }
 
         /// <summary>
-        /// Control del flujo principal del procesamiento.
+        /// Marca estado operativo del servicio en BD.
+        /// Con valores (pid/proceso/display) registra servicio en ejecución.
+        /// Con valores nulos (pid/proceso/display) registra servicio detenido y limpia identidad operativa.
         /// </summary>
-        public async Task<bool> EjecutarProcedimientosAsync(CancellationToken ct)
+        /// <param name="pid">PID del proceso en ejecución o null durante apagado.</param>
+        /// <param name="nombreProceso">Nombre del proceso en ejecución o null durante apagado.</param>
+        /// <param name="nombreDisplay">DisplayName del servicio en ejecución o null durante apagado.</param>
+        /// <param name="nombreServicio">Clave técnica del servicio a actualizar.</param>
+        /// <param name="ct">Token de cancelación.</param>
+        public async Task<bool> MarcarPuertoEnUsoAsync(int? pid, string nombreProceso, string nombreDisplay, string nombreServicio, CancellationToken ct)
         {
-            bool ejecucionActualizada = false;
+            
             try
             {
                 ct.ThrowIfCancellationRequested();
-
-                //Marca la ejecución del servicio...
-                await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio, ct);
-                ejecucionActualizada = true;
-
-                //Obtiene los parámetros del sistema...
-                _configuracion.FechaSistema = await _parametrizacion.ObtenerFechaSistemaAsync(ct);
-                _configuracion.EsDiaHabil = await _controlServicio.EsDiaHabil(ct);
-                _configuracion.ParametrosSistema = await _parametrizacion.ObtenerParametrosSistemaAsync(ConstantesServicio.ParametrosSistema, ct);
-
-                //Valida que sea día hábil...
-                if (!_configuracion.EsDiaHabil.Value)
+                var resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(ConstantesProcedimientosMUFG.UspActualizarEnUso, cmd =>
                 {
-                    Config.EscribirLog("ERROR|Ejecuta_Procedimientos|Hoy es un día inhábil.");
-                    await _alertas.InsertarAlerta(new AlertaDTO()
-                    {
-                        Folio = null,
-                        TipoOPeracion = null,
-                        Servicio = _configuracion.NombreServicio,
-                        ClaveAviso = ConstantesClaveAviso.Error,
-                        Descipcion = "Hoy es un día inhábil",
-                        PId = _configuracion.Pid.Value,
-                        NombreProceso = _configuracion.NombreProceso,
-                        Exception = new Exception($"Hoy es un día inhábil.")
-                    }, ct);
-                    return false;
-                }
-
-                //Valida el horario de operación...
-                TimeSpan timeHoraSistema = _parametrizacion.ObtenerHoraSistema();
-                string horaSistema = timeHoraSistema.ToString(@"hh\:mm");
-                TimeSpan horaInicioOperacion = ConversionesComunes.ParseTimeSpanRequerido(_configuracion.ParametrosSistema[ConstantesGenerales.HoraOPInicio], ConstantesGenerales.HoraOPInicio);
-                TimeSpan horaFinOperacion = ConversionesComunes.ParseTimeSpanRequerido(_configuracion.ParametrosSistema[ConstantesServicio.HoraSpidCepFin], ConstantesServicio.HoraSpidCepFin);
-                if (timeHoraSistema >= horaInicioOperacion
-                    && timeHoraSistema <= horaFinOperacion)
-                {
-                    if (!_estadoHorarioOperacion.EnHorarioOperacion)
-                    {
-                        _estadoHorarioOperacion.EnHorarioOperacion = true;
-                        Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Inicio horario de operaciones, HoraSistema='{horaSistema}'.");
-                    }
-                }
-                else
-                {
-                    if (_estadoHorarioOperacion.EnHorarioOperacion)
-                    {
-                        _estadoHorarioOperacion.EnHorarioOperacion = false;
-                        Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Termina horario de operaciones, HoraSistema='{horaSistema}'");
-                    }
-                }
-
-                if (!_estadoHorarioOperacion.EnHorarioOperacion)
-                {
-                    Config.EscribirLog("ERROR|Ejecuta_Procedimientos|El servicio está fuera de horario.");
-                    await _alertas.InsertarAlerta(new AlertaDTO()
-                    {
-                        Folio = null,
-                        TipoOPeracion = null,
-                        Servicio = _configuracion.NombreServicio,
-                        ClaveAviso = ConstantesClaveAviso.Error,
-                        Descipcion = "El servicio está fuera de horario",
-                        PId = _configuracion.Pid.Value,
-                        NombreProceso = _configuracion.NombreProceso,
-                        Exception = new Exception($"El servicio '{_configuracion.NombreServicio}' está fuera de horario.")
-                    }, ct);
-                    return false;
-                }
-
-                //Recupera los datos de procesamiento...
-                Task<IEnumerable<OperacionDTO>> operacionesSpidTask = _recuperacionDatos.RecuperarDatosAsync(ct);
-                Task<List<OperacionesParticipantesDto>> operacionesParticipantesTask = _detallesCiseSpidDao.RecuperarRecibidasParticipantesAsync(ct);
-                await Task.WhenAll(operacionesSpidTask, operacionesParticipantesTask);
-
-                List<Operacion> operaciones = new List<Operacion>();
-                List<OperacionDTO> operacionesSpid = operacionesSpidTask.Result.ToList();
-                foreach (OperacionDTO operacionSpid in operacionesSpid)
-                {
-                    operaciones.Add(new Operacion()
-                    {
-                        folio = operacionSpid.folio,
-                        tipo_operacion = operacionSpid.tipo_operacion
-                    });
-                }
-
-                // Obtiene los paquetes SPID recibidos Participante (tp_clave 2 y 3)...
-                List<OperacionesParticipantesDto> operacionesParticipantes = operacionesParticipantesTask.Result;
-                foreach (OperacionesParticipantesDto operacionParticipante in operacionesParticipantes)
-                {
-                    operaciones.Add(new Operacion()
-                    {
-                        folio = (long)operacionParticipante.op_clave,
-                        tipo_operacion = ConstantesServicio.EntSpidPart
-                    });
-                }
-
-                //Si hay más de un registro...
-                if (operaciones.Count > 0)
-                {
-                    Config.EscribirLog($"INFO|procesaOperacion|{operaciones.Count} operaciones para generar CDA");
-                }
-
-                //Realiza un procesamiento diferente de acuerdo al tipo de operación...
-                foreach (Operacion operacion in operaciones)
-                {
-                    try
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        bool resultado = false;
-
-                        Config.EscribirLog($"INFO|Ejecuta_Procedimientos|***** TipoOperacion:{operacion.tipo_operacion}, folio:{operacion.folio} *****");
-                        switch (operacion.tipo_operacion)
-                        {
-                            case ConstantesServicio.EntSpid:
-                                resultado = await _entSpid.ProcesarOperacionCISEAsync(operacion.folio.ToString(), ct);
-                                break;
-                            case ConstantesServicio.EntSpidPart:
-                                resultado = await _entSpidPart.ProcesarOperacionCISEAsync(operacion.folio.ToString(), ct);
-                                break;
-                            default:
-                                throw new Exception($"Tipo de operación desconocida:'{operacion.tipo_operacion}'");
-                        }
-
-                        if (resultado)
-                            Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Se termina procesamiento de folio: {operacion.folio}");
-                        else
-                            Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Error durante el procesamiento del folio: {operacion.folio}");
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Error en la ejecución del folio {operacion.folio}, excepción: {ex}");
-                        await _controlServicio.ActualizaErrorProceso(new ProcesoDTO()
-                        {
-                            Folio = operacion.folio.ToString(),
-                            TipoOperacion = operacion.tipo_operacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            Excepcion = ex,
-                            PId = _configuracion.Pid.Value
-                        }, ct);
-                        await _alertas.InsertarAlerta(new AlertaDTO()
-                        {
-                            Folio = operacion.folio.ToString(),
-                            TipoOPeracion = operacion.tipo_operacion,
-                            Servicio = _configuracion.NombreServicio,
-                            ClaveAviso = ConstantesClaveAviso.Critico,
-                            Descipcion = ex.Message,
-                            PId = _configuracion.Pid.Value,
-                            NombreProceso = _configuracion.NombreProceso,
-                            Exception = ex
-                        }, ct);
-                    }
-                }
-
-                return true;
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@giPID", pid.HasValue ? (object)pid.Value : DBNull.Value));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsProcessName", (object)nombreProceso ?? DBNull.Value));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsDisplayName", (object)nombreDisplay ?? DBNull.Value));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsNombre_Servicio", nombreServicio));
+                }, ct);
+                return resultado.Exito;
             }
             catch (OperationCanceledException)
             {
-                Config.EscribirLog("INFO|Ejecuta_Procedimientos|Ejecución cancelada.");
+                throw;
             }
-            catch (Exception ex) 
+            catch(Exception ex)
             {
-                Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Se presenta exception: {ex}");
-                await _alertas.InsertarAlerta(new AlertaDTO()
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|onStop|No se pudo marcar en base de datos el puerto como disponible: {ex}");
+                Alertas alerta = new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null);
+                await alerta.InsertarAlerta(new AlertaDTO()
                 {
                     Folio = null,
                     TipoOPeracion = null,
-                    Servicio = _configuracion.NombreServicio,
+                    Servicio = nombreServicio,
                     ClaveAviso = ConstantesClaveAviso.Critico,
-                    Descipcion = null,
-                    PId = _configuracion.Pid.Value,
-                    NombreProceso = _configuracion.NombreProceso,
+                    Descipcion = "No se pudo marcar en base de datos el puerto como disponible",
+                    PId = pid.GetValueOrDefault(),
+                    NombreProceso = nombreProceso,
                     Exception = ex
                 }, ct);
-            }
-            finally
-            {
-                if (ejecucionActualizada)
-                {
-                    try
-                    {
-                        await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|No fue posible actualizar terminación del servicio: {ex}");
-                    }
-                }
-            }
-            return false;
-        }
-
-    }
-}
-
-using Aplicacion.DTOs;
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using MUFG_T24.Comunes;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Servicios
-{
-    /// <summary>
-    /// Clase que contiene el flujo principal del procesamiento ENT_SPID_PART.
-    /// </summary>
-    public class ENT_SPID_PART
-    {
-        private readonly Configuracion _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly IDetallesCiseDao _detallesCiseDao;
-        private readonly IDetallesCiseSpidDao _detallesCiseSpidDao;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public ENT_SPID_PART(Configuracion configuracion, IControlServicio controlServicio, IDetallesCiseDao detallesCiseDao, IDetallesCiseSpidDao detallesCiseSpidDao)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _detallesCiseDao = detallesCiseDao;
-            _detallesCiseSpidDao = detallesCiseSpidDao;
-        }
-
-        /// <summary>
-        /// Flujo principal de ENT_SPID_PART: orquestador.
-        /// </summary>
-        public async Task<bool> ProcesarOperacionCISEAsync(string folio, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            const string tipoOperacion = ConstantesServicio.EntSpidPart;
-
-            //Inicia el monitoreo del proceso...
-            await _controlServicio.IniciaProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.ServicioPlan,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value,
-                NombreProceso = _configuracion.NombreProceso
-            }, ct);
-
-            bool ordenPagoInsertada = await InsertarOrdenPagoAsync(folio, ct);
-            if (!ordenPagoInsertada)
-                return false;
-
-            //Termina el proceso...
-            await _controlServicio.TerminaProceso(new ProcesoDTO()
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.ServicioPlan,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            }, ct);
-            await _controlServicio.TerminaProceso(new ProcesoDTO()
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.ServicioPlan,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProcesoFin,
-                PId = _configuracion.Pid.Value
-            }, ct);
-            await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct);
-            await _detallesCiseDao.MarcarOperacionProcesadaAsync(folio, tipoOperacion, ct);
-
-            Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Se termina el procesamiento procesaOperacion_CISE - ent_spid_part -  de la operación folio={folio}");
-
-            return true;
-        }
-
-        /// <summary>
-        /// Inserta la orden de pago.
-        /// </summary>
-        internal async Task<bool> InsertarOrdenPagoAsync(string folio, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            Config.EscribirLog($"INFO|procesaOperacion|Preparando procesaOperacion_CISE - entspid_part  - envio a CEP-SPID del folio: {folio}.");
-
-            //Almacena la orden de pago...
-            OrdenPagoDto ordenPago = await _detallesCiseSpidDao.InsertarOrdenPagoAsync(folio, ct);
-
-            Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Se ejecutó procedimiento sp_InterfaceMW_SPID_CEP . '{folio}");
-
-            //Si no se encontro información del folio...
-            if (ordenPago is null)
-                throw new Exception($"No encontró el CDA teoricamente recienprocesaOperacion_CISE  insertado folio={folio}");
-
-            //Si el resultado de la inserción es diferente de 0, se considera un error...
-            if (ordenPago.Resultado != 0)
-            {
-                Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|Error EN sp_InterfaceMW_SPID_CEPo.  FOLIO ={folio}");
-                return false;
-            }
-
-            return true;
-        }
-
-    }
-}
-
-using Aplicacion.DTOs;
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using MUFG_T24.Comunes;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Servicios
-{
-    /// <summary>
-    /// Clase que contiene el flujo principal del procesamiento ENT_SID.
-    /// </summary>
-    public class ENT_SPID
-    {
-        private readonly Configuracion _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly IDetallesCiseDao _detallesCiseDao;
-        private readonly IDetallesCiseSpidDao _detallesCiseSpidDao;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public ENT_SPID(Configuracion configuracion, IControlServicio controlServicio, IDetallesCiseDao detallesCiseDao, IDetallesCiseSpidDao detallesCiseSpidDao)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _detallesCiseDao = detallesCiseDao;
-            _detallesCiseSpidDao = detallesCiseSpidDao;
-        }
-
-        /// <summary>
-        /// Flujo principal de ENT_SPID: orquestador.
-        /// </summary>
-        public async Task<bool> ProcesarOperacionCISEAsync(string folio, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            const string tipoOperacion = ConstantesServicio.EntSpid;
-
-            //Inicia el monitoreo del proceso...
-            await _controlServicio.IniciaProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.ServicioPlan,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value,
-                NombreProceso = _configuracion.NombreProceso
-            }, ct);
-
-            //Obtiene los datos T24 del folio...
-            DatosFolioDto datosFolio = await ObtenerDatosFolioAsync(folio, ct);
-
-            //Inserta la orden de pago...
-            bool ordenPagoInsertada = await InsertarOrdenPagoAsync(folio, datosFolio, ct);
-            if (!ordenPagoInsertada)
-                return false;
-
-            //Termina el proceso...
-            await _controlServicio.TerminaProceso(new ProcesoDTO()
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.ServicioPlan,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            }, ct);
-            await _controlServicio.TerminaProceso(new ProcesoDTO()
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.ServicioPlan,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProcesoFin,
-                PId = _configuracion.Pid.Value
-            }, ct);
-            await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct);
-            await _detallesCiseDao.MarcarOperacionProcesadaAsync(folio, tipoOperacion, ct);
-
-            Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Se termina el procesamiento procesaOperacion_CISE - ent_spid -  de la operación folio={folio}");
-
-            return true;
-        }
-
-        /// <summary>
-        /// Obtiene los datos T24 del folio.
-        /// </summary>
-        internal async Task<DatosFolioDto> ObtenerDatosFolioAsync(string folio, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            Config.EscribirLog($"INFO|procesaOperacion|Buscando información en SPEI del folio: {folio}.");
-
-            DatosFolioDto datosFolio = await _detallesCiseDao.ObtieneDatosFolioAsync(folio, ct);
-
-            bool tieneFechaHoraT24 = datosFolio != null
-                && !string.IsNullOrWhiteSpace(datosFolio.fechaT24)
-                && !string.IsNullOrWhiteSpace(datosFolio.horaT24);
-
-            //Si no se recupera la fecha y hora de autorización T24...
-            if (tieneFechaHoraT24)
-                Config.EscribirLog($"INFO|ProcesaOperacion_CISE|DATOS T24 {datosFolio.fechaT24} --> {datosFolio.horaT24}");
-            else
-                Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|No se recupera Fecha y Hora Autoriza T24 en SPEI del folio: {folio}.");
-            if (!tieneFechaHoraT24)
-                throw new Exception("No se encontro el detalle de la operación");
-
-            return datosFolio;
-        }
-
-        /// <summary>
-        /// Inserta la orden de pago en CEP-SPID.
-        /// </summary>
-        internal async Task<bool> InsertarOrdenPagoAsync(string folio, DatosFolioDto datosFolio, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            Config.EscribirLog($"INFO|procesaOperacion|Preparando procesaOperacion_CISE - ent_spid - envio a CEP-SPID del folio: {folio}.");
-
-            //Inserta la orden de pago...
-            OrdenPagoDto ordenPago = await _detallesCiseSpidDao.InsertarOrdenPagoAsync(folio, ct, datosFolio.fechaT24, datosFolio.horaT24);
-
-            Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Se ejecutó procedimiento sp_InterfaceMW_SPID_CEP . '{folio}");
-
-            //Si no se recupera el CDA teoricamente recien insertado...
-            if (ordenPago is null)
-                throw new Exception($"No encontró el CDA teoricamente recienprocesaOperacion_CISE  insertado folio={folio}");
-
-            ///Si el resultado es diferente de 0, significa que hubo un error en la inserción de la orden de pago...
-            if (ordenPago.Resultado != 0)
-            {
-                Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|Error EN sp_InterfaceMW_SPID_CEPo.  FOLIO ={folio}");
-                return false;
-            }
-
-            return true;
-        }
-
-    }
-}
-
-﻿namespace Aplicacion.Enums
-{
-    /// <summary>
-    /// Clase que contiene las constantes a modo de enumerador.
-    /// Por compatibilidad: NET Framework 4.8 no permite enumeradores strings.
-    /// </summary>
-    public static class ConstantesServicio
-    {
-        //Constantes de parametrización...
-        public const string ParametrosSistema = "'HORA_OP_INICIO','HORA_SPID_CEP_FIN','MAIL_SOCKET_CEP_TO'";
-        public const string HoraSpidCepFin = "HORA_SPID_CEP_FIN";
-
-        //Constantes de lógica...
-        public const string EntSpid = "ENT_SPID";
-        public const string EntSpidPart = "ENT_SPID_PART";
-        public const string ND = "ND";
-
-        //Constantes de SQL...
-        public const string uspObtenerRegistrosCda = "usp_SpidGenCda_ObtenerRegistrosCda";
-        public const string uspObtenerParticipantes = "sp_InterfaceTOMI_SPID_Recibidas_Participantes";
-        public const string spInterfaceMwSpidCep = "sp_InterfaceMW_SPID_CEP";
-        public const string uspObtenerDatosFolio = "usp_SpidGenCda_ObtenerDatosFolio";
-        public const string uspMarcarOperacionProcesada = "usp_SpidGenCda_MarcarOperacionProcesada";
-
-    }
-}
-
-﻿using Aplicacion.DTOs;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Interfaces
-{
-    /// <summary>
-    /// Interfaz de clase DAO.
-    /// </summary>
-    public interface IDetallesCiseDao
-    {
-        Task<DatosFolioDto> ObtieneDatosFolioAsync(string folio, CancellationToken ct);
-        Task<bool> MarcarOperacionProcesadaAsync(string folio, string tipoOperacion, CancellationToken ct);
-    }
-}
-
-using Aplicacion.DTOs;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Interfaces
-{
-    /// <summary>
-    /// Interfaz de clase DAO.
-    /// </summary>
-    public interface IDetallesCiseSpidDao
-    {
-        Task<List<OperacionesParticipantesDto>> RecuperarRecibidasParticipantesAsync(CancellationToken ct);
-        Task<OrdenPagoDto> InsertarOrdenPagoAsync(string folio, CancellationToken ct, string fechaT24 = null, string horaT24 = null);
-    }
-}
-
-﻿using Aplicacion.DTOs;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Interfaces
-{
-    /// <summary>
-    /// Interfaz de clase DAO.
-    /// </summary>
-    public interface IRecuperacionDatos<Tipo>
-    {
-        Task<IEnumerable<OperacionDTO>> RecuperarDatosAsync(CancellationToken ct);
-    }
-}
-
-using Aplicacion.DTOs;
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using MUFG_T24.Comunes;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.Inicializacion_dtos;
-using MUFG_T24.Repositorios;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Infraestructura.Repositorios
-{
-    /// <summary>
-    /// Clase de recuperación de datos detalle de InterfacesT24.
-    /// </summary>
-    public class DetallesCiseDao : RepositorioMaestro, IDetallesCiseDao
-    {
-        Configuracion _configuracion;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public DetallesCiseDao(Configuracion configuracion)
-            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
-        {
-            _configuracion = configuracion;
-        }
-
-        /// <summary>
-        /// Obtiene los datos del folio de la operación.
-        /// </summary>
-        public async Task<DatosFolioDto> ObtieneDatosFolioAsync(string folio, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var resultado = await EjecutarStoredProcedureQuery<DatosFolioDto>(ConstantesServicio.uspObtenerDatosFolio, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaSistema", _configuracion.FechaSistema));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", folio));
-            }, ct);
-            return resultado.Data.FirstOrDefault();
-        }
-
-        /// <summary>
-        /// Marca la operacion como PROCESADA en el plan de trabajo maestro.
-        /// </summary>
-        public async Task<bool> MarcarOperacionProcesadaAsync(string folio, string tipoOperacion, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(ConstantesServicio.uspMarcarOperacionProcesada, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", folio));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", tipoOperacion));
-            }, ct, validarAfectacion: false);
-            return resultado.Afecto == true;
-        }
-
-    }
-}
-
-using Aplicacion.DTOs;
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using MUFG_T24.Comunes;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.Repositorios;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-
-
-namespace Infraestructura.Servicios
-{
-    /// <summary>
-    /// Clase de recuperación de datos detalle de SPID.
-    /// </summary>
-    public class DetallesCiseSpidDao : RepositorioMaestro, IDetallesCiseSpidDao
-    {
-        private readonly Configuracion _configuracion;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public DetallesCiseSpidDao(Configuracion configuracion)
-            : base(BasedatosProveedor.SqlServer, NombreBasedatos.SPID, null, null)
-        {
-            _configuracion = configuracion;
-        }
-
-        /// <summary>
-        /// Obtiene los paquetes SPID recibidos Participante (tp_clave 2 y 3).
-        /// </summary>
-        public async Task<List<OperacionesParticipantesDto>> RecuperarRecibidasParticipantesAsync(CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var resultado = await EjecutarStoredProcedureQuery<OperacionesParticipantesDto>(ConstantesServicio.uspObtenerParticipantes, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_fecha_oper", Convert.ToInt32(_configuracion.FechaSistema)));
-            }, ct, commandTimeout: _configuracion.MaxTimeout);
-            return resultado.Data;
-        }
-
-        /// <summary>
-        /// Inserta la orden de pago ejecutando el procedimiento legacy de SPID.
-        /// </summary>
-        public async Task<OrdenPagoDto> InsertarOrdenPagoAsync(string folio, CancellationToken ct, string fechaT24 = null, string horaT24 = null)
-        {
-            ct.ThrowIfCancellationRequested();
-            var resultado = await EjecutarStoredProcedureQuery<OrdenPagoDto>(ConstantesServicio.spInterfaceMwSpidCep, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_clave", Convert.ToInt32(folio)));
-
-                if (!string.IsNullOrWhiteSpace(fechaT24))
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaT24", Convert.ToInt32(fechaT24)));
-
-                if (!string.IsNullOrWhiteSpace(horaT24))
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@HoraT24", horaT24));
-            }, lector => new OrdenPagoDto()
-            {
-                Resultado = lector.FieldCount > 0 && lector.GetValue(0) != DBNull.Value ? Convert.ToInt32(lector.GetValue(0)) : 0,
-                ErrorMessage = lector.FieldCount > 1 && lector.GetValue(1) != DBNull.Value ? Convert.ToString(lector.GetValue(1)) : null,
-                ErrorNumber = lector.FieldCount > 2 && lector.GetValue(2) != DBNull.Value ? Convert.ToInt32(lector.GetValue(2)) : (int?)null
-            }, ct, commandTimeout: _configuracion.MaxTimeout);
-            return resultado.Data.FirstOrDefault();
-        }
-
-    }
-}
-
-using Aplicacion.DTOs;
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using MUFG_T24.Comunes;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.Repositorios;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Infraestructura.Repositorios
-{
-    /// <summary>
-    /// Clase de recuperación de datos principales.
-    /// </summary>
-    public class SondeoDao : RepositorioMaestro, IRecuperacionDatos<OperacionDTO>
-    {
-        private readonly Configuracion _configuracion;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public SondeoDao(Configuracion configuracion)
-            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null) 
-        {
-            _configuracion = configuracion;
-        }
-
-        /// <summary>
-        /// Obtiene los registros con los que realiza su operación.
-        /// </summary>
-        public async Task<IEnumerable<OperacionDTO>> RecuperarDatosAsync(CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var resultado = await EjecutarStoredProcedureQuery<OperacionDTO>(ConstantesServicio.uspObtenerRegistrosCda, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@ListaTiposOperacion", _configuracion.ListaTipos));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@AliasProceso", _configuracion.AliasProceso));
-            }, ct);
-            return resultado.Data;
-        }
-
-    }
-}
-
-using Aplicacion;
-using Aplicacion.DTOs;
-using Aplicacion.Interfaces;
-using Aplicacion.Servicios;
-using Infraestructura.Repositorios;
-using Infraestructura.Servicios;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Encriptacion;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.ControladorServicios_Utilidades;
-using MUFG_T24.Enums_utilidades;
-using MUFG_T24.Inicializacion_utilidades;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Logeo_utilidades;
-using MUFG_T24.Modelos;
-using SimpleInjector;
-using SimpleInjector.Lifestyles;
-using System;
-using System.Diagnostics;
-using System.ServiceProcess;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace SPID_CEP_GEN_CDA
-{
-    /// <summary>
-    /// Clase principal del servicio Windows (presentación).
-    /// </summary>
-    public partial class ServiceHost : WindowsServiceHostBase
-    {
-        private const double DefaultTimerIntervalMs = 10000;
-
-        private Container _containerDI;
-        private Configuracion _configuracionBase;
-
-        protected override string NombreServicioLog => NombreServicio.SPEI_CEP_ENV_CDA.ToString();
-        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
-        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? DefaultTimerIntervalMs;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public ServiceHost() { }
-
-        /// <summary>
-        /// Realiza la inyección y establece un timer
-        /// que ejecutará su delegado por tick del intervalo.
-        /// </summary>
-        protected override void Inicializacion(string[] args, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            //Realiza la configuracion del contenedor DI...
-            _containerDI = new SimpleInjector.Container();
-            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
-            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
-            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
-            _containerDI.Register<IControlServicio, ControlServicio>();
-            _containerDI.Register<IParametrizacion, Parametrizacion>();
-
-            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
-            _configuracionBase = new Configuracion();
-
-            //Inicializa la obtención de la configuración general y el logging...
-            {
-                ConfiguracionEncriptadaHelper.Inicializar();
-                ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.SPEI_CEP_GEN_CDA.ToString());
-                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
-                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
-                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
-                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
-                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
-                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
-                _configuracionBase.MaxTimeout = servicioMainConfiguracion.MaxTimeout;
-
-                _configuracionBase.AliasProceso = servicioMainConfiguracion.AliasProceso;
-                _configuracionBase.AliasProcesoFin = servicioMainConfiguracion.AliasProcesoFin;
-                _configuracionBase.ServicioPlan = servicioMainConfiguracion.ServicioPlan;
-                _configuracionBase.MonedaDefault = servicioMainConfiguracion.MonedaDefault;
-                _configuracionBase.ListaTipos = servicioMainConfiguracion.ListaTipos;
-
-                Logging.Init(_configuracionBase.PathLog, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
-            }
-
-            //Registra la configuracion...
-            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
-            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
-
-            //Registra los componentes...
-            _containerDI.Register<IRecuperacionDatos<OperacionDTO>, SondeoDao>();
-            _containerDI.Register<IDetallesCiseDao, DetallesCiseDao>();
-            _containerDI.Register<IDetallesCiseSpidDao, DetallesCiseSpidDao>();
-            _containerDI.Register<OperacionServicio>();
-            _containerDI.Register<ENT_SPID>();
-            _containerDI.Register<ENT_SPID_PART>();
-
-            _containerDI.Verify();
-        }
-
-        /// <summary>
-        /// Realiza la obtención inicial de parámetros (una sola vez).
-        /// </summary>
-        protected override async Task ParametrizacionesAsync(CancellationToken ct)
-        {
-            try
-            {
-                //Obtiene el proceso actual...
-                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
-                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, ct).ConfigureAwait(false);
-
-                //Marca el servicio en uso...
-                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
-                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|ParametrizacionesAsync|{ex}");
                 throw;
             }
         }
 
         /// <summary>
-        /// Ejecuta el funcionamiento principal del servicio en cada tick.
-        /// </summary>   
-        protected override async Task OnTimerAsync(CancellationToken ct)
+        /// Marca una operación como error por fecha pasada.
+        /// Uso mínimo cuando solo se conoce el folio.
+        /// </summary>
+        public async Task<bool> MarcarErrorFechaPasada(long folio, CancellationToken ct = default)
         {
-            try
-            {
-                //Ejecuta el procedimiento principal del servicio...
-                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+            ct.ThrowIfCancellationRequested();
+
+            var resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(
+                "dbo.usp_despachador_MarcarErrorFechaPasada",
+                cmd =>
                 {
-                    var operacionServicio = _containerDI.GetInstance<OperacionServicio>();
-                    await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", folio));
+                }, ct);
+
+            return resultado.Exito;
+        }
+
+        public Task EsperarTareaActivaAsync(Task task, string descripcion, CancellationToken ct)
+            => WindowsServiceHostBase.EsperarTareaActivaWrapperAsync(task, descripcion, ct);
+
+        public new Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio)
+            => base.ActualizaEJecucion(nombreServicio);
+
+        public new Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio, CancellationToken ct)
+            => base.ActualizaEJecucion(nombreServicio, ct);
+
+        public new Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso)
+            => base.ActualizaErrorProceso(proceso);
+
+        public new Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso, CancellationToken ct)
+            => base.ActualizaErrorProceso(proceso, ct);
+
+        public new Task<StoredProcedureResult> ActualizaErrorProcesoSwift(ProcesoDTO proceso)
+            => base.ActualizaErrorProcesoSwift(proceso);
+
+        public new Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio)
+            => base.ActualizaTerminacion(nombreServicio);
+
+        public new Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio, CancellationToken ct)
+            => base.ActualizaTerminacion(nombreServicio, ct);
+
+        public new Task<DataTable> CalypsoConsultaLimiteLineas(string cdl = "")
+            => base.CalypsoConsultaLimiteLineas(cdl);
+
+        public new bool CalypsoDeserializarClase(string xml, ref object objeto, TipoSerializacion tipoSerializacion, bool removerDataTag, string nombreNodoRoot = "")
+            => base.CalypsoDeserializarClase(xml, ref objeto, tipoSerializacion, removerDataTag, nombreNodoRoot);
+
+        public new Task<string> CalypsoObtenerNombreCorto(string cdl)
+            => base.CalypsoObtenerNombreCorto(cdl);
+
+        public new string CalypsoSerializarClase(object objeto, TipoSerializacion tipoSerializacion, bool RemoveDiacritics, bool AddNodeTag, EncodingEnum encodingEnum = EncodingEnum.Encode_Default, string rootNodeName = "")
+            => base.CalypsoSerializarClase(objeto, tipoSerializacion, RemoveDiacritics, AddNodeTag, encodingEnum, rootNodeName);
+
+        public new Task<DataTable> EjecutarEsquemaProcedimientoAlmacenado(string nombreSp, Action<IDbCommand> parametrosConfig = null)
+            => base.EjecutarEsquemaProcedimientoAlmacenado(nombreSp, parametrosConfig);
+
+        public new Task<bool> EsDiaHabil()
+            => base.EsDiaHabil();
+
+        public new Task<bool> EsDiaHabil(CancellationToken ct)
+            => base.EsDiaHabil(ct);
+
+        public new Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso)
+            => base.IniciaProceso(proceso);
+
+        public new Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso, CancellationToken ct)
+            => base.IniciaProceso(proceso, ct);
+
+        public new Task<StoredProcedureResult> IniciaProcesoSwift(ProcesoDTO proceso)
+            => base.IniciaProcesoSwift(proceso);
+
+        public new Task<string> ObtenerFolioMaestro(string folio, string tipoOperacion)
+            => base.ObtenerFolioMaestro(folio, tipoOperacion);
+
+        public new Task<string> ObtenerFtSpei(string folio)
+            => base.ObtenerFtSpei(folio);
+
+        public new Task<string> ObtenerUltimoProceso(ProcesoDTO proceso)
+            => base.ObtenerUltimoProceso(proceso);
+
+        public new Task<string> ObtieneDisplayName(int procesoId)
+            => base.ObtieneDisplayName(procesoId);
+
+        public new Task<string> ObtieneUltimoProcesoSwift(ProcesoDTO proceso)
+            => base.ObtieneUltimoProcesoSwift(proceso);
+
+        public new Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso)
+            => base.TerminaProceso(proceso);
+
+        public new Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso, CancellationToken ct)
+            => base.TerminaProceso(proceso, ct);
+
+        public new Task<StoredProcedureResult> TerminaProcesoSwift(ProcesoDTO proceso)
+            => base.TerminaProcesoSwift(proceso);
+
+    }
+}
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Conexiones;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using Oracle.ManagedDataAccess.Client;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.Common;
+using System.Data.SqlClient;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Management;
+using System.Reflection;
+using System.Runtime.Serialization;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Xml;
+using System.Xml.Serialization;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+
+namespace MUFG_T24.Repositorios
+{
+    /// <summary>
+    /// Clase Maestro encargada de ejecutar las transacciones que se usaran en todos los repositorios
+    /// </summary>
+    public abstract class RepositorioMaestro
+    {
+        private sealed class ResultadoStoredProcedureException : Exception
+        {
+            public ResultadoStoredProcedureException(string message)
+                : base(message) { }
+        }
+
+        protected readonly IBasedatosConexion basedatosConexion;
+        protected readonly IBasedatosConexion basedatosConexionVistasT24;
+
+        /// <summary>
+        /// Inicializa una nueva instancia de RepositorioMaestro.
+        /// </summary>
+        protected RepositorioMaestro(
+            BasedatosProveedor proveedor,
+            NombreBasedatos nombreBasedatos,
+            BasedatosProveedor? proveedorVistasT24,
+            NombreBasedatos? nombreBasedatosVistasT24)
+        {
+            ConfiguracionEncriptadaHelper.Inicializar();
+            //EncriptarArchivoConfiguracion();
+            //ConexionBasedatosFactory.ObtenerDatosGenerales("Bandera");
+            this.basedatosConexion = ConexionBasedatosFactory.CrearConexion(proveedor, nombreBasedatos);
+            if (proveedorVistasT24 != null || nombreBasedatosVistasT24 != null)
+                this.basedatosConexionVistasT24 = ConexionBasedatosFactory.CrearConexion(proveedorVistasT24, nombreBasedatosVistasT24);
+        }
+
+        /// <summary>
+        /// Agrega un parámetro a un comando de base de datos.
+        /// </summary>
+        protected void AgregarParametro(IDbCommand cmd, string nombre, object valor, DbType tipo, int? tamaño = null)
+        {
+            IDbDataParameter parametro = basedatosConexion.CrearParametro(nombre, valor);
+            parametro.DbType = tipo;
+            if (tamaño.HasValue)
+                parametro.Size = tamaño.Value;
+            cmd.Parameters.Add(parametro);
+        }
+
+        /// <summary>
+        /// Ejecuta comandos que devuelven datos
+        /// </summary>
+        /// <param name="query"></param>
+        /// <param name="parametros"></param>
+        /// <param name="tipoComando"></param>
+        /// <returns>DataTable</returns>
+        protected async Task<StoredProcedureResult<T>> EjecutarReader<T>(string query, Action<IDbCommand> parametros = null,
+            CommandType tipoComando = CommandType.Text, bool esVistasT24 = false, int? commandTimeout = null) where T : new()
+        {
+            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
+            Type tipoDTO = typeof(T);
+            DbConnection _bdConexion;
+            DbCommand _comando;
+            if (esVistasT24)
+            {
+                _bdConexion = basedatosConexionVistasT24.CrearConexion();
+                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
+                _comando = basedatosConexionVistasT24.CrearComando(query, _bdConexion);
+            }
+            else
+            {
+                _bdConexion = basedatosConexion.CrearConexion();
+                _comando = basedatosConexion.CrearComando(query, _bdConexion);
+            }
+            using (DbConnection conexion = _bdConexion)
+            {
+                using (DbCommand cmd = _comando)
+                {
+                    try
+                    {
+                        cmd.CommandType = tipoComando;
+                        if (commandTimeout.HasValue)
+                        {
+                            cmd.CommandTimeout = commandTimeout.Value;
+                        }
+
+                        parametros?.Invoke(cmd);
+                        ConvertirParametrosNullADbNull(cmd);
+
+                        await conexion.OpenAsync().ConfigureAwait(false);
+                        using (DbDataReader lector = await cmd.ExecuteReaderAsync().ConfigureAwait(false))
+                        {
+                            Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
+                            PropertyInfo[] propiedades = tipoDTO.GetProperties();
+                            MethodInfo cloneMetodo = tipoDTO.GetMethod("Clone", Type.EmptyTypes);
+
+                            while (await lector.ReadAsync().ConfigureAwait(false))
+                            {
+                                EvaluarResultadoPorColumnas(spResult, lector, columnas);
+
+                                T instanciaDTO = new T();
+
+                                foreach (PropertyInfo prop in propiedades)
+                                {
+                                    try
+                                    {
+                                        if (!prop.CanWrite)
+                                            continue;
+
+                                        int ordinal;
+                                        if (!columnas.TryGetValue(prop.Name, out ordinal))
+                                            continue;
+
+                                        object dbValue = lector.GetValue(ordinal);
+
+                                        object valorConvertido;
+                                        bool conversionExitosa = IntentarConvertirValor(
+                                            dbValue,
+                                            prop.PropertyType,
+                                            out valorConvertido);
+
+                                        if (conversionExitosa)
+                                        {
+                                            prop.SetValue(instanciaDTO, valorConvertido, null);
+                                        }
+                                        else
+                                        {
+                                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                                                string.Format(
+                                                    "WARN|EjecutarReader|No se pudo convertir valor|Query:{0}|DTO:{1}|Propiedad:{2}|TipoDestino:{3}|Valor:{4}|ValorMeta:{5}|TipoOrigen:{6}",
+                                                    query,
+                                                    tipoDTO.FullName,
+                                                    prop.Name,
+                                                    prop.PropertyType.FullName,
+                                                    "***Enmascarado***",
+                                                    dbValue == null || dbValue == DBNull.Value
+                                                        ? "EsNull=true;Longitud=0"
+                                                        : "EsNull=false;Longitud=" + (Convert.ToString(dbValue, CultureInfo.InvariantCulture) ?? string.Empty).Length.ToString(CultureInfo.InvariantCulture),
+                                                    dbValue == null || dbValue == DBNull.Value ? "NULL" : dbValue.GetType().FullName));
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                                            string.Format(
+                                                ConstantesClaveAviso.Error + "|EjecutarReader|Query:{0}|DTO:{1}|Propiedad:{2}|Error:{3}",
+                                                query,
+                                                tipoDTO.FullName,
+                                                prop.Name,
+                                                ex));
+                                    }
+                                }
+
+                                if (cloneMetodo != null)
+                                {
+                                    T cloneInstancia = (T)cloneMetodo.Invoke(instanciaDTO, null);
+
+                                    ResetearObjeto(instanciaDTO);
+                                    spResult.Data.Add(cloneInstancia);
+                                }
+                                else
+                                {
+                                    spResult.Data.Add(instanciaDTO);
+                                }
+                            }
+                        }
+
+                        spResult.Exito = string.IsNullOrEmpty(spResult.MensajeError);
+                    }
+                    catch (ResultadoStoredProcedureException)
+                    {
+                        throw;
+                    }
+                    catch (SqlException sqlEx)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = sqlEx;
+                        spResult.MensajeError = string.Format("Error SQL:{0} {1}", sqlEx.Number, sqlEx.Message);
+                    }
+                    catch (Exception ex)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = ex;
+                        spResult.MensajeError = string.Format("Error general ejecutando query: {0}", ex.Message);
+
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                            string.Format(
+                                ConstantesClaveAviso.Error + "|EjecutarReader|Query:{0}|DTO:{1}|Error:{2}",
+                                query,
+                                tipoDTO.FullName,
+                                ex));
+                    }
                 }
             }
-            catch (Exception ex)
+            return spResult;
+        }
+
+        /// <summary>
+        /// Ejecuta SP para consultas que devuelvan una lista de objectos
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="nombreSP"></param>
+        /// <param name="parametros"></param>
+        /// <returns>StoredProcedureResult<typeparamref name="T"/></returns>
+        protected Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros = null,
+            bool esVistasT24 = false, int? commandTimeout = null, bool validarAfectacion = false) where T : new()
+        {
+            return EjecutarStoredProcedureQuery<T>(nombreSP, parametros, CancellationToken.None, esVistasT24, commandTimeout, validarAfectacion);
+        }
+
+        protected Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros,
+            bool esVistasT24) where T : new()
+        {
+            return EjecutarStoredProcedureQuery<T>(nombreSP, parametros, CancellationToken.None, esVistasT24, null, false);
+        }
+
+        /// <summary>
+        /// Ejecuta EjecutarStoredProcedureQuery.
+        /// </summary>
+        protected async Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros,
+            CancellationToken ct, bool esVistasT24 = false, int? commandTimeout = null, bool validarAfectacion = false) where T : new()
+        {
+            ct.ThrowIfCancellationRequested();
+            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
+            Type tipoDTO = typeof(T);
+            DbConnection _bdConexion;
+            DbCommand _comando;
+
+            // Valida y crea la conexion a la base de datos
+            if (esVistasT24)
             {
-                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
+                _bdConexion = basedatosConexionVistasT24.CrearConexion();
+                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
+                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
+            }
+            else
+            {
+                _bdConexion = basedatosConexion.CrearConexion();
+                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
+            }
+
+            using (DbConnection conexion = _bdConexion)
+            {
+                using (DbCommand comando = _comando)
+                {
+                    try
+                    {
+                        comando.CommandType = CommandType.StoredProcedure;
+                        if (commandTimeout.HasValue)
+                        {
+                            comando.CommandTimeout = commandTimeout.Value;
+                        }
+
+                        // Configuración de parámetros
+                        parametros?.Invoke(comando);
+
+                        ConvertirParametrosNullADbNull(comando);
+                      
+                        if (comando.Parameters.Contains("@exito"))
+                        {
+                            comando.Parameters["@exito"].DbType = DbType.Boolean;
+                        }
+
+                        await conexion.OpenAsync(ct).ConfigureAwait(false);
+
+                        using (DbDataReader lector = await comando.ExecuteReaderAsync(ct).ConfigureAwait(false))
+                        {
+                            Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
+                            PropertyInfo[] propiedades = tipoDTO.GetProperties();
+                            MethodInfo cloneMetodo = tipoDTO.GetMethod("Clone", Type.EmptyTypes);
+
+                            while (await lector.ReadAsync(ct).ConfigureAwait(false))
+                            {
+                                EvaluarAfectoPorFilasAfectadas(spResult, lector, columnas);
+                                EvaluarResultadoPorColumnas(spResult, lector, columnas);
+
+                                T instanciaDTO = new T();
+
+                                foreach (PropertyInfo prop in propiedades)
+                                {
+                                    try
+                                    {
+                                        if (!prop.CanWrite)
+                                            continue;
+
+                                        int ordinal;
+                                        if (!columnas.TryGetValue(prop.Name, out ordinal))
+                                            continue;
+
+                                        object dbValue = lector.GetValue(ordinal);
+
+                                        object valorConvertido;
+                                        bool conversionExitosa = IntentarConvertirValor(
+                                            dbValue,
+                                            prop.PropertyType,
+                                            out valorConvertido);
+
+                                        if (conversionExitosa)
+                                        {
+                                            prop.SetValue(instanciaDTO, valorConvertido, null);
+                                        }
+                                        else
+                                        {
+                                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                                                string.Format(
+                                                    "WARN|EjecutarStoredProcedureQuery|No se pudo convertir valor|SP:{0}|DTO:{1}|Propiedad:{2}|TipoDestino:{3}|Valor:{4}|ValorMeta:{5}|TipoOrigen:{6}",
+                                                    nombreSP,
+                                                    tipoDTO.FullName,
+                                                    prop.Name,
+                                                    prop.PropertyType.FullName,
+                                                    "***Enmascarado***",
+                                                    dbValue == null || dbValue == DBNull.Value
+                                                        ? "EsNull=true;Longitud=0"
+                                                        : "EsNull=false;Longitud=" + (Convert.ToString(dbValue, CultureInfo.InvariantCulture) ?? string.Empty).Length.ToString(CultureInfo.InvariantCulture),
+                                                    dbValue == null || dbValue == DBNull.Value ? "NULL" : dbValue.GetType().FullName));
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                                            string.Format(
+                                                ConstantesClaveAviso.Error + "|EjecutarStoredProcedureQuery|SP:{0}|DTO:{1}|Propiedad:{2}|Error:{3}",
+                                                nombreSP,
+                                                tipoDTO.FullName,
+                                                prop.Name,
+                                                ex));
+                                    }
+                                }
+
+                                if (cloneMetodo != null)
+                                {
+                                    T cloneInstancia = (T)cloneMetodo.Invoke(instanciaDTO, null);
+
+                                    ResetearObjeto(instanciaDTO);
+                                    spResult.Data.Add(cloneInstancia);
+                                }
+                                else
+                                {
+                                    spResult.Data.Add(instanciaDTO);
+                                }
+                            }
+                        }
+
+                        EvaluarResultadoPorParametrosSalida(spResult, comando);
+                        EvaluarAfectoPorData(spResult);
+
+                        FinalizarResultadoStoredProcedure(spResult, nombreSP);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (ResultadoStoredProcedureException)
+                    {
+                        throw;
+                    }
+                    catch (SqlException sqlEx)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = sqlEx;
+                        spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
+                    }
+                    catch (Exception ex)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = ex;
+                        spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
+
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                            string.Format(
+                                ConstantesClaveAviso.Error + "|EjecutarStoredProcedureQuery|SP:{0}|DTO:{1}|Error:{2}",
+                                nombreSP,
+                                tipoDTO.FullName,
+                                ex));
+                        throw;
+                    }
+                }
+            }
+            ValidarResultadoStoredProcedure(spResult, nombreSP, validarAfectacion);
+            RegistrarAdvertenciaSinAfectacion(spResult, nombreSP, validarAfectacion);
+            return spResult;
+        }
+
+        /// <summary>
+        /// Ejecuta EjecutarStoredProcedureQuery.
+        /// </summary>
+        protected async Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros,
+            Func<DbDataReader, T> mapearRegistro, CancellationToken ct, bool esVistasT24 = false, int? commandTimeout = null, bool validarAfectacion = false)
+        {
+            if (mapearRegistro == null)
+                throw new ArgumentNullException(nameof(mapearRegistro));
+
+            ct.ThrowIfCancellationRequested();
+            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
+            DbConnection _bdConexion;
+            DbCommand _comando;
+
+            if (esVistasT24)
+            {
+                _bdConexion = basedatosConexionVistasT24.CrearConexion();
+                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
+                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
+            }
+            else
+            {
+                _bdConexion = basedatosConexion.CrearConexion();
+                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
+            }
+
+            using (DbConnection conexion = _bdConexion)
+            using (DbCommand comando = _comando)
+            {
+                try
+                {
+                    comando.CommandType = CommandType.StoredProcedure;
+                    if (commandTimeout.HasValue)
+                    {
+                        comando.CommandTimeout = commandTimeout.Value;
+                    }
+
+                    parametros?.Invoke(comando);
+                    ConvertirParametrosNullADbNull(comando);
+
+                    if (comando.Parameters.Contains("@exito"))
+                    {
+                        comando.Parameters["@exito"].DbType = DbType.Boolean;
+                    }
+
+                    await conexion.OpenAsync(ct).ConfigureAwait(false);
+
+                    using (DbDataReader lector = await comando.ExecuteReaderAsync(ct).ConfigureAwait(false))
+                    {
+                        Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
+
+                        while (await lector.ReadAsync(ct).ConfigureAwait(false))
+                        {
+                            EvaluarAfectoPorFilasAfectadas(spResult, lector, columnas);
+                            EvaluarResultadoPorColumnas(spResult, lector, columnas);
+                            spResult.Data.Add(mapearRegistro(lector));
+                        }
+                    }
+
+                    EvaluarResultadoPorParametrosSalida(spResult, comando);
+                    EvaluarAfectoPorData(spResult);
+
+                    FinalizarResultadoStoredProcedure(spResult, nombreSP);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (ResultadoStoredProcedureException)
+                {
+                    throw;
+                }
+                catch (SqlException sqlEx)
+                {
+                    spResult.Exito = false;
+                    spResult.Exception = sqlEx;
+                    spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
+                }
+                catch (Exception ex)
+                {
+                    spResult.Exito = false;
+                    spResult.Exception = ex;
+                    spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
+
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                        string.Format(
+                            ConstantesClaveAviso.Error + "|EjecutarStoredProcedureQuery|SP:{0}|Mapper:{1}|Error:{2}",
+                            nombreSP,
+                            typeof(T).FullName,
+                            ex));
+                }
+            }
+
+            ValidarResultadoStoredProcedure(spResult, nombreSP, validarAfectacion);
+            RegistrarAdvertenciaSinAfectacion(spResult, nombreSP, validarAfectacion);
+            return spResult;
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ObtenerColumnasReader.
+        /// </summary>
+        private Dictionary<string, int> ObtenerColumnasReader(DbDataReader lector)
+        {
+            Dictionary<string, int> columnas = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            for (int i = 0; i < lector.FieldCount; i++)
+            {
+                string nombreColumna = lector.GetName(i);
+
+                if (!columnas.ContainsKey(nombreColumna))
+                {
+                    columnas.Add(nombreColumna, i);
+                }
+            }
+
+            return columnas;
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de EvaluarAfectoPorFilasAfectadas.
+        /// </summary>
+        private void EvaluarAfectoPorFilasAfectadas(StoredProcedureResult spResult, DbDataReader lector, Dictionary<string, int> columnas)
+        {
+            int ordinal;
+            if (!columnas.TryGetValue("FilasAfectadas", out ordinal))
+                return;
+
+            object valor = lector.GetValue(ordinal);
+            if (valor == null || valor == DBNull.Value)
+            {
+                spResult.Afecto = null;
+                return;
+            }
+
+            int filasAfectadas = Convert.ToInt32(valor);
+            EvaluarAfectoPorFilasAfectadas(spResult, filasAfectadas);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de EvaluarAfectoPorFilasAfectadas.
+        /// </summary>
+        private void EvaluarAfectoPorFilasAfectadas(StoredProcedureResult spResult, int filasAfectadas)
+        {
+            spResult.FilasAfectadas = filasAfectadas;
+
+            if (filasAfectadas > 0)
+                spResult.Afecto = true;
+            else if (filasAfectadas == 0)
+                spResult.Afecto = false;
+            else
+                spResult.Afecto = null;
+        }
+
+        private void EvaluarResultadoPorColumnas(StoredProcedureResult spResult, DbDataReader lector, Dictionary<string, int> columnas)
+        {
+            int ordinal;
+
+            if (columnas.TryGetValue("Exito", out ordinal))
+            {
+                object valorExito = lector.GetValue(ordinal);
+                if (valorExito != null && valorExito != DBNull.Value)
+                    spResult.Exito = ConvertirABooleano(valorExito);
+            }
+
+            string mensajeError = ObtenerTextoColumna(lector, columnas, "MensajeError")
+                ?? ObtenerTextoColumna(lector, columnas, "ErrorMessage")
+                ?? ObtenerTextoColumna(lector, columnas, "IdentificadorError")
+                ?? ObtenerTextoColumna(lector, columnas, "IDENTIFICADORERROR");
+
+            if (!string.IsNullOrWhiteSpace(mensajeError))
+                spResult.MensajeError = mensajeError;
+        }
+
+        private string ObtenerTextoColumna(DbDataReader lector, Dictionary<string, int> columnas, string nombreColumna)
+        {
+            int ordinal;
+            if (!columnas.TryGetValue(nombreColumna, out ordinal))
+                return null;
+
+            object valor = lector.GetValue(ordinal);
+            if (valor == null || valor == DBNull.Value)
+                return null;
+
+            string texto = valor.ToString();
+            return string.IsNullOrWhiteSpace(texto) ? null : texto;
+        }
+
+        private void EvaluarResultadoPorParametrosSalida(StoredProcedureResult spResult, IDbCommand comando)
+        {
+            if (comando?.Parameters == null)
+                return;
+
+            IDataParameter parametroExito = ObtenerParametro(comando, "@exito");
+            if (parametroExito?.Value != null && parametroExito.Value != DBNull.Value)
+                spResult.Exito = ConvertirABooleano(parametroExito.Value);
+
+            IDataParameter parametroMensajeError = ObtenerParametro(comando, "@mensajeError")
+                ?? ObtenerParametro(comando, "@MensajeError")
+                ?? ObtenerParametro(comando, "@ErrorMessage");
+
+            if (parametroMensajeError?.Value == null || parametroMensajeError.Value == DBNull.Value)
+                return;
+
+            string mensajeError = parametroMensajeError.Value.ToString();
+            if (!string.IsNullOrWhiteSpace(mensajeError))
+                spResult.MensajeError = mensajeError;
+        }
+
+        private IDataParameter ObtenerParametro(IDbCommand comando, string nombreParametro)
+        {
+            if (comando?.Parameters == null || !comando.Parameters.Contains(nombreParametro))
+                return null;
+
+            return comando.Parameters[nombreParametro] as IDataParameter;
+        }
+
+        private void FinalizarResultadoStoredProcedure(StoredProcedureResult spResult, string nombreSP)
+        {
+            if (!string.IsNullOrWhiteSpace(spResult.MensajeError))
+            {
+                spResult.Exito = false;
+                throw new ResultadoStoredProcedureException(
+                    string.Format("Error ejecutando SP {0}: {1}", nombreSP, spResult.MensajeError));
+            }
+
+            if (!spResult.Exito)
+                spResult.Exito = true;
+        }
+
+        private void RegistrarAdvertenciaSinAfectacion(StoredProcedureResult spResult, string nombreSP, bool validarAfectacion)
+        {
+            if (validarAfectacion || !spResult.Exito)
+                return;
+
+            if (spResult.Afecto == true)
+                return;
+
+            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                string.Format(
+                    "WARN|EjecutarStoredProcedureQuery|SP:{0}|ExitoTecnico:true|Afecto:{1}|Mensaje:El SP no afectó filas ni devolvió resultados en modo no estricto.",
+                    nombreSP,
+                    spResult.Afecto.HasValue ? spResult.Afecto.Value.ToString() : "NULL"));
+        }
+
+        /// <summary>
+        /// Ejecuta EvaluarAfectoPorData.
+        /// </summary>
+        private void EvaluarAfectoPorData<T>(StoredProcedureResult<T> spResult)
+        {
+            if (!spResult.Afecto.HasValue)
+                spResult.Afecto = spResult.Data.Count > 0;
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ValidarResultadoStoredProcedure.
+        /// </summary>
+        private void ValidarResultadoStoredProcedure(StoredProcedureResult spResult, string nombreSP, bool validarAfectacion)
+        {
+            if (!validarAfectacion)
+                return;
+
+            if (!spResult.Exito)
+            {
+                throw spResult.Exception ?? new Exception(
+                    string.Format("Error ejecutando SP {0}: {1}", nombreSP, spResult.MensajeError));
+            }
+
+            if (spResult.Afecto == true)
+                return;
+
+            if (spResult.Afecto == false)
+            {
+                throw new Exception(
+                    string.Format("El SP {0} se ejecutó correctamente, pero no afectó filas ni devolvió resultados.", nombreSP));
+            }
+
+            throw new Exception(
+                string.Format("El SP {0} se ejecutó correctamente, pero no se pudo determinar si afectó filas o devolvió resultados.", nombreSP));
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de IntentarConvertirValor.
+        /// </summary>
+        private bool IntentarConvertirValor(object dbValue, Type tipoDestino, out object valorConvertido)
+        {
+            valorConvertido = null;
+
+            try
+            {
+                if (dbValue == null || dbValue == DBNull.Value)
+                {
+                    if (EsTipoNullable(tipoDestino))
+                    {
+                        valorConvertido = null;
+                        return true;
+                    }
+
+                    valorConvertido = ObtenerValorDefault(tipoDestino);
+                    return true;
+                }
+
+                Type tipoRealDestino = Nullable.GetUnderlyingType(tipoDestino) ?? tipoDestino;
+                Type tipoOrigen = dbValue.GetType();
+
+                if (tipoRealDestino.IsAssignableFrom(tipoOrigen))
+                {
+                    valorConvertido = dbValue;
+                    return true;
+                }
+
+                if (tipoRealDestino.IsEnum)
+                {
+                    if (dbValue is string)
+                    {
+                        valorConvertido = Enum.Parse(tipoRealDestino, dbValue.ToString(), true);
+                        return true;
+                    }
+
+                    object valorEnumBase = Convert.ChangeType(dbValue, Enum.GetUnderlyingType(tipoRealDestino));
+                    valorConvertido = Enum.ToObject(tipoRealDestino, valorEnumBase);
+                    return true;
+                }
+
+                if (tipoRealDestino == typeof(Guid))
+                {
+                    valorConvertido = new Guid(dbValue.ToString());
+                    return true;
+                }
+
+                if (tipoRealDestino == typeof(bool))
+                {
+                    valorConvertido = ConvertirABooleano(dbValue);
+                    return true;
+                }
+
+                if (tipoRealDestino == typeof(string))
+                {
+                    valorConvertido = dbValue.ToString();
+                    return true;
+                }
+
+                valorConvertido = Convert.ChangeType(
+                    dbValue,
+                    tipoRealDestino,
+                    System.Globalization.CultureInfo.InvariantCulture);
+
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
         /// <summary>
-        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// Inicializa una nueva instancia de EsTipoNullable.
         /// </summary>
-        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        private bool EsTipoNullable(Type tipo)
         {
-            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
+            if (!tipo.IsValueType)
+                return true;
+
+            return Nullable.GetUnderlyingType(tipo) != null;
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ConvertirParametrosNullADbNull.
+        /// </summary>
+        private static void ConvertirParametrosNullADbNull(IDbCommand comando)
+        {
+            if (comando == null || comando.Parameters == null)
+                return;
+
+            foreach (IDataParameter parametro in comando.Parameters)
+            {
+                if ((parametro.Direction == ParameterDirection.Input ||
+                     parametro.Direction == ParameterDirection.InputOutput) &&
+                    parametro.Value == null)
+                {
+                    parametro.Value = DBNull.Value;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ObtenerValorDefault.
+        /// </summary>
+        private object ObtenerValorDefault(Type tipo)
+        {
+            if (!tipo.IsValueType)
+                return null;
+
+            return Activator.CreateInstance(tipo);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ConvertirABooleano.
+        /// </summary>
+        private bool ConvertirABooleano(object valor)
+        {
+            if (valor == null || valor == DBNull.Value)
+                return false;
+
+            if (valor is bool)
+                return (bool)valor;
+
+            string texto = valor.ToString().Trim();
+
+            if (texto == "1")
+                return true;
+
+            if (texto == "0")
+                return false;
+
+            if (string.Equals(texto, "true", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (string.Equals(texto, "false", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (string.Equals(texto, "S", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (string.Equals(texto, "N", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (string.Equals(texto, "Y", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (string.Equals(texto, "YES", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (string.Equals(texto, "NO", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return Convert.ToBoolean(valor);
+        }
+
+        /// <summary>
+        /// Ejecuta SP para INSERT, UPDATE, DELETE y devuelve el ID generado por Identity
+        /// </summary>
+        /// <param name="nombreSP"></param>
+        /// <param name="parametros"></param>
+        /// <returns>StoredProcedureResult</returns>
+        protected Task<StoredProcedureResult> EjecutarStoredProceduredNonQuery(string nombreSP, Action<IDbCommand> parametros, bool esVistasT24 = false)
+        {
+            return EjecutarStoredProceduredNonQuery(nombreSP, parametros, CancellationToken.None, esVistasT24);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de EjecutarStoredProceduredNonQuery.
+        /// </summary>
+        protected async Task<StoredProcedureResult> EjecutarStoredProceduredNonQuery(string nombreSP, Action<IDbCommand> parametros, CancellationToken ct, bool esVistasT24 = false)
+        {
+            ct.ThrowIfCancellationRequested();
+            StoredProcedureResult spResult = new StoredProcedureResult();
+            DbConnection _bdConexion;
+            DbCommand _comando;
+            if (esVistasT24)
+            {
+                _bdConexion = basedatosConexionVistasT24.CrearConexion();
+                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
+                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
+            }
+            else
+            {
+                _bdConexion = basedatosConexion.CrearConexion();
+                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
+            }
+            using (DbConnection conexion = _bdConexion)
+            {
+                using (DbCommand comando = _comando)
+                {
+                    try
+                    {
+                        comando.CommandType = CommandType.StoredProcedure;
+                        parametros?.Invoke(comando);
+
+                        if (comando.Parameters.Contains("@exito"))
+                        {
+                            comando.Parameters["@exito"].DbType = DbType.Boolean;
+                        }
+
+                        await conexion.OpenAsync(ct);
+                        await comando.ExecuteNonQueryAsync(ct);
+                        EvaluarResultadoPorParametrosSalida(spResult, comando);
+
+                        FinalizarResultadoStoredProcedure(spResult, nombreSP);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (ResultadoStoredProcedureException)
+                    {
+                        throw;
+                    }
+                    catch (SqlException sqlEx)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = sqlEx;
+                        spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
+                    }
+                    catch (Exception ex)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = ex;
+                        spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
+                    }
+                }
+            }
+            return spResult;
+        }
+
+        /// <summary>
+        /// Metodo para NonQuery, si la ejecucion de vuelve datos, los guarda en Data
+        /// Para funciones que necesitan devolver una consulta despues de un Insert/Update/Delete
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="nombreSP"></param>
+        /// <param name="parametros"></param>
+        /// <param name="mapearEntidad"></param>
+        /// <param name="esVistasT24"></param>
+        /// <returns>StoredProcedureResult<T></returns>
+        protected async Task<StoredProcedureResult<T>> EjecutarStoredProceduredNonQueryConResultado<T>(
+            string nombreSP,
+            Action<IDbCommand> parametros,
+            Func<IDataReader, T> mapearEntidad,
+            bool esVistasT24 = false)
+        {
+            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
+            DbConnection _bdConexion;
+            DbCommand _comando;
+            if (esVistasT24)
+            {
+                _bdConexion = basedatosConexionVistasT24.CrearConexion();
+                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
+            }
+            else
+            {
+                _bdConexion = basedatosConexion.CrearConexion();
+                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
+            }
+            using (DbConnection conexion = basedatosConexion.CrearConexion())
+            {
+                using (DbCommand comando = basedatosConexion.CrearComando(nombreSP, conexion))
+                {
+                    try
+                    {
+                        comando.CommandType = CommandType.StoredProcedure;
+                        parametros?.Invoke(comando);
+
+                        await conexion.OpenAsync();
+
+                        // Lectura de consulta, si devuelve sino no entra
+                        using (DbDataReader lector = await comando.ExecuteReaderAsync())
+                        {
+                            Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
+
+                            while (await lector.ReadAsync())
+                            {
+                                EvaluarAfectoPorFilasAfectadas(spResult, lector, columnas);
+                                EvaluarResultadoPorColumnas(spResult, lector, columnas);
+                                spResult.Data.Add(mapearEntidad(lector));
+                            }
+                        }
+                        if (!spResult.Afecto.HasValue)
+                            spResult.FilasAfectadas = spResult.Data.Count;
+
+                        EvaluarAfectoPorData(spResult);
+                        FinalizarResultadoStoredProcedure(spResult, nombreSP);
+                    }
+                    catch (ResultadoStoredProcedureException)
+                    {
+                        throw;
+                    }
+                    catch (SqlException sqlEx)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = sqlEx;
+                        spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
+                    }
+                    catch (Exception ex)
+                    {
+                        spResult.Exito = false;
+                        spResult.Exception = ex;
+                        spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
+                    }
+                }
+            }
+            return spResult;
+        }
+
+        /// <summary>
+        /// Ejecuta una operacion sobre una conexion de BD abierta y devuelve informacion especifica del proveedor utilizado
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="selector"></param>
+        /// <returns>T</returns>
+        private T GetDbInfo<T>(Func<DbConnection, T> selector)
+        {
+            using (DbConnection conexion = basedatosConexion.CrearConexion())
+            {
+                conexion.Open();
+                if (conexion is DbConnection dbCon)
+                {
+                    return selector(dbCon);
+                }
+                return default;
+            }
+        }
+
+        #region Informacion de proveedor base de datos
+        /// <summary>
+        /// Inicializa una nueva instancia de ObtenerVersionServidor.
+        /// </summary>
+        protected string ObtenerVersionServidor() => GetDbInfo(c => c.ServerVersion ?? EsquemaColumnas.VERSION_DESCONOCIDA);
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ObtenerNombreBD.
+        /// </summary>
+        protected string ObtenerNombreBD() => GetDbInfo(c => c.Database.ToString() ?? EsquemaColumnas.BASEDATOS_DESCONICIDA);
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ObtenerNombreServidor.
+        /// </summary>
+        protected string ObtenerNombreServidor() => GetDbInfo(c => c.DataSource.ToString() ?? EsquemaColumnas.SERVIDOR_DESCONOCIDO);
+        #endregion
+
+        /// <summary>
+        /// Reinicia las propiedades de un objeto a sus props' por defecto
+        /// </summary>
+        /// <param name="objetoResetear"></param>
+        public static void ResetearObjeto(object objetoResetear)
+        {
+            if (objetoResetear == null) return;
+
+            Type tipoObjeto = objetoResetear.GetType();
+            foreach (PropertyInfo propiedad in tipoObjeto.GetProperties())
+            {
+                if (propiedad.CanWrite)
+                {
+                    object valorPorDefecto = null;
+                    if (propiedad.PropertyType.IsValueType)
+                    {
+                        valorPorDefecto = Activator.CreateInstance(propiedad.PropertyType);
+                    }
+                    propiedad.SetValue(objetoResetear, valorPorDefecto);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Obtiene DataTable
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="parametrosConfig"></param>
+        /// <returns>DataTable</returns>
+        public async Task<DataTable> EjecutarEsquemaProcedimientoAlmacenado(string nombreSp, Action<IDbCommand> parametrosConfig = null)
+        {
+            using (DbConnection conexion = basedatosConexion.CrearConexion())
+            {
+                using (DbCommand comando = basedatosConexion.CrearComando(nombreSp, conexion))
+                {
+                    comando.CommandType = CommandType.StoredProcedure;
+                    parametrosConfig?.Invoke(comando);
+
+                    await conexion.OpenAsync();
+                    using (DbDataReader lector = await comando.ExecuteReaderAsync(CommandBehavior.SchemaOnly))
+                    {
+                        return CrearEsquemaDataTable(lector.GetSchemaTable());
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Crea DT con esquema
+        /// </summary>
+        /// <param name="esquema"></param>
+        /// <returns>DataTable</returns>
+        private static DataTable CrearEsquemaDataTable(DataTable esquema)
+        {
+            if (esquema == null)
+                return null;
+
+            DataTable tabla = new DataTable();
+
+            foreach (DataRow fila in esquema.Rows)
+            {
+                tabla.Columns.Add(CrearColumnas(fila));
+            }
+            return tabla;
+        }
+
+        /// <summary>
+        /// Crear las columnas y propiedades
+        /// </summary>
+        /// <param name="fila"></param>
+        /// <returns>DataColumn</returns>
+        private static DataColumn CrearColumnas(DataRow fila)
+        {
+            DataColumn columna = new DataColumn
+            {
+                ColumnName = fila.Field<string>(EsquemaColumnas.NOMBRECOLUMNA),
+                DataType = fila.Field<Type>(EsquemaColumnas.TIPODATO),
+                AllowDBNull = fila.Field<bool>(EsquemaColumnas.PERMITIRDBNULL),
+                Unique = fila.Field<bool>(EsquemaColumnas.NOMBRECOLUMNA)
+            };
+
+            AgregarPropiedad(columna, EsquemaColumnas.PRESICION, fila[EsquemaColumnas.PRESICIONNUMERICA]);
+            AgregarPropiedad(columna, EsquemaColumnas.ESCALA, fila[EsquemaColumnas.ESCALANUMERICA]);
+            AgregarPropiedad(columna, EsquemaColumnas.TAMAÑO, fila[EsquemaColumnas.TAMAÑOCOLUMNAS]);
+            AgregarPropiedad(columna, EsquemaColumnas.TIPODATOPROVEEDOR, fila[EsquemaColumnas.TIPODATOPROVEEDOR]);
+
+            return columna;
+        }
+
+        /// <summary>
+        /// Agrega las propiedades a la columna
+        /// </summary>
+        /// <param name="columna"></param>
+        /// <param name="nombre"></param>
+        /// <param name="valor"></param>
+        private static void AgregarPropiedad(DataColumn columna, string nombre, object valor)
+        {
+            if (valor != DBNull.Value)
+            {
+                columna.ExtendedProperties[nombre] = valor;
+            }
+        }
+
+        /// <summary>
+        /// Actualiza el estado del controlador de servicios
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="nombreServicio"></param>
+        /// <returns>StoredProcedureResult</returns>
+        public Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio)
+        {
+            return ActualizaEJecucion(nombreServicio, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ActualizaEJecucion.
+        /// </summary>
+        public async Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                EnumNombreSp.SP_ACTUALIZA_EJECUCION, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreServicio", nombreServicio, 50));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@fecha", DateTime.Now.ToString(EnumParametrosGenerales.FECHA_BD)));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@hora", DateTime.Now.ToLongTimeString()));
+
+                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+            }, ct);
+            if (!spResult.Exito)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(ConstantesClaveAviso.Error + "|Actualiza_Ejecucion|Se presenta exception: " + spResult.MensajeError.ToString());
+                throw new Exception(spResult.MensajeError.ToString());
+            }
+
+            return spResult;
+        }
+
+        /// <summary>
+        /// Actualiza el estado de terminacion del servicio controlador
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="nombreServicio"></param>
+        /// <returns>StoredProcedureResult</returns>
+        public Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio)
+        {
+            return ActualizaTerminacion(nombreServicio, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ActualizaTerminacion.
+        /// </summary>
+        public async Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio, CancellationToken ct)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                    EnumNombreSp.SP_ACTUALIZA_TERMINACION, cmd =>
+                {
+                    //@fecha CHAR(10),
+                    //@hora            NVARCHAR(20),
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreServicio", nombreServicio, 50));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@fecha", DateTime.Now.ToString(EnumParametrosGenerales.FECHA_BD)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@hora", DateTime.Now.ToLongTimeString()));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+                }, ct);
+
+                if (!spResult.Exito)
+                {
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(ConstantesClaveAviso.Error + "|Actualiza_Terminacion|Se presenta exception: " + spResult.MensajeError);
+                }
+
+                return spResult;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(ConstantesClaveAviso.Error + "|Actualiza_Terminacion|Se presenta exception: " + ex.Message);
+                return new StoredProcedureResult
+                {
+                    Exito = false,
+                    MensajeError = ex.Message,
+                    Exception = ex
+                };
+            }
+        }
+
+        /// <summary>
+        /// Valida si puede inicar el servicio
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <returns>bool</returns>
+        public Task<bool> EsDiaHabil()
+        {
+            return EsDiaHabil(CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de EsDiaHabil.
+        /// </summary>
+        public async Task<bool> EsDiaHabil(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            bool resultado = false;
+            try
+            {
+                // Se va a forzar el inicio de los servicios?
+                string strValorConfig = ConexionBasedatosFactory.ObtenerDatosGenerales("FORZA_EJECUCION_SERVICIOS");
+                if (strValorConfig == "1")
+                {
+                    resultado = true;
+                    return resultado;
+                }
+
+                // Es fin de semana
+                if (DateTime.Now.DayOfWeek == DayOfWeek.Saturday || DateTime.Now.DayOfWeek == DayOfWeek.Sunday)
+                {
+                    resultado = false;
+                }
+                else
+                {
+                    resultado = true;
+                    StoredProcedureResult<CampoGeneral> resultadoSp = await EjecutarStoredProcedureQuery<CampoGeneral>(
+                        EnumNombreSp.SP_ES_DIA_HABIL,
+                        cmd => cmd.Parameters.Add(
+                            basedatosConexion.CrearParametro("@fecha",
+                                DateTime.Now.Date.ToString(EnumParametrosGenerales.FECHA_HORA0_BD)
+                            )
+                        ),
+                        ct
+                    );
+
+                    if (resultadoSp.Data.FirstOrDefault()?.Num_regs > 0)
+                        resultado = false;
+                }
+
+                return resultado;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                string strMsjError = $"Error: no se pudo recuperar dia habil. Excepcion: {ex.Message}";
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(strMsjError, NombreServicio.MUFG_T24.ToString());
+                throw;
+            }
+            finally
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|EsDiaHabil|Resultado retornado: {resultado}");
+            }
+        }
+
+        /// <summary>
+        /// Para obtener el folio maestro
+        /// Legacy: dameFolioMaestro
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="folio"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <returns>string</returns>
+        public async Task<string> ObtenerFolioMaestro(string folio, string tipoOperacion)
+        {
+            StoredProcedureResult<CampoGeneral> spResult = await EjecutarStoredProcedureQuery<CampoGeneral>(
+                EnumNombreSp.SP_OBTENER_FOLIO_MAESTRO,
+                cmd =>
+                {
+                    // @tipoOperacion		VARCHAR(10),
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(folio, nameof(ObtenerFolioMaestro))));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", tipoOperacion));
+                });
+
+            CampoGeneral folioMaestro = spResult.Data.Count > 0 ? spResult.Data[0] : null;
+            if (folioMaestro == null)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtenerFolioMaestro|No se obtuvo folio maestro para folio '{folio}' y tipo operación '{tipoOperacion}'.");
+                throw new InvalidOperationException($"No se obtuvo el folio maestro requerido para el folio '{folio}'.");
+            }
+
+            return folioMaestro.Folio_maestro.ToString();
+        }
+
+        private object ConvertirFolioAParametro(string folio, string contexto)
+        {
+            int folioConvertido;
+            if (int.TryParse(folio, NumberStyles.Integer, CultureInfo.InvariantCulture, out folioConvertido))
+                return folioConvertido;
+
+            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|{contexto}|No fue posible convertir el folio '{folio}' a entero. Se enviará DBNull.Value al procedimiento.");
+            return DBNull.Value;
+        }
+
+        /// <summary>
+        /// Para obtener el FT que se enviará como Clave de Rastreo en SPEI
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="folio"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <returns>string</returns>
+        public async Task<string> ObtenerFtSpei(string folio)
+        {
+            CampoGeneral resultado = (await EjecutarStoredProcedureQuery<CampoGeneral>(
+                EnumNombreSp.SP_OBTENER_FT_SPEI,
+                cmd =>
+                {
+                    // @op_clave as numeric(18,0)
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", folio, 65));
+                }
+            )).Data.FirstOrDefault();
+
+            if (resultado == null)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtenerFtSpei|No se obtuvo FT SPEI para folio '{folio}'.");
+                return null;
+            }
+
+            return resultado.ToString();
+        }
+
+        /// <summary>
+        /// Obtiene el ultimo proceso en ejecucion
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="folio"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <returns>string</returns>
+        public async Task<string> ObtenerUltimoProceso(ProcesoDTO proceso)
+        {
+            CampoGeneral resultado = (await EjecutarStoredProcedureQuery<CampoGeneral>(
+                EnumNombreSp.SP_OBTENER_ULTIMO_PROCESO,
+                cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio));
+                }
+            )).Data.FirstOrDefault();
+
+            if (resultado is null)
+            {
+                return "";
+            }
+
+            return resultado.Alias_proceso;
+        }
+
+        /// <summary>
+        /// Marca el inicia proceso
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="folio"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="servicio"></param>
+        /// <returns>StoredProcedureResult</returns>
+        public Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso)
+        {
+            return IniciaProceso(proceso, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de IniciaProceso.
+        /// </summary>
+        public async Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                EnumNombreSp.SP_INICIA_PROCESO, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", proceso.PId));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", proceso.NombreProceso, 50));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(proceso.Folio, nameof(IniciaProceso))));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
+
+                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+            }, ct);
+            return spResult;
+        }
+
+        /// <summary>
+        /// Marca el final del proceso
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="folio"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="nombreProceso"></param>
+        /// <param name="servicio"></param>
+        /// <param name="aliasProceso"></param>
+        /// <param name="pId"></param>
+        /// <returns>StoredProcedureResult</returns>
+        public Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso)
+        {
+            return TerminaProceso(proceso, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de TerminaProceso.
+        /// </summary>
+        public async Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                EnumNombreSp.SP_TERMINA_PROCESO, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", proceso.PId));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", proceso.NombreProceso, 50));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(proceso.Folio, nameof(TerminaProceso))));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@exepcion", proceso.Excepcion?.Message ?? "null"));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+
+            }, ct);
+            return spResult;
+        }
+
+        /// <summary>
+        /// Marca el proceso con errores
+        /// </summary>
+        /// <param name="proceso"></param>
+        /// <param name="nombreSp"></param>
+        /// <returns></returns>
+        public Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso)
+        {
+            return ActualizaErrorProceso(proceso, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ActualizaErrorProceso.
+        /// </summary>
+        public async Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                EnumNombreSp.SP_ACTUALIZA_ERROR_PROCESO, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", proceso.PId));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", proceso.NombreProceso, 50));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(proceso.Folio, nameof(ActualizaErrorProceso))));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@exepcion", proceso.Excepcion?.Message ?? "null"));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+
+            }, ct);
+            return spResult;
+        }
+
+        /// <summary>
+        /// Para obtener el DisplayName del servicio
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="proceso"></param>
+        /// <returns>string</returns>
+        public Task<string> ObtieneDisplayName(int procesoId)
+        {
+            try
+            {
+                using (var buscador = new ManagementObjectSearcher(
+                    $"SELECT DisplayName FROM Win32_Service WHERE ProcessId = {procesoId}"))
+                {
+                    foreach (ManagementObject obj in buscador.Get())
+                    {
+                        return Task.FromResult(obj["DisplayName"]?.ToString());
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtieneDisplayName|{ex}");
+            }
+
+            return Task.FromResult<string>(null);
+        }
+
+        /// <summary>
+        /// Obtiene el ultimo proceso en ejecucion en tablas de Swift
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="procesoId"></param>
+        /// <returns></returns>
+        public async Task<string> ObtieneUltimoProcesoSwift(ProcesoDTO proceso)
+        {
+            CampoGeneral resultado = (await EjecutarStoredProcedureQuery<CampoGeneral>(
+               EnumNombreSp.SP_ULTIMO_PROCESO_SWF,
+                cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion));
+                }
+            )).Data.FirstOrDefault();
+
+            if (resultado == null)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtieneUltimoProcesoSwift|No se obtuvo último proceso Swift para folio '{proceso.Folio}' y tipo operación '{proceso.TipoOperacion}'.");
+                return null;
+            }
+
+            return resultado.Alias_proceso;
+        }
+
+        /// <summary>
+        /// Marca el inicia proceso en tablas de Swift
+        /// </summary>
+        /// <param name="proceso"></param>
+        /// <param name="nombreSp"></param>
+        /// <returns>StoredProcedureResult</returns>
+        public async Task<StoredProcedureResult> IniciaProcesoSwift(ProcesoDTO proceso)
+        {
+            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                EnumNombreSp.SP_INICIA_PROCESO_SWF, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio, 29));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+
+            });
+            return spResult;
+        }
+
+        /// <summary>
+        /// Marca el final del proceso en tablas de Swift
+        /// </summary>
+        /// <param name="proceso"></param>
+        /// <param name="nombreSp"></param>
+        /// <returns>StoredProcedureResult</returns>
+        public async Task<StoredProcedureResult> TerminaProcesoSwift(ProcesoDTO proceso)
+        {
+            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                EnumNombreSp.SP_TERMINA_PROCESO_SWF, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+            });
+            return spResult;
+        }
+
+        /// <summary>
+        /// Marca el proceso con errores en tablas de Swift
+        /// </summary>
+        /// <param name="proceso"></param>
+        /// <param name="nombreSp"></param>
+        /// <returns>StoredProcedureResult</returns>
+        public async Task<StoredProcedureResult> ActualizaErrorProcesoSwift(ProcesoDTO proceso)
+        {
+            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
+                EnumNombreSp.SP_ACTUALIZA_ERROR_PROCESO_SWF, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@exepcion", proceso.Excepcion?.Message ?? "null"));
+                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+            });
+            return spResult;
+        }
+
+        #region METODOS CALYPSO
+
+        /// <summary>
+        /// Obtiene short name de calypso
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="cdl"></param>
+        /// <returns>string</returns>
+        public async Task<string> CalypsoObtenerNombreCorto(string cdl)
+        {
+            LegalEntity resultado = (await EjecutarReader<LegalEntity>(
+                "SELECT short_name FROM LEGAL_ENTITY WHERE LPAD(external_ref,8,'0') = :cdl", cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro(":cdl", cdl.PadLeft(8, '0')));
+                }
+            )).Data.FirstOrDefault();
+
+            if (resultado == null || string.IsNullOrWhiteSpace(resultado.SHORT_NAME))
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|CalypsoObtenerNombreCorto|No se obtuvo nombre corto de Calypso para CDL '{cdl}'.");
+                throw new InvalidOperationException($"No se obtuvo nombre corto de Calypso para CDL '{cdl}'.");
+            }
+
+            return resultado.SHORT_NAME;
+        }
+
+        /// <summary>
+        /// Obtiene consumo de lineas
+        /// </summary>
+        /// <param name="nombreSp"></param>
+        /// <param name="cdl"></param>
+        /// <returns>DataTable</returns>
+        public async Task<DataTable> CalypsoConsultaLimiteLineas(string cdl = "")
+        {
+            StringBuilder sql = new StringBuilder();
+            sql.AppendLine("SELECT A.LIMIT_ID, A.ATTR1_VALUE, SUBSTR(SUBSTR(A.ATTR1_VALUE,INSTR(A.ATTR1_VALUE,'CD',1,1),10),3,8) AS CDL, A.LIMIT_MAX AS MONTO_LINEA, A.LIMIT_CCY AS CCY_LINEA, C.AMOUNT AS SALDO_UTILIZADO, C.SANCTION_AMOUNT AS SALDO_DISPONIBLE, C.VALUE_DATE");
+            sql.AppendLine("  FROM ERS_LIMIT A INNER JOIN (SELECT LIMIT_ID, MAX(VALUE_DATE) AS VALUE_DATE FROM ERS_LIMIT_USAGE WHERE VERSION=0 GROUP BY LIMIT_ID) B ON ( A.LIMIT_ID = B.LIMIT_ID )");
+            sql.AppendLine("                                     INNER JOIN ERS_LIMIT_USAGE C ON ( A.LIMIT_ID = C.LIMIT_ID AND B.VALUE_DATE = C.VALUE_DATE )");
+            sql.AppendLine("  WHERE A.LIMIT_BUCKET = '0D-2D'");
+            sql.AppendLine("    AND C.VERSION=0");
+            sql.AppendLine("    AND A.MEASURE='Settlement' ");
+
+            bool filtrarCdl = !string.IsNullOrEmpty(cdl);
+            if (filtrarCdl)
+            {
+                sql.AppendLine("    AND A.ATTR1_VALUE LIKE :cdl");
+            }
+
+            DataTable resultado = new DataTable();
+            using (DbConnection conexion = basedatosConexion.CrearConexion())
+            using (DbCommand comando = basedatosConexion.CrearComando(sql.ToString(), conexion))
+            {
+                comando.CommandType = CommandType.Text;
+
+                if (filtrarCdl)
+                {
+                    comando.Parameters.Add(basedatosConexion.CrearParametro(":cdl", "%" + cdl.PadLeft(8, '0')));
+                }
+
+                await conexion.OpenAsync().ConfigureAwait(false);
+                using (DbDataReader lector = await comando.ExecuteReaderAsync().ConfigureAwait(false))
+                {
+                    resultado.Load(lector);
+                }
+            }
+
+            return resultado;
+        }
+
+        /// <summary>
+        /// Define el nombre del TAG del nodo root para el XML serializado  
+        /// </summary>
+        /// <param name="tipoObjeto"></param>
+        /// <param name="nombreNodoRoot"></param>
+        /// <returns>string</returns>
+        private string DevuelveTagName(Type tipoObjeto, string nombreNodoRoot)
+        {
+            // si viene definido el nombre raiz, usarlo
+            if (!string.IsNullOrWhiteSpace(nombreNodoRoot))
+                return nombreNodoRoot.Trim();
+
+            if (tipoObjeto == null)
+                return "Unknown";
+
+            // si es un tipo generico
+            if (tipoObjeto.IsGenericType && tipoObjeto.GetGenericTypeDefinition() == typeof(List<>))
+            {
+                Type tipoGenerico = tipoObjeto.GetGenericArguments()[0];
+                return tipoGenerico.Name + "List";
+            }
+
+            // si es un arreglo
+            if (tipoObjeto.IsArray)
+            {
+                return tipoObjeto.GetElementType()?.Name + "Array";
+            }
+
+            // caso normal
+            return tipoObjeto.Name;
+        }
+
+        /// <summary>
+        /// Serializar objecto en XML
+        /// </summary>
+        /// <param name="objeto"></param>
+        /// <param name="tipoSerializacion"></param>
+        /// <param name="RemoveDiacritics"></param>
+        /// <param name="AddNodeTag"></param>
+        /// <param name="encodingEnum"></param>
+        /// <param name="rootNodeName"></param>
+        /// <returns></returns>
+        /// <exception cref="ArgumentNullException"></exception>
+        /// <exception cref="NotSupportedException"></exception>
+        public string CalypsoSerializarClase(object objeto, TipoSerializacion tipoSerializacion,
+            bool RemoveDiacritics, bool AddNodeTag, EncodingEnum encodingEnum = EncodingEnum.Encode_Default,
+            string rootNodeName = ""
+            )
+        {
+            if (objeto == null)
+                throw new ArgumentNullException(nameof(objeto));
+
+            Encoding encoding = ResolverEncoding(encodingEnum);
+
+            XmlWriterSettings config = new XmlWriterSettings
+            {
+                Encoding = encoding,
+                OmitXmlDeclaration = true,
+                NamespaceHandling = NamespaceHandling.OmitDuplicates,
+                Indent = true,
+                IndentChars = "    "
+            };
+
+            string nombreTag = DevuelveTagName(objeto.GetType(), rootNodeName);
+            StringBuilder sb = new StringBuilder();
+
+            if (tipoSerializacion == TipoSerializacion.SerialXML)
+            {
+                SerializarXml(objeto, nombreTag, rootNodeName, config, sb);
+            }
+            else if (tipoSerializacion == TipoSerializacion.SerialDataContract)
+            {
+                SerializarDataContract(objeto, nombreTag, config, sb);
+            }
+            else
+            {
+                throw new NotSupportedException("Tipo de serializacion no soportado: " + tipoSerializacion);
+            }
+
+            string resultado = sb.ToString();
+            if (RemoveDiacritics)
+                resultado = RemueveDiacriticos(resultado);
+
+            StringBuilder stringBuilder = new StringBuilder();
+            if (AddNodeTag)
+            {
+                stringBuilder.AppendLine(string.Format(@"<?xml version=""1.0"" encoding=""UTF-8"" standalone=""yes""?>", encoding.WebName));
+                stringBuilder.Append(@"<CalypsoUploadDocument UploadDate=""20100716"" ClientCode=""INDI"" Version=""1"">");
+                stringBuilder.AppendLine(resultado);
+                stringBuilder.AppendLine(@"</CalypsoUploadDocument>");
+
+                resultado = sb.ToString();
+            }
+            return resultado;
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de CalypsoDeserializarClase.
+        /// </summary>
+        public bool CalypsoDeserializarClase(string xml, ref object objeto, TipoSerializacion tipoSerializacion, bool removerDataTag, string nombreNodoRoot = "")
+        {
+            if (xml == null)
+                throw new ArgumentException(nameof(xml));
+            if (xml.Trim() == "")
+                throw new ArgumentException("XML string cannot be empty");
+            if (objeto == null)
+                throw new ArgumentNullException(nameof(objeto));
+
+            string objetoXml = xml;
+            string nombreTag = DevuelveTagName(objeto.GetType(), nombreNodoRoot);
+            XmlReaderSettings xmlReaderSettings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null
+            };
 
             try
             {
-                if (_containerDI == null || _configuracionBase == null)
+                // si requiere eliminar nodo <DATA>
+                if (removerDataTag)
                 {
-                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
+                    using (StringReader sr = new StringReader(xml))
+                    using (XmlReader lector = XmlReader.Create(sr, xmlReaderSettings))
+                    {
+                        while (lector.Read())
+                        {
+                            if (lector.NodeType == XmlNodeType.Element && lector.Name == "DATA")
+                            {
+                                objetoXml = lector.ReadInnerXml();
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Deserializacion segun tipo
+                if (tipoSerializacion == TipoSerializacion.SerialDataContract)
+                {
+                    DataContractSerializer serializar = new DataContractSerializer(objeto.GetType(), nombreTag, string.Empty);
+                    using (StringReader sr = new StringReader(objetoXml))
+                    {
+                        using (XmlReader xr = XmlReader.Create(sr, xmlReaderSettings))
+                        {
+                            using (XmlDictionaryReader xdr = XmlDictionaryReader.CreateDictionaryReader(xr))
+                            {
+                                objeto = serializar.ReadObject(xdr, true);
+                            }
+                        }
+                    }
+                }
+                else if (tipoSerializacion == TipoSerializacion.SerialXML)
+                {
+                    XmlSerializer serializer;
+                    if (string.IsNullOrWhiteSpace(nombreNodoRoot))
+                    {
+                        serializer = new XmlSerializer(objeto.GetType());
+                    }
+                    else
+                    {
+                        serializer = new XmlSerializer(objeto.GetType(), new XmlRootAttribute(nombreTag));
+                    }
+
+                    using (var sr = new StringReader(objetoXml))
+                    {
+                        using (XmlReader xr = XmlReader.Create(sr, xmlReaderSettings))
+                        {
+                            objeto = serializer.Deserialize(xr);
+                        }
+                    }
+                }
+                else
+                {
+                    throw new NotSupportedException("Tipo de serializacion no soportado" + tipoSerializacion);
+                }
+                return objeto != null;
+            }
+            catch
+            {
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Normalizacion de cadena
+        /// </summary>
+        /// <param name="texto"></param>
+        /// <returns>string</returns>
+        private static string RemueveDiacriticos(string texto)
+        {
+            if (string.IsNullOrWhiteSpace(texto))
+                return texto;
+
+            // Normaliza a FormD
+            string normalizarCadena = texto.Normalize(NormalizationForm.FormD);
+            StringBuilder sb = new StringBuilder();
+
+            for (int i = 0; i < normalizarCadena.Length; i++)
+            {
+                char c = normalizarCadena[i];
+
+                // Ignora marcas de acento
+                if (CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
+                {
+                    sb.Append(c);
+                }
+            }
+
+            // Vuelve a componer los caracteres
+            return sb.ToString().Normalize(NormalizationForm.FormC);
+        }
+
+        /// <summary>
+        /// Serializacion con DataContract
+        /// </summary>
+        /// <param name="objeto"></param>
+        /// <param name="nombreTag"></param>
+        /// <param name="nombreNodoRoot"></param>
+        /// <param name="setting"></param>
+        /// <param name="sb"></param>
+        private static void SerializarDataContract(object objeto, string nombreTag, XmlWriterSettings setting, StringBuilder sb)
+        {
+            DataContractSerializer serializer = new DataContractSerializer(objeto.GetType(), nombreTag, string.Empty);
+
+            using (XmlWriter escribir = XmlWriter.Create(sb, setting))
+            {
+                using (XmlDictionaryWriter dictionaryWriter = XmlDictionaryWriter.CreateDictionaryWriter(escribir))
+                {
+                    serializer.WriteObject(dictionaryWriter, objeto);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Serializacion con XmlSerializer
+        /// </summary>
+        /// <param name="objeto"></param>
+        /// <param name="nombreTag"></param>
+        /// <param name="nombreNodoRoot"></param>
+        /// <param name="nombreNodoRoot"></param>
+        /// <param name="setting"></param>
+        /// <param name="sb"></param>
+        private static void SerializarXml(object objeto, string nombreTag, string nombreNodoRoot, XmlWriterSettings setting, StringBuilder sb)
+        {
+            XmlSerializer serializer;
+            if (string.IsNullOrWhiteSpace(nombreNodoRoot))
+            {
+                serializer = new XmlSerializer(objeto.GetType());
+            }
+            else
+            {
+                serializer = new XmlSerializer(objeto.GetType(), new XmlRootAttribute(nombreTag));
+            }
+
+            XmlSerializerNamespaces xmlnsns = new XmlSerializerNamespaces();
+            xmlnsns.Add(string.Empty, string.Empty);
+
+            using (XmlWriter escribir = XmlWriter.Create(sb, setting))
+            {
+                serializer.Serialize(escribir, objeto, xmlnsns);
+            }
+        }
+
+        /// <summary>
+        /// Resolver Encoding con enum
+        /// </summary>
+        /// <param name="encodingEnum"></param>
+        /// <returns></returns>
+        private static Encoding ResolverEncoding(EncodingEnum encodingEnum)
+        {
+            switch (encodingEnum)
+            {
+                case EncodingEnum.Encode_ASCII: return Encoding.ASCII;
+                case EncodingEnum.Encode_BigEndianUnicode: return Encoding.BigEndianUnicode;
+                case EncodingEnum.Encode_UTF8: return Encoding.UTF8;
+                case EncodingEnum.Encode_UTF32: return Encoding.UTF32;
+                case EncodingEnum.Encode_Unicode: return Encoding.Unicode;
+                default: return Encoding.Default;
+            }
+        }
+
+        #endregion
+
+        #region Metodos Zeus_Extractor
+        /// <summary>
+        /// Inicializa una nueva instancia de EjecutarOracleRefCursorAsync.
+        /// </summary>
+        protected async Task<DbDataReader> EjecutarOracleRefCursorAsync(string storedProcedure, int fechaProceso, long idTrabajo)
+        {
+            DbConnection conexion = basedatosConexion.CrearConexion();
+
+            if (!(conexion is OracleConnection oracleConnection))
+            {
+                throw new InvalidOperationException("La conexión configurada no es Oracle.");
+            }
+
+            OracleCommand comando = new OracleCommand(storedProcedure, oracleConnection);
+
+            comando.CommandType = CommandType.StoredProcedure;
+
+            comando.Parameters.Add(new OracleParameter("FECHAPROCESO", OracleDbType.Int32)
+            {
+                Direction = ParameterDirection.Input,
+                Value = fechaProceso
+            });
+
+            comando.Parameters.Add(new OracleParameter("ID_TRABAJO", OracleDbType.Int32)
+            {
+                Direction = ParameterDirection.Input,
+                Value = idTrabajo
+            });
+
+            comando.Parameters.Add(new OracleParameter("result_set", OracleDbType.RefCursor)
+            {
+                Direction = ParameterDirection.Output
+            });
+
+            comando.Parameters.Add(new OracleParameter("IDENTIFICADORERROR", OracleDbType.Varchar2)
+            {
+                Direction = ParameterDirection.InputOutput,
+                Size = 4000,
+                Value = DBNull.Value
+            });
+
+            await oracleConnection.OpenAsync();
+
+            DbDataReader reader = await comando.ExecuteReaderAsync(CommandBehavior.CloseConnection);
+
+            object error = comando.Parameters["IDENTIFICADORERROR"].Value;
+
+            if (error != null && error != DBNull.Value)
+            {
+                throw new Exception(error.ToString());
+            }
+
+            return reader;
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de EjecutarOracleQueryAsync.
+        /// </summary>
+        protected async Task<DbDataReader> EjecutarOracleQueryAsync(string query)
+        {
+            DbConnection conexion = basedatosConexion.CrearConexion();
+
+            DbCommand comando = basedatosConexion.CrearComando(query, conexion);
+
+            comando.CommandType = CommandType.Text;
+
+            await conexion.OpenAsync();
+
+            return await comando.ExecuteReaderAsync(CommandBehavior.CloseConnection);
+        }
+
+
+        /// <summary>
+        /// Obtiene la estructura de un DataReader en formato DataTable.
+        /// Equivalente al método getMetaData del código legacy.
+        /// </summary>
+        /// <param name="reader">Reader del proveedor de datos.</param>
+        /// <returns>DataTable con definición de columnas.</returns>
+        protected DataTable ObtenerMetadataReader(DbDataReader reader)
+        {
+            if (reader == null)
+            {
+                throw new ArgumentNullException(nameof(reader));
+            }
+
+            return CrearEsquemaDataTable(reader.GetSchemaTable());
+        }
+
+        #endregion
+
+        /// <summary>
+        /// Valida y obtiene el puerto disponible del servicio.
+        /// Compatibilidad legacy.
+        /// </summary>
+        [System.Obsolete("Compatibilidad legacy.", false)]
+        public async Task<PuertoServicioDTO> ObtenerPuerto(string servicio)
+        {
+            PuertoServicioDTO puertoServicioDTO = null;
+            List<PuertoServicioDTO> resultado = (await EjecutarStoredProcedureQuery<PuertoServicioDTO>(
+                EnumNombreSp.SP_OBTENER_PUERTO,
+                cmd => cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", servicio))
+            )).Data;
+
+            foreach (PuertoServicioDTO pServicio in resultado)
+            {
+                bool procesoActivo = EstaActivoProceso(
+                    pServicio.Pid,
+                    pServicio.ProcessName,
+                    pServicio.Puerto
+                );
+
+                if (!procesoActivo)
+                    throw new ArgumentException("La aplicacion ya esta en Ejecucion.");
+
+                if (PuertoDisponible(pServicio.Puerto))
+                {
+                    puertoServicioDTO = pServicio;
+                }
+            }
+
+            return puertoServicioDTO;
+        }
+
+        /// <summary>
+        /// Valida si un puerto esta ocupado.
+        /// Compatibilidad legacy.
+        /// </summary>
+        [System.Obsolete("Compatibilidad legacy.", false)]
+        public bool PuertoDisponible(int port)
+        {
+            try
+            {
+                TcpListener listener = new TcpListener(IPAddress.Parse("127.0.0.1"), port);
+                listener.Start();
+                listener.Stop();
+                return true;
+            }
+            catch (SocketException ex)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("Error TCPListener:" + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Valida si el proceso está activo.
+        /// Compatibilidad legacy.
+        /// </summary>
+        [System.Obsolete("Compatibilidad legacy.", false)]
+        public bool EstaActivoProceso(object pid, object nombreProceso, object puerto)
+        {
+            try
+            {
+                int _procesoId = Convert.ToInt32(pid);
+                string _nombreProceso = Convert.ToString(nombreProceso);
+
+                Process loProceso = Process.GetProcessById(_procesoId);
+                if (_nombreProceso == loProceso.ProcessName || loProceso.Responding)
+                {
+                    return true;
+                }
+
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                    $"El proceso esperado no corresponde. ProcessName esperado={_nombreProceso}, ProcessName en ejecución={loProceso.ProcessName}");
+                throw new Exception(
+                    $"El proceso esperado no corresponde. ProcessName esperado={_nombreProceso}, ProcessName en ejecución={loProceso.ProcessName}");
+            }
+            catch (Exception ex)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("Error: " + ex.Message);
+                throw new Exception($"Error: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Proceso para establecerse en la escucha de un puerto.
+        /// Compatibilidad legacy.
+        /// </summary>
+        [System.Obsolete("Compatibilidad legacy.", false)]
+        public async Task EscuchaPuerto(int puerto, string servicio, int pId, string nombreProceso,
+            string displayName, Delegate funcionProcesar, bool enviarRespuesta)
+        {
+            bool escucharPuerto = true;
+            bool enProceso = false;
+            TcpListener listener = null;
+            try
+            {
+                listener = new TcpListener(IPAddress.Parse("127.0.0.1"), puerto)
+                {
+                    ExclusiveAddressUse = false
+                };
+                listener.Start();
+
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[INFO] Escuchando puerto {puerto}");
+
+                await EjecutarStoredProceduredNonQuery(EnumNombreSp.SP_ESCUCHA_PUERTO, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", pId));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", nombreProceso));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@displayName", displayName));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@puerto", puerto));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+                });
+
+                while (escucharPuerto)
+                {
+                    try
+                    {
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[INFO] Esperando petición en puerto {puerto}");
+                        using (TcpClient cliente = await listener.AcceptTcpClientAsync())
+                        using (NetworkStream stream = cliente.GetStream())
+                        {
+                            if (enProceso)
+                            {
+                                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[INFO] Servicio ocupando proceso anterior");
+                                if (enviarRespuesta)
+                                {
+                                    byte[] bytesOcupados = Encoding.ASCII.GetBytes(
+                                        global::MUFG_T24.Comunes.Helpers.CryptoHelper.Encriptar("0", null));
+                                    stream.Write(bytesOcupados, 0, bytesOcupados.Length);
+                                }
+                                continue;
+                            }
+
+                            byte[] buffer = new byte[1024];
+                            StringBuilder mensajeCompleto = new StringBuilder();
+                            int byteLeidos;
+
+                            do
+                            {
+                                byteLeidos = await stream.ReadAsync(buffer, 0, buffer.Length);
+                                mensajeCompleto.Append(Encoding.ASCII.GetString(buffer, 0, byteLeidos));
+                            }
+                            while (stream.DataAvailable);
+
+                            string datoLeido = global::MUFG_T24.Comunes.Helpers.CryptoHelper.Desencriptar(
+                                mensajeCompleto.ToString(), null);
+
+                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[INFO] Petición recibida. Folio {datoLeido}");
+
+                            enProceso = true;
+                            bool resultado = Convert.ToBoolean(funcionProcesar.DynamicInvoke(datoLeido));
+                            enProceso = false;
+
+                            if (enviarRespuesta)
+                            {
+                                byte[] bytesOk = Encoding.ASCII.GetBytes(
+                                    global::MUFG_T24.Comunes.Helpers.CryptoHelper.Encriptar(resultado ? "1" : "0", null));
+                                stream.Write(bytesOk, 0, bytesOk.Length);
+                            }
+                        }
+                    }
+                    catch (ThreadAbortException)
+                    {
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[AVISO] Proceso abortado");
+                        escucharPuerto = false;
+                    }
+                    catch (ThreadInterruptedException)
+                    {
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[AVISO] Proceso interrumpido");
+                        escucharPuerto = false;
+                    }
+                    catch (Exception exCliente)
+                    {
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[ERROR] Error con socket cliente: {exCliente.Message}");
+                        escucharPuerto = false;
+                    }
+                }
+            }
+            catch (Exception exServer)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[ERROR] Error en socket server: {exServer.Message}, servicio:{servicio}");
+            }
+            finally
+            {
+                listener?.Stop();
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[INFO] Termina la escucha del puerto");
+            }
+        }
+    }
+}
+
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Data;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace MUFG_T24.Comunes
+{
+    /// <summary>
+    /// Clase para envio de alertas en BD
+    /// </summary>
+    public class Alertas : RepositorioMaestro, IAlertas
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia de Alertas.
+        /// </summary>
+        public Alertas(
+            BasedatosProveedor proveedor,
+            NombreBasedatos nombreBasedatos,
+            BasedatosProveedor? proveedorVistasT24,
+            NombreBasedatos? nombreBasedatosVistasT24)
+            : base(proveedor, nombreBasedatos, proveedorVistasT24, nombreBasedatosVistasT24)
+        { }
+
+        /// <summary>
+        /// Inserta una nueva alerta en el sistema
+        /// </summary>
+        /// <param name="alerta"></param>
+        /// <returns>true/false</returns>
+        public Task<bool> InsertarAlerta(AlertaDTO alerta)
+        {
+            return InsertarAlerta(alerta, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inserta una nueva alerta en el sistema a partir de valores simples.
+        /// </summary>
+        public Task<bool> InsertarAlerta(
+            string folio,
+            string tipoOperacion,
+            string servicio,
+            string claveAviso,
+            string descripcion,
+            int pId,
+            string nombreProceso,
+            Exception exception)
+        {
+            var alerta = new AlertaDTO
+            {
+                Folio = folio,
+                TipoOPeracion = tipoOperacion,
+                Servicio = servicio,
+                ClaveAviso = claveAviso,
+                Descipcion = descripcion,
+                PId = pId,
+                NombreProceso = nombreProceso,
+                Exception = exception
+            };
+
+            return InsertarAlerta(alerta, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de InsertarAlerta.
+        /// </summary>
+        public async Task<bool> InsertarAlerta(AlertaDTO alerta, CancellationToken ct)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (alerta == null)
+                    alerta = new AlertaDTO();
+
+                if (alerta.PId < 0)
+                    alerta.PId = 0;
+
+                string lsMensajeAlerta;
+                string lsDescripcion;
+
+                // Valida y limpia descripcion
+                if (string.IsNullOrEmpty(alerta.Descipcion))
+                {
+                    alerta.Descipcion = "";
+                }
+
+                lsDescripcion = alerta.Descipcion.Trim();
+
+                if (lsDescripcion.Length > 50)
+                {
+                    lsDescripcion = lsDescripcion.Substring(0, 50);
+                }
+
+                // Preparar mensaje de alerta
+                if (alerta.Exception != null)
+                {
+                    lsMensajeAlerta = alerta.Exception.ToString()
+                        .Replace(Convert.ToChar(10).ToString(), "")
+                        .Replace(Convert.ToChar(13).ToString(), "");
+
+                    // LOG
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Inserta_alerta|{lsMensajeAlerta}");
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
+                        $" {ConstantesClaveAviso.Error} | inserta_alerta | Error durante el proceso. Descripción: ' " +
+                        $"{lsDescripcion}', excepción: {lsMensajeAlerta}", "Mufg");
+                }
+
+                int pidSeguro = alerta.PId;
+
+                // Ejecuta el INSERT usando el metodo en RepositorioMaestro
+                StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(EnumNombreSp.SP_INSERTA_ALERTA, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", alerta.Folio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", alerta.TipoOPeracion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", alerta.Servicio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@cveError", alerta.ClaveAviso));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@descripcion", alerta.Descipcion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", pidSeguro));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", alerta.NombreProceso));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@excepcion", alerta.Exception?.ToString() ?? string.Empty));
+
+                    cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+                }, ct);
+
+                return spResult.Exito;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Inserta_alerta|{ex.Message}");
+                return false;
+            }
+        }
+
+    }
+}
+
+using MUFG_T24.Enums_utilidades;
+using System;
+using System.Diagnostics;
+using System.Reflection;
+using System.ServiceProcess;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace MUFG_T24.ControladorServicios_Utilidades
+{
+    /// <summary>
+    /// Base para centralizar el ciclo de vida y manejo robusto de errores de un Windows Service.
+    /// </summary>
+    public abstract class WindowsServiceHostBase : ServiceBase
+    {
+        private CancellationTokenSource _cts;
+        private System.Timers.Timer _timerServicio;
+        private Task _startupTask = Task.CompletedTask;
+        private Task _runningTask = Task.CompletedTask;
+        private Task _backgroundTask = Task.CompletedTask;
+        private readonly SemaphoreSlim _tickLock = new SemaphoreSlim(1, 1);
+        private int _startupFailureSignaled;
+
+        protected abstract string NombreServicioLog { get; }
+        protected abstract bool TimerEnabled { get; }
+        protected abstract double TimerIntervalMs { get; }
+        protected virtual TimeSpan WaitTimeout => TimeSpan.FromSeconds(60);
+        protected virtual TimeSpan CleanupTimeout => TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// Habilita la validación centralizada del contrato de inicialización:
+        /// Pid, NombreProceso y NombreDisplay.
+        /// </summary>
+        protected virtual bool ValidarContratoInicializacion => true;
+
+        /// <summary>
+        /// Indica si el servicio ejecuta una tarea de fondo de larga duración (ej. un TCP listener)
+        /// además o en lugar del timer. Por defecto deshabilitado para preservar el comportamiento
+        /// de los servicios basados en timer existentes.
+        /// </summary>
+        protected virtual bool EjecutarTareaLarga => false;
+
+        /// <summary>
+        /// Tarea de fondo de larga duración (ej. loop de un TCP listener). Sólo se invoca cuando
+        /// <see cref="EjecutarTareaLarga"/> es true.
+        /// </summary>
+        protected virtual Task TareaLargaAsync(CancellationToken ct) => Task.CompletedTask;
+
+        /// <summary>
+        /// Permite señalizar de forma síncrona la detención de la tarea de fondo (ej. detener un
+        /// TcpListener) para desbloquear operaciones de espera bloqueantes como AcceptTcpClientAsync.
+        /// </summary>
+        protected virtual void DetenerTareaLarga() { }
+
+        /// <summary>
+        /// Indica si el servicio cuenta con los recursos mínimos para ejecutar la terminación particular.
+        /// </summary>
+        protected virtual bool InicializacionCompleta => true;
+
+        /// <summary>
+        /// Libera recursos particulares del servicio al finalizar el ciclo de terminación.
+        /// </summary>
+        protected virtual void LiberarRecursosTerminacion() { }
+
+        protected abstract void Inicializacion(string[] args, CancellationToken ct);
+        protected abstract Task ParametrizacionesAsync(CancellationToken ct);
+        protected abstract Task OnTimerAsync(CancellationToken ct);
+        protected abstract Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask);
+
+#if DEBUG
+        private bool _debugSingleShot;
+#endif
+
+        /// <summary>
+        /// Utilidad para ejecutar como consola en modo DEBUG.
+        /// </summary>
+        public void DebugRun(string[] args)
+        {
+#if DEBUG
+            if (!Environment.UserInteractive)
+                throw new InvalidOperationException("DebugRun sólo debe ejecutarse desde una consola interactiva en modo DEBUG.");
+
+            OnStart(args);
+            Console.WriteLine("Servicio iniciado en modo DEBUG. Presiona ENTER para detener...");
+            Console.ReadLine();
+            OnStop();
+#else
+            throw new InvalidOperationException("DebugRun no está disponible en compilaciones RELEASE.");
+#endif
+        }
+
+        /// <summary>
+        /// Contrato OnStart.
+        /// </summary>
+        protected override void OnStart(string[] args)
+        {
+            try
+            {
+                ServiceName = NombreServicioLog;
+
+                _cts = new CancellationTokenSource();
+                _startupTask = Task.Run(() => StartupAsync(args, _cts.Token));
+            }
+            catch (Exception ex)
+            {
+                HandleStartupFailure(ex);
+            }
+        }
+
+        /// <summary>
+        /// Contrato OnStop.
+        /// </summary>
+        protected override void OnStop()
+        {
+            try
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|OnStop|Finalizando Servicio.");
+
+                var waitTimeout = WaitTimeout;
+                var cleanupTimeout = CleanupTimeout;
+
+                if (!Environment.UserInteractive)
+                    RequestAdditionalTime((int)(waitTimeout + cleanupTimeout + TimeSpan.FromSeconds(5)).TotalMilliseconds);
+
+                _timerServicio?.Stop();
+                _cts?.Cancel();
+                DetenerTareaLarga();
+
+                using (CancellationTokenSource waitCts = new CancellationTokenSource(waitTimeout))
+                using (CancellationTokenSource cleanupCts = new CancellationTokenSource(cleanupTimeout))
+                {
+                    TimeSpan totalTimeout = waitTimeout + cleanupTimeout;
+                    Task terminacionTask = Task.Run(() => EjecutarTerminacionAsync(waitCts.Token, cleanupCts.Token, _startupTask, Task.WhenAll(_runningTask, _backgroundTask)));
+
+                    Task completedTask = Task.WhenAny(terminacionTask, Task.Delay(totalTimeout)).GetAwaiter().GetResult();
+
+                    if (completedTask != terminacionTask)
+                    {
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"WARN|OnStop|La terminación excedió {totalTimeout.TotalSeconds} segundos. Se continúa cierre para no bloquear SCM.");
+                        return;
+                    }
+
+                    terminacionTask.GetAwaiter().GetResult();
+                }
+
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|OnStop|Terminación exitosa de bases de datos.");
+            }
+            catch (Exception ex)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|OnStop|{ex}");
+            }
+            finally
+            {
+                _timerServicio?.Dispose();
+                _cts?.Dispose();
+            }
+        }
+
+        private async Task EjecutarTerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            try
+            {
+                if (!InicializacionCompleta)
+                {
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|OnStop|Terminación omitida por inicialización incompleta.");
                     return;
                 }
 
-                using (AsyncScopedLifestyle.BeginScope(_containerDI))
-                {
-                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
-
-                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
-                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
-
-                    //Marca el servicio en uso...
-                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
-
-                    //Marca el termino del servicio...
-                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
-
-                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
-                }
+                await TerminacionAsync(waitCt, cleanupCt, startupTask, runningTask).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -948,257 +2736,469 @@ namespace SPID_CEP_GEN_CDA
             }
             catch (Exception ex)
             {
-                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|TerminacionAsync|{ex}");
             }
             finally
             {
-                _containerDI?.Dispose();
+                try
+                {
+                    LiberarRecursosTerminacion();
+                }
+                catch (Exception ex)
+                {
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|LiberarRecursosTerminacion|{ex}");
+                }
             }
         }
 
-    }
-}
-
-﻿using MUFG_T24.Comunes;
-using MUFG_T24.ControladorServicios_Utilidades;
-using System.ServiceProcess;
-
-namespace SPID_CEP_GEN_CDA
-{
-    /// <summary>
-    /// Clase de entrada.
-    /// </summary>
-    internal static class Program
-    {
         /// <summary>
-        /// Punto de entrada Main.
+        /// Espera a que una tarea activa finalice o se cancele por timeout.
         /// </summary>
-        static void Main(string[] args)
+        protected static async Task EsperarTareaActivaAsync(Task task, string descripcion, CancellationToken ct)
         {
-            WindowsServiceProgramRunner.Run(
-                NombreServicio.SPEI_CEP_ENV_CDA.ToString(),
-                () => new ServiceHost(),
-                args
-#if DEBUG
-                , (service, startupArgs) => ((ServiceHost)service).DebugRun(startupArgs)
-#endif
-                );
+            if (task == null || task.IsCompleted)
+                return;
+
+            Task timeoutTask = Task.Delay(Timeout.Infinite, ct);
+            Task completedTask = await Task.WhenAny(task, timeoutTask).ConfigureAwait(false);
+
+            if (completedTask != task)
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"WARN|OnStop|Timeout esperando terminación de {descripcion}.");
         }
 
+        /// <summary>
+        /// Wrapper público del método de espera de tarea activa.
+        /// </summary>
+        public static Task EsperarTareaActivaWrapperAsync(Task task, string descripcion, CancellationToken ct)
+            => EsperarTareaActivaAsync(task, descripcion, ct);
+
+        private void InicializarTimer()
+        {
+            _timerServicio = new System.Timers.Timer
+            {
+                Enabled = false,
+                AutoReset = true,
+                Interval = TimerIntervalMs
+            };
+
+            _timerServicio.Elapsed += async (sender, e) =>
+            {
+                if (_cts?.IsCancellationRequested == true)
+                    return;
+
+                try
+                {
+                    await OnTimerElapsedAsync(_cts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Apagado normal
+                }
+                catch (Exception ex)
+                {
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Elapsed|{ex}");
+                }
+            };
+        }
+
+        private async Task StartupAsync(string[] args, CancellationToken ct)
+        {
+            try
+            {
+                Inicializacion(args, ct);
+                InicializarTimer();
+
+                await ParametrizacionesAsync(ct).ConfigureAwait(false);
+
+                if (ValidarContratoInicializacion)
+                    ValidarContratoInicializacionProceso();
+
+                if (!ct.IsCancellationRequested && TimerEnabled && _timerServicio != null)
+                {
+                    try
+                    {
+                        _timerServicio.Start();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Apagado normal
+                    }
+                }
+
+                if (!ct.IsCancellationRequested && EjecutarTareaLarga)
+                {
+                    _backgroundTask = TareaLargaAsync(ct);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Apagado normal
+            }
+            catch (Exception ex)
+            {
+                HandleStartupFailure(ex);
+                throw;
+            }
+        }
+
+        private void ValidarContratoInicializacionProceso()
+        {
+            object configuracion = ObtenerConfiguracionProceso();
+            if (configuracion == null)
+            {
+                throw new InvalidOperationException("No fue posible validar el contrato de inicialización: no se encontró un objeto de configuración con propiedades Pid, NombreProceso y NombreDisplay.");
+            }
+
+            Type tipo = configuracion.GetType();
+            PropertyInfo propiedadPid = tipo.GetProperty("Pid", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            PropertyInfo propiedadNombreProceso = tipo.GetProperty("NombreProceso", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            PropertyInfo propiedadNombreDisplay = tipo.GetProperty("NombreDisplay", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            object pid = propiedadPid?.GetValue(configuracion, null);
+            string nombreProceso = propiedadNombreProceso?.GetValue(configuracion, null) as string;
+            string nombreDisplay = propiedadNombreDisplay?.GetValue(configuracion, null) as string;
+
+            int pidNumero = pid is int pidEntero ? pidEntero : 0;
+            bool pidValido = pidNumero > 0;
+            if (!pidValido || string.IsNullOrWhiteSpace(nombreProceso) || string.IsNullOrWhiteSpace(nombreDisplay))
+            {
+                throw new InvalidOperationException($"Contrato de inicialización inválido. Pid='{pid}', NombreProceso='{nombreProceso}', NombreDisplay='{nombreDisplay}'.");
+            }
+
+            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|Inicializacion|Contrato validado: PID={pidNumero}, NombreProceso='{nombreProceso}', NombreDisplay='{nombreDisplay}'.");
+        }
+
+        private object ObtenerConfiguracionProceso()
+        {
+            Type hostType = GetType();
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            object porConvencion = hostType.GetField("_configuracionBase", flags)?.GetValue(this)
+                                ?? hostType.GetField("_configuracion", flags)?.GetValue(this)
+                                ?? hostType.GetProperty("Configuracion", flags)?.GetValue(this, null)
+                                ?? hostType.GetProperty("ConfiguracionBase", flags)?.GetValue(this, null);
+            if (porConvencion != null)
+                return porConvencion;
+
+            foreach (FieldInfo field in hostType.GetFields(flags))
+            {
+                object value = field.GetValue(this);
+                if (EsConfiguracionConContrato(value))
+                    return value;
+            }
+
+            foreach (PropertyInfo property in hostType.GetProperties(flags))
+            {
+                if (property.GetIndexParameters().Length > 0)
+                    continue;
+
+                object value;
+                try
+                {
+                    value = property.GetValue(this, null);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (EsConfiguracionConContrato(value))
+                    return value;
+            }
+
+            return null;
+        }
+
+        private static bool EsConfiguracionConContrato(object instancia)
+        {
+            if (instancia == null)
+                return false;
+
+            Type tipo = instancia.GetType();
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            return tipo.GetProperty("Pid", flags) != null
+                && tipo.GetProperty("NombreProceso", flags) != null
+                && tipo.GetProperty("NombreDisplay", flags) != null;
+        }
+
+        private async Task OnTimerElapsedAsync(CancellationToken ct)
+        {
+#if DEBUG
+            if (_debugSingleShot)
+                return;
+
+            _debugSingleShot = true;
+#endif
+
+            if (!await _tickLock.WaitAsync(0, ct).ConfigureAwait(false))
+                return;
+
+            try
+            {
+                await _startupTask.ConfigureAwait(false);
+                _runningTask = OnTimerAsync(ct);
+                await _runningTask.ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!(ex is OperationCanceledException))
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Realiza_timer|Se presenta exception: {ex}");
+            }
+            finally
+            {
+                _runningTask = Task.CompletedTask;
+                _tickLock.Release();
+            }
+        }
+
+        private void HandleStartupFailure(Exception ex)
+        {
+            if (Interlocked.Exchange(ref _startupFailureSignaled, 1) == 1)
+                return;
+
+            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|OnStart|{ex}");
+            TryWriteEventLog($"Error en OnStart: {ex}");
+
+            ExitCode = 1;
+            _ = Task.Run(() => Stop());
+        }
+
+        private void TryWriteEventLog(string message)
+        {
+            try
+            {
+                if (!EventLog.SourceExists(NombreServicioLog))
+                {
+                    EventLog.CreateEventSource(NombreServicioLog, "Application");
+                }
+
+                EventLog.WriteEntry(NombreServicioLog,
+                    message,
+                    EventLogEntryType.Error);
+            }
+            catch
+            {
+                //No-op
+            }
+        }
     }
 }
 
-Aplicacion.csproj
-<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
-	<PlatformTarget>x86</PlatformTarget>
-    <AssemblyName>AplicacionSPIDCEPGEN</AssemblyName>
-  </PropertyGroup>
+USE [InterfacesT24]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/***********************************************************************
+NOMBRE              :  dbo.usp_SpidGenCda_MarcarOperacionProcesada
+SISTEMA/BD          :  InterfacesT24
+AUTOR               :  Rafael Domínguez
+FECHA               :  2026-08-03
 
-  <ItemGroup>
-    <Reference Include="MUFG_T24">
-      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-    </Reference>
-  </ItemGroup>
+DESCRIPCIÓN         :
+Marca una operación como PROCESADA en el plan de trabajo maestro.
 
-</Project>
+ALCANCE / NOTAS     :
+- Operación DML.
+- Actualiza el estado de la operación por folio y tipo de operación.
 
-Infraestructura.csproj
-<Project Sdk="Microsoft.NET.Sdk">
+PARÁMETROS          :
+@Folio         BIGINT
+@TipoOperacion VARCHAR(10)
 
-  <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
-	<PlatformTarget>x86</PlatformTarget>
-    <AssemblyName>InfraestructuraSPIDCEPGEN</AssemblyName>
-  </PropertyGroup>
+CONTROL DE CAMBIOS  :
+2026-08-03 | Rafael Domínguez | Creación SP
+***********************************************************************/
+CREATE OR ALTER PROCEDURE dbo.usp_SpidGenCda_MarcarOperacionProcesada
+(
+      @Folio         BIGINT
+    , @TipoOperacion VARCHAR(10)
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-  <ItemGroup>
-    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj" />
-  </ItemGroup>
+    BEGIN TRY
+        DECLARE @FilasAfectadas INT;
 
-  <ItemGroup>
-    <Reference Include="MUFG_T24">
-      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-    </Reference>
-  </ItemGroup>
+        BEGIN TRANSACTION;
 
-</Project>
+        UPDATE dbo.tb_srv_plan_trabajo_maestro
+        SET
+              cve_estatus          = 'PROCESADA'
+            , flg_terminado        = 1
+            , fec_fin              = GETDATE()
+            , num_estatus_especial = 0
+        WHERE
+                folio          = @Folio
+            AND tipo_operacion = @TipoOperacion;
 
-SPID_CEP_GEN_CDA.csproj
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
-  <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}</ProjectGuid>
-    <OutputType>Exe</OutputType>
-    <RootNamespace>SPID_CEP_GEN_CDA</RootNamespace>
-    <AssemblyName>SPID_CEP_GEN_CDA</AssemblyName>
-    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
-    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
-    <Deterministic>true</Deterministic>
-    <NuGetPackageImportStamp>
-    </NuGetPackageImportStamp>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <PlatformTarget>x86</PlatformTarget>
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <PlatformTarget>x86</PlatformTarget>
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup>
-    <StartupObject />
-  </PropertyGroup>
-  <ItemGroup>
-    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, PublicKeyToken=2eed977a6ac043c8, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-    </Reference>
-    <Reference Include="SimpleInjector, Version=5.0.0.0, Culture=neutral, PublicKeyToken=984cb50dea722e99, processorArchitecture=MSIL">
-      <HintPath>..\packages\SimpleInjector.5.5.0\lib\net461\SimpleInjector.dll</HintPath>
-    </Reference>
-    <Reference Include="System" />
-    <Reference Include="System.Configuration" />
-    <Reference Include="System.Data" />
-    <Reference Include="System.Numerics" />
-    <Reference Include="System.ServiceProcess" />
-    <Reference Include="System.Xml" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Include="ServiceHost.cs">
-      <SubType>Component</SubType>
-    </Compile>
-    <Compile Include="ServiceHost.Designer.cs">
-      <DependentUpon>ServiceHost.cs</DependentUpon>
-    </Compile>
-    <Compile Include="Program.cs" />
-    <Compile Include="Properties\AssemblyInfo.cs" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="App.config" />
-    <None Include="packages.config" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj">
-      <Project>{54cc424c-8227-4e2a-a81f-9d6e0daa9726}</Project>
-      <Name>Aplicacion</Name>
-    </ProjectReference>
-    <ProjectReference Include="..\Infraestructura\Infraestructura.csproj">
-      <Project>{29917ce7-77fb-4cd4-b196-5a6a3ba132e1}</Project>
-      <Name>Infraestructura</Name>
-    </ProjectReference>
-  </ItemGroup>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-</Project>
+        SET @FilasAfectadas = @@ROWCOUNT;
 
-README.md
-# SPID_CEP_GEN_CDA
+        COMMIT TRANSACTION;
+
+        SELECT
+              @FilasAfectadas AS FilasAfectadas
+            , CASE WHEN @FilasAfectadas > 0 THEN 1 ELSE 0 END AS Afecto;
+
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+
+        INSERT INTO auditoria.errorlog
+        (
+              errornumber
+            , errorseverity
+            , errorstate
+            , errorprocedure
+            , errorline
+            , errormessage
+        )
+        VALUES
+        (
+              ERROR_NUMBER()
+            , ERROR_SEVERITY()
+            , ERROR_STATE()
+            , ERROR_PROCEDURE()
+            , ERROR_LINE()
+            , ERROR_MESSAGE()
+        );
+
+        THROW;
+
+    END CATCH;
+END;
+GO
+
+USE [InterfacesT24]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+/***********************************************************************
+NOMBRE              :  dbo.usp_SpidGenCda_ObtenerRegistrosCda
+SISTEMA/BD          :  InterfacesT24
+AUTOR               :  Rafael Domínguez
+FECHA               :  2026-08-03
+
+DESCRIPCIÓN         :
+Obtiene las operaciones pendientes del plan de trabajo para generación
+de CDA.
+
+ALCANCE / NOTAS     :
+- Consulta de operaciones ENT_SPID pendientes.
+- Mantiene la lógica legacy de selección por tipo de operación y alias.
+
+PARÁMETROS          :
+@ListaTiposOperacion NVARCHAR(MAX)
+@AliasProceso        VARCHAR(50)
+
+CONTROL DE CAMBIOS  :
+2026-08-03 | Rafael Domínguez | Creación SP
+***********************************************************************/
+CREATE OR ALTER PROCEDURE dbo.usp_SpidGenCda_ObtenerRegistrosCda
+(
+      @ListaTiposOperacion NVARCHAR(MAX)
+    , @AliasProceso        VARCHAR(50)
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+
+        ------------------------------------------------------------------
+        -- Convierte "'Tipo1','Tipo2','Tipo3'" a tabla
+        ------------------------------------------------------------------
+        DECLARE @ListaTipos TABLE
+        (
+            tipo_operacion VARCHAR(50)
+        );
+
+        DECLARE @xml XML;
+
+        SET @xml = CAST(
+            '<x>' + REPLACE(REPLACE(@ListaTiposOperacion, '''', ''), ',', '</x><x>') + '</x>'
+            AS XML
+        );
+
+        INSERT INTO @ListaTipos (tipo_operacion)
+        SELECT T.c.value('.', 'VARCHAR(50)')
+        FROM @xml.nodes('/x') T(c);
+
+        ------------------------------------------------------------------
+        -- SQL LEGACY (MISMA LÓGICA)
+        ------------------------------------------------------------------
+        SELECT
+              Det_plan.servicio
+            , Det_plan.tipo_operacion
+            , Det_plan.folio
+            , Det_resumen.fec_valor
+        FROM
+        (
+            SELECT
+                  Det.folio
+                , Det.tipo_operacion
+                , MIN(Det.orden_ejecucion) AS orden_ejecucion
+                , Mto.fec_valor
+            FROM dbo.tb_srv_plan_trabajo_maestro  AS Mto WITH (NOLOCK)
+            JOIN dbo.tb_srv_plan_trabajo_detalle  AS Det WITH (NOLOCK)
+                ON  Mto.folio = Det.folio
+                AND Mto.tipo_operacion = Det.tipo_operacion
+            WHERE
+                    Mto.flg_terminado = 0
+                AND Mto.flg_cierre    = 0
+                AND Mto.tipo_operacion IN
+                    (
+                        SELECT tipo_operacion
+                        FROM @ListaTipos
+                    )
+                AND Det.flg_terminado = 0
+            GROUP BY
+                  Det.folio
+                , Det.tipo_operacion
+                , Mto.fec_valor
+        ) AS Det_resumen
+        JOIN dbo.tb_srv_plan_trabajo_detalle AS Det_plan WITH (NOLOCK)
+            ON  Det_plan.folio            = Det_resumen.folio
+            AND Det_plan.tipo_operacion   = Det_resumen.tipo_operacion
+            AND Det_plan.orden_ejecucion  = Det_resumen.orden_ejecucion
+        WHERE
+            Det_plan.alias_proceso = @AliasProceso
+        ORDER BY
+            Det_plan.fec_inicio;
+
+    END TRY
+    BEGIN CATCH
+        INSERT INTO auditoria.errorlog
+        (
+              errornumber
+            , errorseverity
+            , errorstate
+            , errorprocedure
+            , errorline
+            , errormessage
+        )
+        VALUES
+        (
+              ERROR_NUMBER()
+            , ERROR_SEVERITY()
+            , ERROR_STATE()
+            , ERROR_PROCEDURE()
+            , ERROR_LINE()
+            , ERROR_MESSAGE()
+        );
+
+        THROW;
+    END CATCH;
+END;
+GO
 
 
-
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin http://gitlab.mufg.mx/mufg-it/mufg-sda/middleware-nttdata/spei_spid/SPID_CEP_GEN_CDA.git
-git branch -M main
-git push -uf origin main
-```
-
-## Integrate with your tools
-
-- [ ] [Set up project integrations](http://gitlab.mufg.mx/mufg-it/mufg-sda/middleware-nttdata/spei_spid/SPID_CEP_GEN_CDA/-/settings/integrations)
-
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
