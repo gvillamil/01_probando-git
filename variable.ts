@@ -1,3204 +1,412 @@
-using MUFG_T24.Comunes;
-using MUFG_T24.ControladorServicios_Utilidades;
-using MUFG_T24.Enums_utilidades;
-using MUFG_T24.Inicializacion_dtos;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Data;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace MUFG_T24.Inicializacion_utilidades
-{
-    /// <summary>
-    /// Implementación de control operativo de servicio (estado de proceso/puerto en BD).
-    /// No administra el arranque o detención de servicios Windows.
-    /// </summary>
-    public class ControlServicio : RepositorioMaestro, IControlServicio
-    {
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public ControlServicio()
-            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
-        { }
-
-        /// <summary>
-        /// Marca estado operativo del servicio en BD.
-        /// Con valores (pid/proceso/display) marca servicio operando; con valores nulos libera el estado al apagar.
-        /// </summary>
-        public Task<bool> MarcarPuertoEnUsoAsync(int? pid, string nombreProceso, string nombreDisplay, string nombreServicio)
-        {
-            return MarcarPuertoEnUsoAsync(pid, nombreProceso, nombreDisplay, nombreServicio, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Marca estado operativo del servicio en BD.
-        /// Con valores (pid/proceso/display) registra servicio en ejecución.
-        /// Con valores nulos (pid/proceso/display) registra servicio detenido y limpia identidad operativa.
-        /// </summary>
-        /// <param name="pid">PID del proceso en ejecución o null durante apagado.</param>
-        /// <param name="nombreProceso">Nombre del proceso en ejecución o null durante apagado.</param>
-        /// <param name="nombreDisplay">DisplayName del servicio en ejecución o null durante apagado.</param>
-        /// <param name="nombreServicio">Clave técnica del servicio a actualizar.</param>
-        /// <param name="ct">Token de cancelación.</param>
-        public async Task<bool> MarcarPuertoEnUsoAsync(int? pid, string nombreProceso, string nombreDisplay, string nombreServicio, CancellationToken ct)
-        {
-            
-            try
-            {
-                ct.ThrowIfCancellationRequested();
-                var resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(ConstantesProcedimientosMUFG.UspActualizarEnUso, cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@giPID", pid.HasValue ? (object)pid.Value : DBNull.Value));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsProcessName", (object)nombreProceso ?? DBNull.Value));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsDisplayName", (object)nombreDisplay ?? DBNull.Value));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsNombre_Servicio", nombreServicio));
-                }, ct);
-                return resultado.Exito;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch(Exception ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|onStop|No se pudo marcar en base de datos el puerto como disponible: {ex}");
-                Alertas alerta = new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null);
-                await alerta.InsertarAlerta(new AlertaDTO()
-                {
-                    Folio = null,
-                    TipoOPeracion = null,
-                    Servicio = nombreServicio,
-                    ClaveAviso = ConstantesClaveAviso.Critico,
-                    Descipcion = "No se pudo marcar en base de datos el puerto como disponible",
-                    PId = pid.GetValueOrDefault(),
-                    NombreProceso = nombreProceso,
-                    Exception = ex
-                }, ct);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Marca una operación como error por fecha pasada.
-        /// Uso mínimo cuando solo se conoce el folio.
-        /// </summary>
-        public async Task<bool> MarcarErrorFechaPasada(long folio, CancellationToken ct = default)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            var resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(
-                "dbo.usp_despachador_MarcarErrorFechaPasada",
-                cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", folio));
-                }, ct);
-
-            return resultado.Exito;
-        }
-
-        public Task EsperarTareaActivaAsync(Task task, string descripcion, CancellationToken ct)
-            => WindowsServiceHostBase.EsperarTareaActivaWrapperAsync(task, descripcion, ct);
-
-        public new Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio)
-            => base.ActualizaEJecucion(nombreServicio);
-
-        public new Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio, CancellationToken ct)
-            => base.ActualizaEJecucion(nombreServicio, ct);
-
-        public new Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso)
-            => base.ActualizaErrorProceso(proceso);
-
-        public new Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso, CancellationToken ct)
-            => base.ActualizaErrorProceso(proceso, ct);
-
-        public new Task<StoredProcedureResult> ActualizaErrorProcesoSwift(ProcesoDTO proceso)
-            => base.ActualizaErrorProcesoSwift(proceso);
-
-        public new Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio)
-            => base.ActualizaTerminacion(nombreServicio);
-
-        public new Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio, CancellationToken ct)
-            => base.ActualizaTerminacion(nombreServicio, ct);
-
-        public new Task<DataTable> CalypsoConsultaLimiteLineas(string cdl = "")
-            => base.CalypsoConsultaLimiteLineas(cdl);
-
-        public new bool CalypsoDeserializarClase(string xml, ref object objeto, TipoSerializacion tipoSerializacion, bool removerDataTag, string nombreNodoRoot = "")
-            => base.CalypsoDeserializarClase(xml, ref objeto, tipoSerializacion, removerDataTag, nombreNodoRoot);
-
-        public new Task<string> CalypsoObtenerNombreCorto(string cdl)
-            => base.CalypsoObtenerNombreCorto(cdl);
-
-        public new string CalypsoSerializarClase(object objeto, TipoSerializacion tipoSerializacion, bool RemoveDiacritics, bool AddNodeTag, EncodingEnum encodingEnum = EncodingEnum.Encode_Default, string rootNodeName = "")
-            => base.CalypsoSerializarClase(objeto, tipoSerializacion, RemoveDiacritics, AddNodeTag, encodingEnum, rootNodeName);
-
-        public new Task<DataTable> EjecutarEsquemaProcedimientoAlmacenado(string nombreSp, Action<IDbCommand> parametrosConfig = null)
-            => base.EjecutarEsquemaProcedimientoAlmacenado(nombreSp, parametrosConfig);
-
-        public new Task<bool> EsDiaHabil()
-            => base.EsDiaHabil();
-
-        public new Task<bool> EsDiaHabil(CancellationToken ct)
-            => base.EsDiaHabil(ct);
-
-        public new Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso)
-            => base.IniciaProceso(proceso);
-
-        public new Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso, CancellationToken ct)
-            => base.IniciaProceso(proceso, ct);
-
-        public new Task<StoredProcedureResult> IniciaProcesoSwift(ProcesoDTO proceso)
-            => base.IniciaProcesoSwift(proceso);
-
-        public new Task<string> ObtenerFolioMaestro(string folio, string tipoOperacion)
-            => base.ObtenerFolioMaestro(folio, tipoOperacion);
-
-        public new Task<string> ObtenerFtSpei(string folio)
-            => base.ObtenerFtSpei(folio);
-
-        public new Task<string> ObtenerUltimoProceso(ProcesoDTO proceso)
-            => base.ObtenerUltimoProceso(proceso);
-
-        public new Task<string> ObtieneDisplayName(int procesoId)
-            => base.ObtieneDisplayName(procesoId);
-
-        public new Task<string> ObtieneUltimoProcesoSwift(ProcesoDTO proceso)
-            => base.ObtieneUltimoProcesoSwift(proceso);
-
-        public new Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso)
-            => base.TerminaProceso(proceso);
-
-        public new Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso, CancellationToken ct)
-            => base.TerminaProceso(proceso, ct);
-
-        public new Task<StoredProcedureResult> TerminaProcesoSwift(ProcesoDTO proceso)
-            => base.TerminaProcesoSwift(proceso);
-
-    }
-}
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Encriptacion;
-using MUFG_T24.Conexiones;
-using MUFG_T24.Enums_utilidades;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using Oracle.ManagedDataAccess.Client;
-using System;
-using System.Collections.Generic;
-using System.Data;
-using System.Data.Common;
-using System.Data.SqlClient;
-using System.Globalization;
-using System.IO;
-using System.Linq;
-using System.Management;
-using System.Reflection;
-using System.Runtime.Serialization;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Xml;
-using System.Xml.Serialization;
-using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
-
-namespace MUFG_T24.Repositorios
-{
-    /// <summary>
-    /// Clase Maestro encargada de ejecutar las transacciones que se usaran en todos los repositorios
-    /// </summary>
-    public abstract class RepositorioMaestro
-    {
-        private sealed class ResultadoStoredProcedureException : Exception
-        {
-            public ResultadoStoredProcedureException(string message)
-                : base(message) { }
-        }
-
-        protected readonly IBasedatosConexion basedatosConexion;
-        protected readonly IBasedatosConexion basedatosConexionVistasT24;
-
-        /// <summary>
-        /// Inicializa una nueva instancia de RepositorioMaestro.
-        /// </summary>
-        protected RepositorioMaestro(
-            BasedatosProveedor proveedor,
-            NombreBasedatos nombreBasedatos,
-            BasedatosProveedor? proveedorVistasT24,
-            NombreBasedatos? nombreBasedatosVistasT24)
-        {
-            ConfiguracionEncriptadaHelper.Inicializar();
-            //EncriptarArchivoConfiguracion();
-            //ConexionBasedatosFactory.ObtenerDatosGenerales("Bandera");
-            this.basedatosConexion = ConexionBasedatosFactory.CrearConexion(proveedor, nombreBasedatos);
-            if (proveedorVistasT24 != null || nombreBasedatosVistasT24 != null)
-                this.basedatosConexionVistasT24 = ConexionBasedatosFactory.CrearConexion(proveedorVistasT24, nombreBasedatosVistasT24);
-        }
-
-        /// <summary>
-        /// Agrega un parámetro a un comando de base de datos.
-        /// </summary>
-        protected void AgregarParametro(IDbCommand cmd, string nombre, object valor, DbType tipo, int? tamaño = null)
-        {
-            IDbDataParameter parametro = basedatosConexion.CrearParametro(nombre, valor);
-            parametro.DbType = tipo;
-            if (tamaño.HasValue)
-                parametro.Size = tamaño.Value;
-            cmd.Parameters.Add(parametro);
-        }
-
-        /// <summary>
-        /// Ejecuta comandos que devuelven datos
-        /// </summary>
-        /// <param name="query"></param>
-        /// <param name="parametros"></param>
-        /// <param name="tipoComando"></param>
-        /// <returns>DataTable</returns>
-        protected async Task<StoredProcedureResult<T>> EjecutarReader<T>(string query, Action<IDbCommand> parametros = null,
-            CommandType tipoComando = CommandType.Text, bool esVistasT24 = false, int? commandTimeout = null) where T : new()
-        {
-            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
-            Type tipoDTO = typeof(T);
-            DbConnection _bdConexion;
-            DbCommand _comando;
-            if (esVistasT24)
-            {
-                _bdConexion = basedatosConexionVistasT24.CrearConexion();
-                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
-                _comando = basedatosConexionVistasT24.CrearComando(query, _bdConexion);
-            }
-            else
-            {
-                _bdConexion = basedatosConexion.CrearConexion();
-                _comando = basedatosConexion.CrearComando(query, _bdConexion);
-            }
-            using (DbConnection conexion = _bdConexion)
-            {
-                using (DbCommand cmd = _comando)
-                {
-                    try
-                    {
-                        cmd.CommandType = tipoComando;
-                        if (commandTimeout.HasValue)
-                        {
-                            cmd.CommandTimeout = commandTimeout.Value;
-                        }
-
-                        parametros?.Invoke(cmd);
-                        ConvertirParametrosNullADbNull(cmd);
-
-                        await conexion.OpenAsync().ConfigureAwait(false);
-                        using (DbDataReader lector = await cmd.ExecuteReaderAsync().ConfigureAwait(false))
-                        {
-                            Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
-                            PropertyInfo[] propiedades = tipoDTO.GetProperties();
-                            MethodInfo cloneMetodo = tipoDTO.GetMethod("Clone", Type.EmptyTypes);
-
-                            while (await lector.ReadAsync().ConfigureAwait(false))
-                            {
-                                EvaluarResultadoPorColumnas(spResult, lector, columnas);
-
-                                T instanciaDTO = new T();
-
-                                foreach (PropertyInfo prop in propiedades)
-                                {
-                                    try
-                                    {
-                                        if (!prop.CanWrite)
-                                            continue;
-
-                                        int ordinal;
-                                        if (!columnas.TryGetValue(prop.Name, out ordinal))
-                                            continue;
-
-                                        object dbValue = lector.GetValue(ordinal);
-
-                                        object valorConvertido;
-                                        bool conversionExitosa = IntentarConvertirValor(
-                                            dbValue,
-                                            prop.PropertyType,
-                                            out valorConvertido);
-
-                                        if (conversionExitosa)
-                                        {
-                                            prop.SetValue(instanciaDTO, valorConvertido, null);
-                                        }
-                                        else
-                                        {
-                                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                                                string.Format(
-                                                    "WARN|EjecutarReader|No se pudo convertir valor|Query:{0}|DTO:{1}|Propiedad:{2}|TipoDestino:{3}|Valor:{4}|ValorMeta:{5}|TipoOrigen:{6}",
-                                                    query,
-                                                    tipoDTO.FullName,
-                                                    prop.Name,
-                                                    prop.PropertyType.FullName,
-                                                    "***Enmascarado***",
-                                                    dbValue == null || dbValue == DBNull.Value
-                                                        ? "EsNull=true;Longitud=0"
-                                                        : "EsNull=false;Longitud=" + (Convert.ToString(dbValue, CultureInfo.InvariantCulture) ?? string.Empty).Length.ToString(CultureInfo.InvariantCulture),
-                                                    dbValue == null || dbValue == DBNull.Value ? "NULL" : dbValue.GetType().FullName));
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                                            string.Format(
-                                                ConstantesClaveAviso.Error + "|EjecutarReader|Query:{0}|DTO:{1}|Propiedad:{2}|Error:{3}",
-                                                query,
-                                                tipoDTO.FullName,
-                                                prop.Name,
-                                                ex));
-                                    }
-                                }
-
-                                if (cloneMetodo != null)
-                                {
-                                    T cloneInstancia = (T)cloneMetodo.Invoke(instanciaDTO, null);
-
-                                    ResetearObjeto(instanciaDTO);
-                                    spResult.Data.Add(cloneInstancia);
-                                }
-                                else
-                                {
-                                    spResult.Data.Add(instanciaDTO);
-                                }
-                            }
-                        }
-
-                        spResult.Exito = string.IsNullOrEmpty(spResult.MensajeError);
-                    }
-                    catch (ResultadoStoredProcedureException)
-                    {
-                        throw;
-                    }
-                    catch (SqlException sqlEx)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = sqlEx;
-                        spResult.MensajeError = string.Format("Error SQL:{0} {1}", sqlEx.Number, sqlEx.Message);
-                    }
-                    catch (Exception ex)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = ex;
-                        spResult.MensajeError = string.Format("Error general ejecutando query: {0}", ex.Message);
-
-                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                            string.Format(
-                                ConstantesClaveAviso.Error + "|EjecutarReader|Query:{0}|DTO:{1}|Error:{2}",
-                                query,
-                                tipoDTO.FullName,
-                                ex));
-                    }
-                }
-            }
-            return spResult;
-        }
-
-        /// <summary>
-        /// Ejecuta SP para consultas que devuelvan una lista de objectos
-        /// </summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="nombreSP"></param>
-        /// <param name="parametros"></param>
-        /// <returns>StoredProcedureResult<typeparamref name="T"/></returns>
-        protected Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros = null,
-            bool esVistasT24 = false, int? commandTimeout = null, bool validarAfectacion = false) where T : new()
-        {
-            return EjecutarStoredProcedureQuery<T>(nombreSP, parametros, CancellationToken.None, esVistasT24, commandTimeout, validarAfectacion);
-        }
-
-        protected Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros,
-            bool esVistasT24) where T : new()
-        {
-            return EjecutarStoredProcedureQuery<T>(nombreSP, parametros, CancellationToken.None, esVistasT24, null, false);
-        }
-
-        /// <summary>
-        /// Ejecuta EjecutarStoredProcedureQuery.
-        /// </summary>
-        protected async Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros,
-            CancellationToken ct, bool esVistasT24 = false, int? commandTimeout = null, bool validarAfectacion = false) where T : new()
-        {
-            ct.ThrowIfCancellationRequested();
-            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
-            Type tipoDTO = typeof(T);
-            DbConnection _bdConexion;
-            DbCommand _comando;
-
-            // Valida y crea la conexion a la base de datos
-            if (esVistasT24)
-            {
-                _bdConexion = basedatosConexionVistasT24.CrearConexion();
-                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
-                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
-            }
-            else
-            {
-                _bdConexion = basedatosConexion.CrearConexion();
-                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
-            }
-
-            using (DbConnection conexion = _bdConexion)
-            {
-                using (DbCommand comando = _comando)
-                {
-                    try
-                    {
-                        comando.CommandType = CommandType.StoredProcedure;
-                        if (commandTimeout.HasValue)
-                        {
-                            comando.CommandTimeout = commandTimeout.Value;
-                        }
-
-                        // Configuración de parámetros
-                        parametros?.Invoke(comando);
-
-                        ConvertirParametrosNullADbNull(comando);
-                      
-                        if (comando.Parameters.Contains("@exito"))
-                        {
-                            comando.Parameters["@exito"].DbType = DbType.Boolean;
-                        }
-
-                        await conexion.OpenAsync(ct).ConfigureAwait(false);
-
-                        using (DbDataReader lector = await comando.ExecuteReaderAsync(ct).ConfigureAwait(false))
-                        {
-                            Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
-                            PropertyInfo[] propiedades = tipoDTO.GetProperties();
-                            MethodInfo cloneMetodo = tipoDTO.GetMethod("Clone", Type.EmptyTypes);
-
-                            while (await lector.ReadAsync(ct).ConfigureAwait(false))
-                            {
-                                EvaluarAfectoPorFilasAfectadas(spResult, lector, columnas);
-                                EvaluarResultadoPorColumnas(spResult, lector, columnas);
-
-                                T instanciaDTO = new T();
-
-                                foreach (PropertyInfo prop in propiedades)
-                                {
-                                    try
-                                    {
-                                        if (!prop.CanWrite)
-                                            continue;
-
-                                        int ordinal;
-                                        if (!columnas.TryGetValue(prop.Name, out ordinal))
-                                            continue;
-
-                                        object dbValue = lector.GetValue(ordinal);
-
-                                        object valorConvertido;
-                                        bool conversionExitosa = IntentarConvertirValor(
-                                            dbValue,
-                                            prop.PropertyType,
-                                            out valorConvertido);
-
-                                        if (conversionExitosa)
-                                        {
-                                            prop.SetValue(instanciaDTO, valorConvertido, null);
-                                        }
-                                        else
-                                        {
-                                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                                                string.Format(
-                                                    "WARN|EjecutarStoredProcedureQuery|No se pudo convertir valor|SP:{0}|DTO:{1}|Propiedad:{2}|TipoDestino:{3}|Valor:{4}|ValorMeta:{5}|TipoOrigen:{6}",
-                                                    nombreSP,
-                                                    tipoDTO.FullName,
-                                                    prop.Name,
-                                                    prop.PropertyType.FullName,
-                                                    "***Enmascarado***",
-                                                    dbValue == null || dbValue == DBNull.Value
-                                                        ? "EsNull=true;Longitud=0"
-                                                        : "EsNull=false;Longitud=" + (Convert.ToString(dbValue, CultureInfo.InvariantCulture) ?? string.Empty).Length.ToString(CultureInfo.InvariantCulture),
-                                                    dbValue == null || dbValue == DBNull.Value ? "NULL" : dbValue.GetType().FullName));
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                                            string.Format(
-                                                ConstantesClaveAviso.Error + "|EjecutarStoredProcedureQuery|SP:{0}|DTO:{1}|Propiedad:{2}|Error:{3}",
-                                                nombreSP,
-                                                tipoDTO.FullName,
-                                                prop.Name,
-                                                ex));
-                                    }
-                                }
-
-                                if (cloneMetodo != null)
-                                {
-                                    T cloneInstancia = (T)cloneMetodo.Invoke(instanciaDTO, null);
-
-                                    ResetearObjeto(instanciaDTO);
-                                    spResult.Data.Add(cloneInstancia);
-                                }
-                                else
-                                {
-                                    spResult.Data.Add(instanciaDTO);
-                                }
-                            }
-                        }
-
-                        EvaluarResultadoPorParametrosSalida(spResult, comando);
-                        EvaluarAfectoPorData(spResult);
-
-                        FinalizarResultadoStoredProcedure(spResult, nombreSP);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        throw;
-                    }
-                    catch (ResultadoStoredProcedureException)
-                    {
-                        throw;
-                    }
-                    catch (SqlException sqlEx)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = sqlEx;
-                        spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
-                    }
-                    catch (Exception ex)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = ex;
-                        spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
-
-                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                            string.Format(
-                                ConstantesClaveAviso.Error + "|EjecutarStoredProcedureQuery|SP:{0}|DTO:{1}|Error:{2}",
-                                nombreSP,
-                                tipoDTO.FullName,
-                                ex));
-                        throw;
-                    }
-                }
-            }
-            ValidarResultadoStoredProcedure(spResult, nombreSP, validarAfectacion);
-            RegistrarAdvertenciaSinAfectacion(spResult, nombreSP, validarAfectacion);
-            return spResult;
-        }
-
-        /// <summary>
-        /// Ejecuta EjecutarStoredProcedureQuery.
-        /// </summary>
-        protected async Task<StoredProcedureResult<T>> EjecutarStoredProcedureQuery<T>(string nombreSP, Action<IDbCommand> parametros,
-            Func<DbDataReader, T> mapearRegistro, CancellationToken ct, bool esVistasT24 = false, int? commandTimeout = null, bool validarAfectacion = false)
-        {
-            if (mapearRegistro == null)
-                throw new ArgumentNullException(nameof(mapearRegistro));
-
-            ct.ThrowIfCancellationRequested();
-            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
-            DbConnection _bdConexion;
-            DbCommand _comando;
-
-            if (esVistasT24)
-            {
-                _bdConexion = basedatosConexionVistasT24.CrearConexion();
-                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
-                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
-            }
-            else
-            {
-                _bdConexion = basedatosConexion.CrearConexion();
-                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
-            }
-
-            using (DbConnection conexion = _bdConexion)
-            using (DbCommand comando = _comando)
-            {
-                try
-                {
-                    comando.CommandType = CommandType.StoredProcedure;
-                    if (commandTimeout.HasValue)
-                    {
-                        comando.CommandTimeout = commandTimeout.Value;
-                    }
-
-                    parametros?.Invoke(comando);
-                    ConvertirParametrosNullADbNull(comando);
-
-                    if (comando.Parameters.Contains("@exito"))
-                    {
-                        comando.Parameters["@exito"].DbType = DbType.Boolean;
-                    }
-
-                    await conexion.OpenAsync(ct).ConfigureAwait(false);
-
-                    using (DbDataReader lector = await comando.ExecuteReaderAsync(ct).ConfigureAwait(false))
-                    {
-                        Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
-
-                        while (await lector.ReadAsync(ct).ConfigureAwait(false))
-                        {
-                            EvaluarAfectoPorFilasAfectadas(spResult, lector, columnas);
-                            EvaluarResultadoPorColumnas(spResult, lector, columnas);
-                            spResult.Data.Add(mapearRegistro(lector));
-                        }
-                    }
-
-                    EvaluarResultadoPorParametrosSalida(spResult, comando);
-                    EvaluarAfectoPorData(spResult);
-
-                    FinalizarResultadoStoredProcedure(spResult, nombreSP);
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (ResultadoStoredProcedureException)
-                {
-                    throw;
-                }
-                catch (SqlException sqlEx)
-                {
-                    spResult.Exito = false;
-                    spResult.Exception = sqlEx;
-                    spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
-                }
-                catch (Exception ex)
-                {
-                    spResult.Exito = false;
-                    spResult.Exception = ex;
-                    spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
-
-                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                        string.Format(
-                            ConstantesClaveAviso.Error + "|EjecutarStoredProcedureQuery|SP:{0}|Mapper:{1}|Error:{2}",
-                            nombreSP,
-                            typeof(T).FullName,
-                            ex));
-                }
-            }
-
-            ValidarResultadoStoredProcedure(spResult, nombreSP, validarAfectacion);
-            RegistrarAdvertenciaSinAfectacion(spResult, nombreSP, validarAfectacion);
-            return spResult;
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ObtenerColumnasReader.
-        /// </summary>
-        private Dictionary<string, int> ObtenerColumnasReader(DbDataReader lector)
-        {
-            Dictionary<string, int> columnas = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-            for (int i = 0; i < lector.FieldCount; i++)
-            {
-                string nombreColumna = lector.GetName(i);
-
-                if (!columnas.ContainsKey(nombreColumna))
-                {
-                    columnas.Add(nombreColumna, i);
-                }
-            }
-
-            return columnas;
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de EvaluarAfectoPorFilasAfectadas.
-        /// </summary>
-        private void EvaluarAfectoPorFilasAfectadas(StoredProcedureResult spResult, DbDataReader lector, Dictionary<string, int> columnas)
-        {
-            int ordinal;
-            if (!columnas.TryGetValue("FilasAfectadas", out ordinal))
-                return;
-
-            object valor = lector.GetValue(ordinal);
-            if (valor == null || valor == DBNull.Value)
-            {
-                spResult.Afecto = null;
-                return;
-            }
-
-            int filasAfectadas = Convert.ToInt32(valor);
-            EvaluarAfectoPorFilasAfectadas(spResult, filasAfectadas);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de EvaluarAfectoPorFilasAfectadas.
-        /// </summary>
-        private void EvaluarAfectoPorFilasAfectadas(StoredProcedureResult spResult, int filasAfectadas)
-        {
-            spResult.FilasAfectadas = filasAfectadas;
-
-            if (filasAfectadas > 0)
-                spResult.Afecto = true;
-            else if (filasAfectadas == 0)
-                spResult.Afecto = false;
-            else
-                spResult.Afecto = null;
-        }
-
-        private void EvaluarResultadoPorColumnas(StoredProcedureResult spResult, DbDataReader lector, Dictionary<string, int> columnas)
-        {
-            int ordinal;
-
-            if (columnas.TryGetValue("Exito", out ordinal))
-            {
-                object valorExito = lector.GetValue(ordinal);
-                if (valorExito != null && valorExito != DBNull.Value)
-                    spResult.Exito = ConvertirABooleano(valorExito);
-            }
-
-            string mensajeError = ObtenerTextoColumna(lector, columnas, "MensajeError")
-                ?? ObtenerTextoColumna(lector, columnas, "ErrorMessage")
-                ?? ObtenerTextoColumna(lector, columnas, "IdentificadorError")
-                ?? ObtenerTextoColumna(lector, columnas, "IDENTIFICADORERROR");
-
-            if (!string.IsNullOrWhiteSpace(mensajeError))
-                spResult.MensajeError = mensajeError;
-        }
-
-        private string ObtenerTextoColumna(DbDataReader lector, Dictionary<string, int> columnas, string nombreColumna)
-        {
-            int ordinal;
-            if (!columnas.TryGetValue(nombreColumna, out ordinal))
-                return null;
-
-            object valor = lector.GetValue(ordinal);
-            if (valor == null || valor == DBNull.Value)
-                return null;
-
-            string texto = valor.ToString();
-            return string.IsNullOrWhiteSpace(texto) ? null : texto;
-        }
-
-        private void EvaluarResultadoPorParametrosSalida(StoredProcedureResult spResult, IDbCommand comando)
-        {
-            if (comando?.Parameters == null)
-                return;
-
-            IDataParameter parametroExito = ObtenerParametro(comando, "@exito");
-            if (parametroExito?.Value != null && parametroExito.Value != DBNull.Value)
-                spResult.Exito = ConvertirABooleano(parametroExito.Value);
-
-            IDataParameter parametroMensajeError = ObtenerParametro(comando, "@mensajeError")
-                ?? ObtenerParametro(comando, "@MensajeError")
-                ?? ObtenerParametro(comando, "@ErrorMessage");
-
-            if (parametroMensajeError?.Value == null || parametroMensajeError.Value == DBNull.Value)
-                return;
-
-            string mensajeError = parametroMensajeError.Value.ToString();
-            if (!string.IsNullOrWhiteSpace(mensajeError))
-                spResult.MensajeError = mensajeError;
-        }
-
-        private IDataParameter ObtenerParametro(IDbCommand comando, string nombreParametro)
-        {
-            if (comando?.Parameters == null || !comando.Parameters.Contains(nombreParametro))
-                return null;
-
-            return comando.Parameters[nombreParametro] as IDataParameter;
-        }
-
-        private void FinalizarResultadoStoredProcedure(StoredProcedureResult spResult, string nombreSP)
-        {
-            if (!string.IsNullOrWhiteSpace(spResult.MensajeError))
-            {
-                spResult.Exito = false;
-                throw new ResultadoStoredProcedureException(
-                    string.Format("Error ejecutando SP {0}: {1}", nombreSP, spResult.MensajeError));
-            }
-
-            if (!spResult.Exito)
-                spResult.Exito = true;
-        }
-
-        private void RegistrarAdvertenciaSinAfectacion(StoredProcedureResult spResult, string nombreSP, bool validarAfectacion)
-        {
-            if (validarAfectacion || !spResult.Exito)
-                return;
-
-            if (spResult.Afecto == true)
-                return;
-
-            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                string.Format(
-                    "WARN|EjecutarStoredProcedureQuery|SP:{0}|ExitoTecnico:true|Afecto:{1}|Mensaje:El SP no afectó filas ni devolvió resultados en modo no estricto.",
-                    nombreSP,
-                    spResult.Afecto.HasValue ? spResult.Afecto.Value.ToString() : "NULL"));
-        }
-
-        /// <summary>
-        /// Ejecuta EvaluarAfectoPorData.
-        /// </summary>
-        private void EvaluarAfectoPorData<T>(StoredProcedureResult<T> spResult)
-        {
-            if (!spResult.Afecto.HasValue)
-                spResult.Afecto = spResult.Data.Count > 0;
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ValidarResultadoStoredProcedure.
-        /// </summary>
-        private void ValidarResultadoStoredProcedure(StoredProcedureResult spResult, string nombreSP, bool validarAfectacion)
-        {
-            if (!validarAfectacion)
-                return;
-
-            if (!spResult.Exito)
-            {
-                throw spResult.Exception ?? new Exception(
-                    string.Format("Error ejecutando SP {0}: {1}", nombreSP, spResult.MensajeError));
-            }
-
-            if (spResult.Afecto == true)
-                return;
-
-            if (spResult.Afecto == false)
-            {
-                throw new Exception(
-                    string.Format("El SP {0} se ejecutó correctamente, pero no afectó filas ni devolvió resultados.", nombreSP));
-            }
-
-            throw new Exception(
-                string.Format("El SP {0} se ejecutó correctamente, pero no se pudo determinar si afectó filas o devolvió resultados.", nombreSP));
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de IntentarConvertirValor.
-        /// </summary>
-        private bool IntentarConvertirValor(object dbValue, Type tipoDestino, out object valorConvertido)
-        {
-            valorConvertido = null;
-
-            try
-            {
-                if (dbValue == null || dbValue == DBNull.Value)
-                {
-                    if (EsTipoNullable(tipoDestino))
-                    {
-                        valorConvertido = null;
-                        return true;
-                    }
-
-                    valorConvertido = ObtenerValorDefault(tipoDestino);
-                    return true;
-                }
-
-                Type tipoRealDestino = Nullable.GetUnderlyingType(tipoDestino) ?? tipoDestino;
-                Type tipoOrigen = dbValue.GetType();
-
-                if (tipoRealDestino.IsAssignableFrom(tipoOrigen))
-                {
-                    valorConvertido = dbValue;
-                    return true;
-                }
-
-                if (tipoRealDestino.IsEnum)
-                {
-                    if (dbValue is string)
-                    {
-                        valorConvertido = Enum.Parse(tipoRealDestino, dbValue.ToString(), true);
-                        return true;
-                    }
-
-                    object valorEnumBase = Convert.ChangeType(dbValue, Enum.GetUnderlyingType(tipoRealDestino));
-                    valorConvertido = Enum.ToObject(tipoRealDestino, valorEnumBase);
-                    return true;
-                }
-
-                if (tipoRealDestino == typeof(Guid))
-                {
-                    valorConvertido = new Guid(dbValue.ToString());
-                    return true;
-                }
-
-                if (tipoRealDestino == typeof(bool))
-                {
-                    valorConvertido = ConvertirABooleano(dbValue);
-                    return true;
-                }
-
-                if (tipoRealDestino == typeof(string))
-                {
-                    valorConvertido = dbValue.ToString();
-                    return true;
-                }
-
-                valorConvertido = Convert.ChangeType(
-                    dbValue,
-                    tipoRealDestino,
-                    System.Globalization.CultureInfo.InvariantCulture);
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de EsTipoNullable.
-        /// </summary>
-        private bool EsTipoNullable(Type tipo)
-        {
-            if (!tipo.IsValueType)
-                return true;
-
-            return Nullable.GetUnderlyingType(tipo) != null;
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ConvertirParametrosNullADbNull.
-        /// </summary>
-        private static void ConvertirParametrosNullADbNull(IDbCommand comando)
-        {
-            if (comando == null || comando.Parameters == null)
-                return;
-
-            foreach (IDataParameter parametro in comando.Parameters)
-            {
-                if ((parametro.Direction == ParameterDirection.Input ||
-                     parametro.Direction == ParameterDirection.InputOutput) &&
-                    parametro.Value == null)
-                {
-                    parametro.Value = DBNull.Value;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ObtenerValorDefault.
-        /// </summary>
-        private object ObtenerValorDefault(Type tipo)
-        {
-            if (!tipo.IsValueType)
-                return null;
-
-            return Activator.CreateInstance(tipo);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ConvertirABooleano.
-        /// </summary>
-        private bool ConvertirABooleano(object valor)
-        {
-            if (valor == null || valor == DBNull.Value)
-                return false;
-
-            if (valor is bool)
-                return (bool)valor;
-
-            string texto = valor.ToString().Trim();
-
-            if (texto == "1")
-                return true;
-
-            if (texto == "0")
-                return false;
-
-            if (string.Equals(texto, "true", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            if (string.Equals(texto, "false", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            if (string.Equals(texto, "S", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            if (string.Equals(texto, "N", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            if (string.Equals(texto, "Y", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            if (string.Equals(texto, "YES", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            if (string.Equals(texto, "NO", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            return Convert.ToBoolean(valor);
-        }
-
-        /// <summary>
-        /// Ejecuta SP para INSERT, UPDATE, DELETE y devuelve el ID generado por Identity
-        /// </summary>
-        /// <param name="nombreSP"></param>
-        /// <param name="parametros"></param>
-        /// <returns>StoredProcedureResult</returns>
-        protected Task<StoredProcedureResult> EjecutarStoredProceduredNonQuery(string nombreSP, Action<IDbCommand> parametros, bool esVistasT24 = false)
-        {
-            return EjecutarStoredProceduredNonQuery(nombreSP, parametros, CancellationToken.None, esVistasT24);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de EjecutarStoredProceduredNonQuery.
-        /// </summary>
-        protected async Task<StoredProcedureResult> EjecutarStoredProceduredNonQuery(string nombreSP, Action<IDbCommand> parametros, CancellationToken ct, bool esVistasT24 = false)
-        {
-            ct.ThrowIfCancellationRequested();
-            StoredProcedureResult spResult = new StoredProcedureResult();
-            DbConnection _bdConexion;
-            DbCommand _comando;
-            if (esVistasT24)
-            {
-                _bdConexion = basedatosConexionVistasT24.CrearConexion();
-                _bdConexion.ConnectionString = ConexionBasedatosFactory.ObtenerCadenaConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
-                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
-            }
-            else
-            {
-                _bdConexion = basedatosConexion.CrearConexion();
-                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
-            }
-            using (DbConnection conexion = _bdConexion)
-            {
-                using (DbCommand comando = _comando)
-                {
-                    try
-                    {
-                        comando.CommandType = CommandType.StoredProcedure;
-                        parametros?.Invoke(comando);
-
-                        if (comando.Parameters.Contains("@exito"))
-                        {
-                            comando.Parameters["@exito"].DbType = DbType.Boolean;
-                        }
-
-                        await conexion.OpenAsync(ct);
-                        await comando.ExecuteNonQueryAsync(ct);
-                        EvaluarResultadoPorParametrosSalida(spResult, comando);
-
-                        FinalizarResultadoStoredProcedure(spResult, nombreSP);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        throw;
-                    }
-                    catch (ResultadoStoredProcedureException)
-                    {
-                        throw;
-                    }
-                    catch (SqlException sqlEx)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = sqlEx;
-                        spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
-                    }
-                    catch (Exception ex)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = ex;
-                        spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
-                    }
-                }
-            }
-            return spResult;
-        }
-
-        /// <summary>
-        /// Metodo para NonQuery, si la ejecucion de vuelve datos, los guarda en Data
-        /// Para funciones que necesitan devolver una consulta despues de un Insert/Update/Delete
-        /// </summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="nombreSP"></param>
-        /// <param name="parametros"></param>
-        /// <param name="mapearEntidad"></param>
-        /// <param name="esVistasT24"></param>
-        /// <returns>StoredProcedureResult<T></returns>
-        protected async Task<StoredProcedureResult<T>> EjecutarStoredProceduredNonQueryConResultado<T>(
-            string nombreSP,
-            Action<IDbCommand> parametros,
-            Func<IDataReader, T> mapearEntidad,
-            bool esVistasT24 = false)
-        {
-            StoredProcedureResult<T> spResult = new StoredProcedureResult<T>();
-            DbConnection _bdConexion;
-            DbCommand _comando;
-            if (esVistasT24)
-            {
-                _bdConexion = basedatosConexionVistasT24.CrearConexion();
-                _comando = basedatosConexionVistasT24.CrearComando(nombreSP, _bdConexion);
-            }
-            else
-            {
-                _bdConexion = basedatosConexion.CrearConexion();
-                _comando = basedatosConexion.CrearComando(nombreSP, _bdConexion);
-            }
-            using (DbConnection conexion = basedatosConexion.CrearConexion())
-            {
-                using (DbCommand comando = basedatosConexion.CrearComando(nombreSP, conexion))
-                {
-                    try
-                    {
-                        comando.CommandType = CommandType.StoredProcedure;
-                        parametros?.Invoke(comando);
-
-                        await conexion.OpenAsync();
-
-                        // Lectura de consulta, si devuelve sino no entra
-                        using (DbDataReader lector = await comando.ExecuteReaderAsync())
-                        {
-                            Dictionary<string, int> columnas = ObtenerColumnasReader(lector);
-
-                            while (await lector.ReadAsync())
-                            {
-                                EvaluarAfectoPorFilasAfectadas(spResult, lector, columnas);
-                                EvaluarResultadoPorColumnas(spResult, lector, columnas);
-                                spResult.Data.Add(mapearEntidad(lector));
-                            }
-                        }
-                        if (!spResult.Afecto.HasValue)
-                            spResult.FilasAfectadas = spResult.Data.Count;
-
-                        EvaluarAfectoPorData(spResult);
-                        FinalizarResultadoStoredProcedure(spResult, nombreSP);
-                    }
-                    catch (ResultadoStoredProcedureException)
-                    {
-                        throw;
-                    }
-                    catch (SqlException sqlEx)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = sqlEx;
-                        spResult.MensajeError = $"Error SQL:{sqlEx.Number} {sqlEx.Message}";
-                    }
-                    catch (Exception ex)
-                    {
-                        spResult.Exito = false;
-                        spResult.Exception = ex;
-                        spResult.MensajeError = $"Error general ejecutando SP {nombreSP}: {ex.Message}";
-                    }
-                }
-            }
-            return spResult;
-        }
-
-        /// <summary>
-        /// Ejecuta una operacion sobre una conexion de BD abierta y devuelve informacion especifica del proveedor utilizado
-        /// </summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="selector"></param>
-        /// <returns>T</returns>
-        private T GetDbInfo<T>(Func<DbConnection, T> selector)
-        {
-            using (DbConnection conexion = basedatosConexion.CrearConexion())
-            {
-                conexion.Open();
-                if (conexion is DbConnection dbCon)
-                {
-                    return selector(dbCon);
-                }
-                return default;
-            }
-        }
-
-        #region Informacion de proveedor base de datos
-        /// <summary>
-        /// Inicializa una nueva instancia de ObtenerVersionServidor.
-        /// </summary>
-        protected string ObtenerVersionServidor() => GetDbInfo(c => c.ServerVersion ?? EsquemaColumnas.VERSION_DESCONOCIDA);
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ObtenerNombreBD.
-        /// </summary>
-        protected string ObtenerNombreBD() => GetDbInfo(c => c.Database.ToString() ?? EsquemaColumnas.BASEDATOS_DESCONICIDA);
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ObtenerNombreServidor.
-        /// </summary>
-        protected string ObtenerNombreServidor() => GetDbInfo(c => c.DataSource.ToString() ?? EsquemaColumnas.SERVIDOR_DESCONOCIDO);
-        #endregion
-
-        /// <summary>
-        /// Reinicia las propiedades de un objeto a sus props' por defecto
-        /// </summary>
-        /// <param name="objetoResetear"></param>
-        public static void ResetearObjeto(object objetoResetear)
-        {
-            if (objetoResetear == null) return;
-
-            Type tipoObjeto = objetoResetear.GetType();
-            foreach (PropertyInfo propiedad in tipoObjeto.GetProperties())
-            {
-                if (propiedad.CanWrite)
-                {
-                    object valorPorDefecto = null;
-                    if (propiedad.PropertyType.IsValueType)
-                    {
-                        valorPorDefecto = Activator.CreateInstance(propiedad.PropertyType);
-                    }
-                    propiedad.SetValue(objetoResetear, valorPorDefecto);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Obtiene DataTable
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="parametrosConfig"></param>
-        /// <returns>DataTable</returns>
-        public async Task<DataTable> EjecutarEsquemaProcedimientoAlmacenado(string nombreSp, Action<IDbCommand> parametrosConfig = null)
-        {
-            using (DbConnection conexion = basedatosConexion.CrearConexion())
-            {
-                using (DbCommand comando = basedatosConexion.CrearComando(nombreSp, conexion))
-                {
-                    comando.CommandType = CommandType.StoredProcedure;
-                    parametrosConfig?.Invoke(comando);
-
-                    await conexion.OpenAsync();
-                    using (DbDataReader lector = await comando.ExecuteReaderAsync(CommandBehavior.SchemaOnly))
-                    {
-                        return CrearEsquemaDataTable(lector.GetSchemaTable());
-                    }
-                }
-            }
-        }
-
-        /// <summary>
-        /// Crea DT con esquema
-        /// </summary>
-        /// <param name="esquema"></param>
-        /// <returns>DataTable</returns>
-        private static DataTable CrearEsquemaDataTable(DataTable esquema)
-        {
-            if (esquema == null)
-                return null;
-
-            DataTable tabla = new DataTable();
-
-            foreach (DataRow fila in esquema.Rows)
-            {
-                tabla.Columns.Add(CrearColumnas(fila));
-            }
-            return tabla;
-        }
-
-        /// <summary>
-        /// Crear las columnas y propiedades
-        /// </summary>
-        /// <param name="fila"></param>
-        /// <returns>DataColumn</returns>
-        private static DataColumn CrearColumnas(DataRow fila)
-        {
-            DataColumn columna = new DataColumn
-            {
-                ColumnName = fila.Field<string>(EsquemaColumnas.NOMBRECOLUMNA),
-                DataType = fila.Field<Type>(EsquemaColumnas.TIPODATO),
-                AllowDBNull = fila.Field<bool>(EsquemaColumnas.PERMITIRDBNULL),
-                Unique = fila.Field<bool>(EsquemaColumnas.NOMBRECOLUMNA)
-            };
-
-            AgregarPropiedad(columna, EsquemaColumnas.PRESICION, fila[EsquemaColumnas.PRESICIONNUMERICA]);
-            AgregarPropiedad(columna, EsquemaColumnas.ESCALA, fila[EsquemaColumnas.ESCALANUMERICA]);
-            AgregarPropiedad(columna, EsquemaColumnas.TAMAÑO, fila[EsquemaColumnas.TAMAÑOCOLUMNAS]);
-            AgregarPropiedad(columna, EsquemaColumnas.TIPODATOPROVEEDOR, fila[EsquemaColumnas.TIPODATOPROVEEDOR]);
-
-            return columna;
-        }
-
-        /// <summary>
-        /// Agrega las propiedades a la columna
-        /// </summary>
-        /// <param name="columna"></param>
-        /// <param name="nombre"></param>
-        /// <param name="valor"></param>
-        private static void AgregarPropiedad(DataColumn columna, string nombre, object valor)
-        {
-            if (valor != DBNull.Value)
-            {
-                columna.ExtendedProperties[nombre] = valor;
-            }
-        }
-
-        /// <summary>
-        /// Actualiza el estado del controlador de servicios
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="nombreServicio"></param>
-        /// <returns>StoredProcedureResult</returns>
-        public Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio)
-        {
-            return ActualizaEJecucion(nombreServicio, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ActualizaEJecucion.
-        /// </summary>
-        public async Task<StoredProcedureResult> ActualizaEJecucion(string nombreServicio, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                EnumNombreSp.SP_ACTUALIZA_EJECUCION, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreServicio", nombreServicio, 50));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@fecha", DateTime.Now.ToString(EnumParametrosGenerales.FECHA_BD)));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@hora", DateTime.Now.ToLongTimeString()));
-
-                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-            }, ct);
-            if (!spResult.Exito)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(ConstantesClaveAviso.Error + "|Actualiza_Ejecucion|Se presenta exception: " + spResult.MensajeError.ToString());
-                throw new Exception(spResult.MensajeError.ToString());
-            }
-
-            return spResult;
-        }
-
-        /// <summary>
-        /// Actualiza el estado de terminacion del servicio controlador
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="nombreServicio"></param>
-        /// <returns>StoredProcedureResult</returns>
-        public Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio)
-        {
-            return ActualizaTerminacion(nombreServicio, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ActualizaTerminacion.
-        /// </summary>
-        public async Task<StoredProcedureResult> ActualizaTerminacion(string nombreServicio, CancellationToken ct)
-        {
-            try
-            {
-                ct.ThrowIfCancellationRequested();
-                StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                    EnumNombreSp.SP_ACTUALIZA_TERMINACION, cmd =>
-                {
-                    //@fecha CHAR(10),
-                    //@hora            NVARCHAR(20),
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreServicio", nombreServicio, 50));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@fecha", DateTime.Now.ToString(EnumParametrosGenerales.FECHA_BD)));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@hora", DateTime.Now.ToLongTimeString()));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-                }, ct);
-
-                if (!spResult.Exito)
-                {
-                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(ConstantesClaveAviso.Error + "|Actualiza_Terminacion|Se presenta exception: " + spResult.MensajeError);
-                }
-
-                return spResult;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(ConstantesClaveAviso.Error + "|Actualiza_Terminacion|Se presenta exception: " + ex.Message);
-                return new StoredProcedureResult
-                {
-                    Exito = false,
-                    MensajeError = ex.Message,
-                    Exception = ex
-                };
-            }
-        }
-
-        /// <summary>
-        /// Valida si puede inicar el servicio
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <returns>bool</returns>
-        public Task<bool> EsDiaHabil()
-        {
-            return EsDiaHabil(CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de EsDiaHabil.
-        /// </summary>
-        public async Task<bool> EsDiaHabil(CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            bool resultado = false;
-            try
-            {
-                // Se va a forzar el inicio de los servicios?
-                string strValorConfig = ConexionBasedatosFactory.ObtenerDatosGenerales("FORZA_EJECUCION_SERVICIOS");
-                if (strValorConfig == "1")
-                {
-                    resultado = true;
-                    return resultado;
-                }
-
-                // Es fin de semana
-                if (DateTime.Now.DayOfWeek == DayOfWeek.Saturday || DateTime.Now.DayOfWeek == DayOfWeek.Sunday)
-                {
-                    resultado = false;
-                }
-                else
-                {
-                    resultado = true;
-                    StoredProcedureResult<CampoGeneral> resultadoSp = await EjecutarStoredProcedureQuery<CampoGeneral>(
-                        EnumNombreSp.SP_ES_DIA_HABIL,
-                        cmd => cmd.Parameters.Add(
-                            basedatosConexion.CrearParametro("@fecha",
-                                DateTime.Now.Date.ToString(EnumParametrosGenerales.FECHA_HORA0_BD)
-                            )
-                        ),
-                        ct
-                    );
-
-                    if (resultadoSp.Data.FirstOrDefault()?.Num_regs > 0)
-                        resultado = false;
-                }
-
-                return resultado;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                string strMsjError = $"Error: no se pudo recuperar dia habil. Excepcion: {ex.Message}";
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(strMsjError, NombreServicio.MUFG_T24.ToString());
-                throw;
-            }
-            finally
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|EsDiaHabil|Resultado retornado: {resultado}");
-            }
-        }
-
-        /// <summary>
-        /// Para obtener el folio maestro
-        /// Legacy: dameFolioMaestro
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="folio"></param>
-        /// <param name="tipoOperacion"></param>
-        /// <returns>string</returns>
-        public async Task<string> ObtenerFolioMaestro(string folio, string tipoOperacion)
-        {
-            StoredProcedureResult<CampoGeneral> spResult = await EjecutarStoredProcedureQuery<CampoGeneral>(
-                EnumNombreSp.SP_OBTENER_FOLIO_MAESTRO,
-                cmd =>
-                {
-                    // @tipoOperacion		VARCHAR(10),
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(folio, nameof(ObtenerFolioMaestro))));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", tipoOperacion));
-                });
-
-            CampoGeneral folioMaestro = spResult.Data.Count > 0 ? spResult.Data[0] : null;
-            if (folioMaestro == null)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtenerFolioMaestro|No se obtuvo folio maestro para folio '{folio}' y tipo operación '{tipoOperacion}'.");
-                throw new InvalidOperationException($"No se obtuvo el folio maestro requerido para el folio '{folio}'.");
-            }
-
-            return folioMaestro.Folio_maestro.ToString();
-        }
-
-        private object ConvertirFolioAParametro(string folio, string contexto)
-        {
-            int folioConvertido;
-            if (int.TryParse(folio, NumberStyles.Integer, CultureInfo.InvariantCulture, out folioConvertido))
-                return folioConvertido;
-
-            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|{contexto}|No fue posible convertir el folio '{folio}' a entero. Se enviará DBNull.Value al procedimiento.");
-            return DBNull.Value;
-        }
-
-        /// <summary>
-        /// Para obtener el FT que se enviará como Clave de Rastreo en SPEI
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="folio"></param>
-        /// <param name="tipoOperacion"></param>
-        /// <returns>string</returns>
-        public async Task<string> ObtenerFtSpei(string folio)
-        {
-            CampoGeneral resultado = (await EjecutarStoredProcedureQuery<CampoGeneral>(
-                EnumNombreSp.SP_OBTENER_FT_SPEI,
-                cmd =>
-                {
-                    // @op_clave as numeric(18,0)
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", folio, 65));
-                }
-            )).Data.FirstOrDefault();
-
-            if (resultado == null)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtenerFtSpei|No se obtuvo FT SPEI para folio '{folio}'.");
-                return null;
-            }
-
-            return resultado.ToString();
-        }
-
-        /// <summary>
-        /// Obtiene el ultimo proceso en ejecucion
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="folio"></param>
-        /// <param name="tipoOperacion"></param>
-        /// <returns>string</returns>
-        public async Task<string> ObtenerUltimoProceso(ProcesoDTO proceso)
-        {
-            CampoGeneral resultado = (await EjecutarStoredProcedureQuery<CampoGeneral>(
-                EnumNombreSp.SP_OBTENER_ULTIMO_PROCESO,
-                cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio));
-                }
-            )).Data.FirstOrDefault();
-
-            if (resultado is null)
-            {
-                return "";
-            }
-
-            return resultado.Alias_proceso;
-        }
-
-        /// <summary>
-        /// Marca el inicia proceso
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="folio"></param>
-        /// <param name="tipoOperacion"></param>
-        /// <param name="servicio"></param>
-        /// <returns>StoredProcedureResult</returns>
-        public Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso)
-        {
-            return IniciaProceso(proceso, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de IniciaProceso.
-        /// </summary>
-        public async Task<StoredProcedureResult> IniciaProceso(ProcesoDTO proceso, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                EnumNombreSp.SP_INICIA_PROCESO, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", proceso.PId));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", proceso.NombreProceso, 50));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(proceso.Folio, nameof(IniciaProceso))));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
-
-                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-            }, ct);
-            return spResult;
-        }
-
-        /// <summary>
-        /// Marca el final del proceso
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="folio"></param>
-        /// <param name="tipoOperacion"></param>
-        /// <param name="nombreProceso"></param>
-        /// <param name="servicio"></param>
-        /// <param name="aliasProceso"></param>
-        /// <param name="pId"></param>
-        /// <returns>StoredProcedureResult</returns>
-        public Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso)
-        {
-            return TerminaProceso(proceso, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de TerminaProceso.
-        /// </summary>
-        public async Task<StoredProcedureResult> TerminaProceso(ProcesoDTO proceso, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                EnumNombreSp.SP_TERMINA_PROCESO, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", proceso.PId));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", proceso.NombreProceso, 50));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(proceso.Folio, nameof(TerminaProceso))));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@exepcion", proceso.Excepcion?.Message ?? "null"));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-
-            }, ct);
-            return spResult;
-        }
-
-        /// <summary>
-        /// Marca el proceso con errores
-        /// </summary>
-        /// <param name="proceso"></param>
-        /// <param name="nombreSp"></param>
-        /// <returns></returns>
-        public Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso)
-        {
-            return ActualizaErrorProceso(proceso, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de ActualizaErrorProceso.
-        /// </summary>
-        public async Task<StoredProcedureResult> ActualizaErrorProceso(ProcesoDTO proceso, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                EnumNombreSp.SP_ACTUALIZA_ERROR_PROCESO, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", proceso.PId));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", proceso.NombreProceso, 50));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", ConvertirFolioAParametro(proceso.Folio, nameof(ActualizaErrorProceso))));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", proceso.Servicio, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@exepcion", proceso.Excepcion?.Message ?? "null"));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-
-            }, ct);
-            return spResult;
-        }
-
-        /// <summary>
-        /// Para obtener el DisplayName del servicio
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="proceso"></param>
-        /// <returns>string</returns>
-        public Task<string> ObtieneDisplayName(int procesoId)
-        {
-            try
-            {
-                using (var buscador = new ManagementObjectSearcher(
-                    $"SELECT DisplayName FROM Win32_Service WHERE ProcessId = {procesoId}"))
-                {
-                    foreach (ManagementObject obj in buscador.Get())
-                    {
-                        return Task.FromResult(obj["DisplayName"]?.ToString());
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtieneDisplayName|{ex}");
-            }
-
-            return Task.FromResult<string>(null);
-        }
-
-        /// <summary>
-        /// Obtiene el ultimo proceso en ejecucion en tablas de Swift
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="procesoId"></param>
-        /// <returns></returns>
-        public async Task<string> ObtieneUltimoProcesoSwift(ProcesoDTO proceso)
-        {
-            CampoGeneral resultado = (await EjecutarStoredProcedureQuery<CampoGeneral>(
-               EnumNombreSp.SP_ULTIMO_PROCESO_SWF,
-                cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion));
-                }
-            )).Data.FirstOrDefault();
-
-            if (resultado == null)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|ObtieneUltimoProcesoSwift|No se obtuvo último proceso Swift para folio '{proceso.Folio}' y tipo operación '{proceso.TipoOperacion}'.");
-                return null;
-            }
-
-            return resultado.Alias_proceso;
-        }
-
-        /// <summary>
-        /// Marca el inicia proceso en tablas de Swift
-        /// </summary>
-        /// <param name="proceso"></param>
-        /// <param name="nombreSp"></param>
-        /// <returns>StoredProcedureResult</returns>
-        public async Task<StoredProcedureResult> IniciaProcesoSwift(ProcesoDTO proceso)
-        {
-            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                EnumNombreSp.SP_INICIA_PROCESO_SWF, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio, 29));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-
-            });
-            return spResult;
-        }
-
-        /// <summary>
-        /// Marca el final del proceso en tablas de Swift
-        /// </summary>
-        /// <param name="proceso"></param>
-        /// <param name="nombreSp"></param>
-        /// <returns>StoredProcedureResult</returns>
-        public async Task<StoredProcedureResult> TerminaProcesoSwift(ProcesoDTO proceso)
-        {
-            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                EnumNombreSp.SP_TERMINA_PROCESO_SWF, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-            });
-            return spResult;
-        }
-
-        /// <summary>
-        /// Marca el proceso con errores en tablas de Swift
-        /// </summary>
-        /// <param name="proceso"></param>
-        /// <param name="nombreSp"></param>
-        /// <returns>StoredProcedureResult</returns>
-        public async Task<StoredProcedureResult> ActualizaErrorProcesoSwift(ProcesoDTO proceso)
-        {
-            StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(
-                EnumNombreSp.SP_ACTUALIZA_ERROR_PROCESO_SWF, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", proceso.Folio, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", proceso.TipoOperacion, 10));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@aliasProceso", proceso.AliasProceso, 25));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@exepcion", proceso.Excepcion?.Message ?? "null"));
-                cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-            });
-            return spResult;
-        }
-
-        #region METODOS CALYPSO
-
-        /// <summary>
-        /// Obtiene short name de calypso
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="cdl"></param>
-        /// <returns>string</returns>
-        public async Task<string> CalypsoObtenerNombreCorto(string cdl)
-        {
-            LegalEntity resultado = (await EjecutarReader<LegalEntity>(
-                "SELECT short_name FROM LEGAL_ENTITY WHERE LPAD(external_ref,8,'0') = :cdl", cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro(":cdl", cdl.PadLeft(8, '0')));
-                }
-            )).Data.FirstOrDefault();
-
-            if (resultado == null || string.IsNullOrWhiteSpace(resultado.SHORT_NAME))
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|CalypsoObtenerNombreCorto|No se obtuvo nombre corto de Calypso para CDL '{cdl}'.");
-                throw new InvalidOperationException($"No se obtuvo nombre corto de Calypso para CDL '{cdl}'.");
-            }
-
-            return resultado.SHORT_NAME;
-        }
-
-        /// <summary>
-        /// Obtiene consumo de lineas
-        /// </summary>
-        /// <param name="nombreSp"></param>
-        /// <param name="cdl"></param>
-        /// <returns>DataTable</returns>
-        public async Task<DataTable> CalypsoConsultaLimiteLineas(string cdl = "")
-        {
-            StringBuilder sql = new StringBuilder();
-            sql.AppendLine("SELECT A.LIMIT_ID, A.ATTR1_VALUE, SUBSTR(SUBSTR(A.ATTR1_VALUE,INSTR(A.ATTR1_VALUE,'CD',1,1),10),3,8) AS CDL, A.LIMIT_MAX AS MONTO_LINEA, A.LIMIT_CCY AS CCY_LINEA, C.AMOUNT AS SALDO_UTILIZADO, C.SANCTION_AMOUNT AS SALDO_DISPONIBLE, C.VALUE_DATE");
-            sql.AppendLine("  FROM ERS_LIMIT A INNER JOIN (SELECT LIMIT_ID, MAX(VALUE_DATE) AS VALUE_DATE FROM ERS_LIMIT_USAGE WHERE VERSION=0 GROUP BY LIMIT_ID) B ON ( A.LIMIT_ID = B.LIMIT_ID )");
-            sql.AppendLine("                                     INNER JOIN ERS_LIMIT_USAGE C ON ( A.LIMIT_ID = C.LIMIT_ID AND B.VALUE_DATE = C.VALUE_DATE )");
-            sql.AppendLine("  WHERE A.LIMIT_BUCKET = '0D-2D'");
-            sql.AppendLine("    AND C.VERSION=0");
-            sql.AppendLine("    AND A.MEASURE='Settlement' ");
-
-            bool filtrarCdl = !string.IsNullOrEmpty(cdl);
-            if (filtrarCdl)
-            {
-                sql.AppendLine("    AND A.ATTR1_VALUE LIKE :cdl");
-            }
-
-            DataTable resultado = new DataTable();
-            using (DbConnection conexion = basedatosConexion.CrearConexion())
-            using (DbCommand comando = basedatosConexion.CrearComando(sql.ToString(), conexion))
-            {
-                comando.CommandType = CommandType.Text;
-
-                if (filtrarCdl)
-                {
-                    comando.Parameters.Add(basedatosConexion.CrearParametro(":cdl", "%" + cdl.PadLeft(8, '0')));
-                }
-
-                await conexion.OpenAsync().ConfigureAwait(false);
-                using (DbDataReader lector = await comando.ExecuteReaderAsync().ConfigureAwait(false))
-                {
-                    resultado.Load(lector);
-                }
-            }
-
-            return resultado;
-        }
-
-        /// <summary>
-        /// Define el nombre del TAG del nodo root para el XML serializado  
-        /// </summary>
-        /// <param name="tipoObjeto"></param>
-        /// <param name="nombreNodoRoot"></param>
-        /// <returns>string</returns>
-        private string DevuelveTagName(Type tipoObjeto, string nombreNodoRoot)
-        {
-            // si viene definido el nombre raiz, usarlo
-            if (!string.IsNullOrWhiteSpace(nombreNodoRoot))
-                return nombreNodoRoot.Trim();
-
-            if (tipoObjeto == null)
-                return "Unknown";
-
-            // si es un tipo generico
-            if (tipoObjeto.IsGenericType && tipoObjeto.GetGenericTypeDefinition() == typeof(List<>))
-            {
-                Type tipoGenerico = tipoObjeto.GetGenericArguments()[0];
-                return tipoGenerico.Name + "List";
-            }
-
-            // si es un arreglo
-            if (tipoObjeto.IsArray)
-            {
-                return tipoObjeto.GetElementType()?.Name + "Array";
-            }
-
-            // caso normal
-            return tipoObjeto.Name;
-        }
-
-        /// <summary>
-        /// Serializar objecto en XML
-        /// </summary>
-        /// <param name="objeto"></param>
-        /// <param name="tipoSerializacion"></param>
-        /// <param name="RemoveDiacritics"></param>
-        /// <param name="AddNodeTag"></param>
-        /// <param name="encodingEnum"></param>
-        /// <param name="rootNodeName"></param>
-        /// <returns></returns>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="NotSupportedException"></exception>
-        public string CalypsoSerializarClase(object objeto, TipoSerializacion tipoSerializacion,
-            bool RemoveDiacritics, bool AddNodeTag, EncodingEnum encodingEnum = EncodingEnum.Encode_Default,
-            string rootNodeName = ""
-            )
-        {
-            if (objeto == null)
-                throw new ArgumentNullException(nameof(objeto));
-
-            Encoding encoding = ResolverEncoding(encodingEnum);
-
-            XmlWriterSettings config = new XmlWriterSettings
-            {
-                Encoding = encoding,
-                OmitXmlDeclaration = true,
-                NamespaceHandling = NamespaceHandling.OmitDuplicates,
-                Indent = true,
-                IndentChars = "    "
-            };
-
-            string nombreTag = DevuelveTagName(objeto.GetType(), rootNodeName);
-            StringBuilder sb = new StringBuilder();
-
-            if (tipoSerializacion == TipoSerializacion.SerialXML)
-            {
-                SerializarXml(objeto, nombreTag, rootNodeName, config, sb);
-            }
-            else if (tipoSerializacion == TipoSerializacion.SerialDataContract)
-            {
-                SerializarDataContract(objeto, nombreTag, config, sb);
-            }
-            else
-            {
-                throw new NotSupportedException("Tipo de serializacion no soportado: " + tipoSerializacion);
-            }
-
-            string resultado = sb.ToString();
-            if (RemoveDiacritics)
-                resultado = RemueveDiacriticos(resultado);
-
-            StringBuilder stringBuilder = new StringBuilder();
-            if (AddNodeTag)
-            {
-                stringBuilder.AppendLine(string.Format(@"<?xml version=""1.0"" encoding=""UTF-8"" standalone=""yes""?>", encoding.WebName));
-                stringBuilder.Append(@"<CalypsoUploadDocument UploadDate=""20100716"" ClientCode=""INDI"" Version=""1"">");
-                stringBuilder.AppendLine(resultado);
-                stringBuilder.AppendLine(@"</CalypsoUploadDocument>");
-
-                resultado = sb.ToString();
-            }
-            return resultado;
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de CalypsoDeserializarClase.
-        /// </summary>
-        public bool CalypsoDeserializarClase(string xml, ref object objeto, TipoSerializacion tipoSerializacion, bool removerDataTag, string nombreNodoRoot = "")
-        {
-            if (xml == null)
-                throw new ArgumentException(nameof(xml));
-            if (xml.Trim() == "")
-                throw new ArgumentException("XML string cannot be empty");
-            if (objeto == null)
-                throw new ArgumentNullException(nameof(objeto));
-
-            string objetoXml = xml;
-            string nombreTag = DevuelveTagName(objeto.GetType(), nombreNodoRoot);
-            XmlReaderSettings xmlReaderSettings = new XmlReaderSettings
-            {
-                DtdProcessing = DtdProcessing.Prohibit,
-                XmlResolver = null
-            };
-
-            try
-            {
-                // si requiere eliminar nodo <DATA>
-                if (removerDataTag)
-                {
-                    using (StringReader sr = new StringReader(xml))
-                    using (XmlReader lector = XmlReader.Create(sr, xmlReaderSettings))
-                    {
-                        while (lector.Read())
-                        {
-                            if (lector.NodeType == XmlNodeType.Element && lector.Name == "DATA")
-                            {
-                                objetoXml = lector.ReadInnerXml();
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Deserializacion segun tipo
-                if (tipoSerializacion == TipoSerializacion.SerialDataContract)
-                {
-                    DataContractSerializer serializar = new DataContractSerializer(objeto.GetType(), nombreTag, string.Empty);
-                    using (StringReader sr = new StringReader(objetoXml))
-                    {
-                        using (XmlReader xr = XmlReader.Create(sr, xmlReaderSettings))
-                        {
-                            using (XmlDictionaryReader xdr = XmlDictionaryReader.CreateDictionaryReader(xr))
-                            {
-                                objeto = serializar.ReadObject(xdr, true);
-                            }
-                        }
-                    }
-                }
-                else if (tipoSerializacion == TipoSerializacion.SerialXML)
-                {
-                    XmlSerializer serializer;
-                    if (string.IsNullOrWhiteSpace(nombreNodoRoot))
-                    {
-                        serializer = new XmlSerializer(objeto.GetType());
-                    }
-                    else
-                    {
-                        serializer = new XmlSerializer(objeto.GetType(), new XmlRootAttribute(nombreTag));
-                    }
-
-                    using (var sr = new StringReader(objetoXml))
-                    {
-                        using (XmlReader xr = XmlReader.Create(sr, xmlReaderSettings))
-                        {
-                            objeto = serializer.Deserialize(xr);
-                        }
-                    }
-                }
-                else
-                {
-                    throw new NotSupportedException("Tipo de serializacion no soportado" + tipoSerializacion);
-                }
-                return objeto != null;
-            }
-            catch
-            {
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Normalizacion de cadena
-        /// </summary>
-        /// <param name="texto"></param>
-        /// <returns>string</returns>
-        private static string RemueveDiacriticos(string texto)
-        {
-            if (string.IsNullOrWhiteSpace(texto))
-                return texto;
-
-            // Normaliza a FormD
-            string normalizarCadena = texto.Normalize(NormalizationForm.FormD);
-            StringBuilder sb = new StringBuilder();
-
-            for (int i = 0; i < normalizarCadena.Length; i++)
-            {
-                char c = normalizarCadena[i];
-
-                // Ignora marcas de acento
-                if (CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
-                {
-                    sb.Append(c);
-                }
-            }
-
-            // Vuelve a componer los caracteres
-            return sb.ToString().Normalize(NormalizationForm.FormC);
-        }
-
-        /// <summary>
-        /// Serializacion con DataContract
-        /// </summary>
-        /// <param name="objeto"></param>
-        /// <param name="nombreTag"></param>
-        /// <param name="nombreNodoRoot"></param>
-        /// <param name="setting"></param>
-        /// <param name="sb"></param>
-        private static void SerializarDataContract(object objeto, string nombreTag, XmlWriterSettings setting, StringBuilder sb)
-        {
-            DataContractSerializer serializer = new DataContractSerializer(objeto.GetType(), nombreTag, string.Empty);
-
-            using (XmlWriter escribir = XmlWriter.Create(sb, setting))
-            {
-                using (XmlDictionaryWriter dictionaryWriter = XmlDictionaryWriter.CreateDictionaryWriter(escribir))
-                {
-                    serializer.WriteObject(dictionaryWriter, objeto);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Serializacion con XmlSerializer
-        /// </summary>
-        /// <param name="objeto"></param>
-        /// <param name="nombreTag"></param>
-        /// <param name="nombreNodoRoot"></param>
-        /// <param name="nombreNodoRoot"></param>
-        /// <param name="setting"></param>
-        /// <param name="sb"></param>
-        private static void SerializarXml(object objeto, string nombreTag, string nombreNodoRoot, XmlWriterSettings setting, StringBuilder sb)
-        {
-            XmlSerializer serializer;
-            if (string.IsNullOrWhiteSpace(nombreNodoRoot))
-            {
-                serializer = new XmlSerializer(objeto.GetType());
-            }
-            else
-            {
-                serializer = new XmlSerializer(objeto.GetType(), new XmlRootAttribute(nombreTag));
-            }
-
-            XmlSerializerNamespaces xmlnsns = new XmlSerializerNamespaces();
-            xmlnsns.Add(string.Empty, string.Empty);
-
-            using (XmlWriter escribir = XmlWriter.Create(sb, setting))
-            {
-                serializer.Serialize(escribir, objeto, xmlnsns);
-            }
-        }
-
-        /// <summary>
-        /// Resolver Encoding con enum
-        /// </summary>
-        /// <param name="encodingEnum"></param>
-        /// <returns></returns>
-        private static Encoding ResolverEncoding(EncodingEnum encodingEnum)
-        {
-            switch (encodingEnum)
-            {
-                case EncodingEnum.Encode_ASCII: return Encoding.ASCII;
-                case EncodingEnum.Encode_BigEndianUnicode: return Encoding.BigEndianUnicode;
-                case EncodingEnum.Encode_UTF8: return Encoding.UTF8;
-                case EncodingEnum.Encode_UTF32: return Encoding.UTF32;
-                case EncodingEnum.Encode_Unicode: return Encoding.Unicode;
-                default: return Encoding.Default;
-            }
-        }
-
-        #endregion
-
-        #region Metodos Zeus_Extractor
-        /// <summary>
-        /// Inicializa una nueva instancia de EjecutarOracleRefCursorAsync.
-        /// </summary>
-        protected async Task<DbDataReader> EjecutarOracleRefCursorAsync(string storedProcedure, int fechaProceso, long idTrabajo)
-        {
-            DbConnection conexion = basedatosConexion.CrearConexion();
-
-            if (!(conexion is OracleConnection oracleConnection))
-            {
-                throw new InvalidOperationException("La conexión configurada no es Oracle.");
-            }
-
-            OracleCommand comando = new OracleCommand(storedProcedure, oracleConnection);
-
-            comando.CommandType = CommandType.StoredProcedure;
-
-            comando.Parameters.Add(new OracleParameter("FECHAPROCESO", OracleDbType.Int32)
-            {
-                Direction = ParameterDirection.Input,
-                Value = fechaProceso
-            });
-
-            comando.Parameters.Add(new OracleParameter("ID_TRABAJO", OracleDbType.Int32)
-            {
-                Direction = ParameterDirection.Input,
-                Value = idTrabajo
-            });
-
-            comando.Parameters.Add(new OracleParameter("result_set", OracleDbType.RefCursor)
-            {
-                Direction = ParameterDirection.Output
-            });
-
-            comando.Parameters.Add(new OracleParameter("IDENTIFICADORERROR", OracleDbType.Varchar2)
-            {
-                Direction = ParameterDirection.InputOutput,
-                Size = 4000,
-                Value = DBNull.Value
-            });
-
-            await oracleConnection.OpenAsync();
-
-            DbDataReader reader = await comando.ExecuteReaderAsync(CommandBehavior.CloseConnection);
-
-            object error = comando.Parameters["IDENTIFICADORERROR"].Value;
-
-            if (error != null && error != DBNull.Value)
-            {
-                throw new Exception(error.ToString());
-            }
-
-            return reader;
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de EjecutarOracleQueryAsync.
-        /// </summary>
-        protected async Task<DbDataReader> EjecutarOracleQueryAsync(string query)
-        {
-            DbConnection conexion = basedatosConexion.CrearConexion();
-
-            DbCommand comando = basedatosConexion.CrearComando(query, conexion);
-
-            comando.CommandType = CommandType.Text;
-
-            await conexion.OpenAsync();
-
-            return await comando.ExecuteReaderAsync(CommandBehavior.CloseConnection);
-        }
-
-
-        /// <summary>
-        /// Obtiene la estructura de un DataReader en formato DataTable.
-        /// Equivalente al método getMetaData del código legacy.
-        /// </summary>
-        /// <param name="reader">Reader del proveedor de datos.</param>
-        /// <returns>DataTable con definición de columnas.</returns>
-        protected DataTable ObtenerMetadataReader(DbDataReader reader)
-        {
-            if (reader == null)
-            {
-                throw new ArgumentNullException(nameof(reader));
-            }
-
-            return CrearEsquemaDataTable(reader.GetSchemaTable());
-        }
-
-        #endregion
-
-        /// <summary>
-        /// Valida y obtiene el puerto disponible del servicio.
-        /// Compatibilidad legacy.
-        /// </summary>
-        [System.Obsolete("Compatibilidad legacy.", false)]
-        public async Task<PuertoServicioDTO> ObtenerPuerto(string servicio)
-        {
-            PuertoServicioDTO puertoServicioDTO = null;
-            List<PuertoServicioDTO> resultado = (await EjecutarStoredProcedureQuery<PuertoServicioDTO>(
-                EnumNombreSp.SP_OBTENER_PUERTO,
-                cmd => cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", servicio))
-            )).Data;
-
-            foreach (PuertoServicioDTO pServicio in resultado)
-            {
-                bool procesoActivo = EstaActivoProceso(
-                    pServicio.Pid,
-                    pServicio.ProcessName,
-                    pServicio.Puerto
-                );
-
-                if (!procesoActivo)
-                    throw new ArgumentException("La aplicacion ya esta en Ejecucion.");
-
-                if (PuertoDisponible(pServicio.Puerto))
-                {
-                    puertoServicioDTO = pServicio;
-                }
-            }
-
-            return puertoServicioDTO;
-        }
-
-        /// <summary>
-        /// Valida si un puerto esta ocupado.
-        /// Compatibilidad legacy.
-        /// </summary>
-        [System.Obsolete("Compatibilidad legacy.", false)]
-        public bool PuertoDisponible(int port)
-        {
-            try
-            {
-                TcpListener listener = new TcpListener(IPAddress.Parse("127.0.0.1"), port);
-                listener.Start();
-                listener.Stop();
-                return true;
-            }
-            catch (SocketException ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("Error TCPListener:" + ex.Message);
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Valida si el proceso está activo.
-        /// Compatibilidad legacy.
-        /// </summary>
-        [System.Obsolete("Compatibilidad legacy.", false)]
-        public bool EstaActivoProceso(object pid, object nombreProceso, object puerto)
-        {
-            try
-            {
-                int _procesoId = Convert.ToInt32(pid);
-                string _nombreProceso = Convert.ToString(nombreProceso);
-
-                Process loProceso = Process.GetProcessById(_procesoId);
-                if (_nombreProceso == loProceso.ProcessName || loProceso.Responding)
-                {
-                    return true;
-                }
-
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                    $"El proceso esperado no corresponde. ProcessName esperado={_nombreProceso}, ProcessName en ejecución={loProceso.ProcessName}");
-                throw new Exception(
-                    $"El proceso esperado no corresponde. ProcessName esperado={_nombreProceso}, ProcessName en ejecución={loProceso.ProcessName}");
-            }
-            catch (Exception ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("Error: " + ex.Message);
-                throw new Exception($"Error: {ex}");
-            }
-        }
-
-        /// <summary>
-        /// Proceso para establecerse en la escucha de un puerto.
-        /// Compatibilidad legacy.
-        /// </summary>
-        [System.Obsolete("Compatibilidad legacy.", false)]
-        public async Task EscuchaPuerto(int puerto, string servicio, int pId, string nombreProceso,
-            string displayName, Delegate funcionProcesar, bool enviarRespuesta)
-        {
-            bool escucharPuerto = true;
-            bool enProceso = false;
-            TcpListener listener = null;
-            try
-            {
-                listener = new TcpListener(IPAddress.Parse("127.0.0.1"), puerto)
-                {
-                    ExclusiveAddressUse = false
-                };
-                listener.Start();
-
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[INFO] Escuchando puerto {puerto}");
-
-                await EjecutarStoredProceduredNonQuery(EnumNombreSp.SP_ESCUCHA_PUERTO, cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", pId));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", nombreProceso));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@displayName", displayName));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@puerto", puerto));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-                });
-
-                while (escucharPuerto)
-                {
-                    try
-                    {
-                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[INFO] Esperando petición en puerto {puerto}");
-                        using (TcpClient cliente = await listener.AcceptTcpClientAsync())
-                        using (NetworkStream stream = cliente.GetStream())
-                        {
-                            if (enProceso)
-                            {
-                                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[INFO] Servicio ocupando proceso anterior");
-                                if (enviarRespuesta)
-                                {
-                                    byte[] bytesOcupados = Encoding.ASCII.GetBytes(
-                                        global::MUFG_T24.Comunes.Helpers.CryptoHelper.Encriptar("0", null));
-                                    stream.Write(bytesOcupados, 0, bytesOcupados.Length);
-                                }
-                                continue;
-                            }
-
-                            byte[] buffer = new byte[1024];
-                            StringBuilder mensajeCompleto = new StringBuilder();
-                            int byteLeidos;
-
-                            do
-                            {
-                                byteLeidos = await stream.ReadAsync(buffer, 0, buffer.Length);
-                                mensajeCompleto.Append(Encoding.ASCII.GetString(buffer, 0, byteLeidos));
-                            }
-                            while (stream.DataAvailable);
-
-                            string datoLeido = global::MUFG_T24.Comunes.Helpers.CryptoHelper.Desencriptar(
-                                mensajeCompleto.ToString(), null);
-
-                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[INFO] Petición recibida. Folio {datoLeido}");
-
-                            enProceso = true;
-                            bool resultado = Convert.ToBoolean(funcionProcesar.DynamicInvoke(datoLeido));
-                            enProceso = false;
-
-                            if (enviarRespuesta)
-                            {
-                                byte[] bytesOk = Encoding.ASCII.GetBytes(
-                                    global::MUFG_T24.Comunes.Helpers.CryptoHelper.Encriptar(resultado ? "1" : "0", null));
-                                stream.Write(bytesOk, 0, bytesOk.Length);
-                            }
-                        }
-                    }
-                    catch (ThreadAbortException)
-                    {
-                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[AVISO] Proceso abortado");
-                        escucharPuerto = false;
-                    }
-                    catch (ThreadInterruptedException)
-                    {
-                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[AVISO] Proceso interrumpido");
-                        escucharPuerto = false;
-                    }
-                    catch (Exception exCliente)
-                    {
-                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[ERROR] Error con socket cliente: {exCliente.Message}");
-                        escucharPuerto = false;
-                    }
-                }
-            }
-            catch (Exception exServer)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"[ERROR] Error en socket server: {exServer.Message}, servicio:{servicio}");
-            }
-            finally
-            {
-                listener?.Stop();
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("[INFO] Termina la escucha del puerto");
-            }
-        }
-    }
-}
-
-using MUFG_T24.Enums_utilidades;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Data;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace MUFG_T24.Comunes
-{
-    /// <summary>
-    /// Clase para envio de alertas en BD
-    /// </summary>
-    public class Alertas : RepositorioMaestro, IAlertas
-    {
-        /// <summary>
-        /// Inicializa una nueva instancia de Alertas.
-        /// </summary>
-        public Alertas(
-            BasedatosProveedor proveedor,
-            NombreBasedatos nombreBasedatos,
-            BasedatosProveedor? proveedorVistasT24,
-            NombreBasedatos? nombreBasedatosVistasT24)
-            : base(proveedor, nombreBasedatos, proveedorVistasT24, nombreBasedatosVistasT24)
-        { }
-
-        /// <summary>
-        /// Inserta una nueva alerta en el sistema
-        /// </summary>
-        /// <param name="alerta"></param>
-        /// <returns>true/false</returns>
-        public Task<bool> InsertarAlerta(AlertaDTO alerta)
-        {
-            return InsertarAlerta(alerta, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inserta una nueva alerta en el sistema a partir de valores simples.
-        /// </summary>
-        public Task<bool> InsertarAlerta(
-            string folio,
-            string tipoOperacion,
-            string servicio,
-            string claveAviso,
-            string descripcion,
-            int pId,
-            string nombreProceso,
-            Exception exception)
-        {
-            var alerta = new AlertaDTO
-            {
-                Folio = folio,
-                TipoOPeracion = tipoOperacion,
-                Servicio = servicio,
-                ClaveAviso = claveAviso,
-                Descipcion = descripcion,
-                PId = pId,
-                NombreProceso = nombreProceso,
-                Exception = exception
-            };
-
-            return InsertarAlerta(alerta, CancellationToken.None);
-        }
-
-        /// <summary>
-        /// Inicializa una nueva instancia de InsertarAlerta.
-        /// </summary>
-        public async Task<bool> InsertarAlerta(AlertaDTO alerta, CancellationToken ct)
-        {
-            try
-            {
-                ct.ThrowIfCancellationRequested();
-
-                if (alerta == null)
-                    alerta = new AlertaDTO();
-
-                if (alerta.PId < 0)
-                    alerta.PId = 0;
-
-                string lsMensajeAlerta;
-                string lsDescripcion;
-
-                // Valida y limpia descripcion
-                if (string.IsNullOrEmpty(alerta.Descipcion))
-                {
-                    alerta.Descipcion = "";
-                }
-
-                lsDescripcion = alerta.Descipcion.Trim();
-
-                if (lsDescripcion.Length > 50)
-                {
-                    lsDescripcion = lsDescripcion.Substring(0, 50);
-                }
-
-                // Preparar mensaje de alerta
-                if (alerta.Exception != null)
-                {
-                    lsMensajeAlerta = alerta.Exception.ToString()
-                        .Replace(Convert.ToChar(10).ToString(), "")
-                        .Replace(Convert.ToChar(13).ToString(), "");
-
-                    // LOG
-                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Inserta_alerta|{lsMensajeAlerta}");
-                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy(
-                        $" {ConstantesClaveAviso.Error} | inserta_alerta | Error durante el proceso. Descripción: ' " +
-                        $"{lsDescripcion}', excepción: {lsMensajeAlerta}", "Mufg");
-                }
-
-                int pidSeguro = alerta.PId;
-
-                // Ejecuta el INSERT usando el metodo en RepositorioMaestro
-                StoredProcedureResult spResult = await EjecutarStoredProceduredNonQuery(EnumNombreSp.SP_INSERTA_ALERTA, cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", alerta.Folio));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", alerta.TipoOPeracion));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@servicio", alerta.Servicio));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@cveError", alerta.ClaveAviso));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@descripcion", alerta.Descipcion));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@pId", pidSeguro));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@nombreProceso", alerta.NombreProceso));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@excepcion", alerta.Exception?.ToString() ?? string.Empty));
-
-                    cmd.Parameters.Add(basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
-                }, ct);
-
-                return spResult.Exito;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Inserta_alerta|{ex.Message}");
-                return false;
-            }
-        }
-
-    }
-}
-
-using MUFG_T24.Enums_utilidades;
-using System;
-using System.Diagnostics;
-using System.Reflection;
-using System.ServiceProcess;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace MUFG_T24.ControladorServicios_Utilidades
-{
-    /// <summary>
-    /// Base para centralizar el ciclo de vida y manejo robusto de errores de un Windows Service.
-    /// </summary>
-    public abstract class WindowsServiceHostBase : ServiceBase
-    {
-        private CancellationTokenSource _cts;
-        private System.Timers.Timer _timerServicio;
-        private Task _startupTask = Task.CompletedTask;
-        private Task _runningTask = Task.CompletedTask;
-        private Task _backgroundTask = Task.CompletedTask;
-        private readonly SemaphoreSlim _tickLock = new SemaphoreSlim(1, 1);
-        private int _startupFailureSignaled;
-
-        protected abstract string NombreServicioLog { get; }
-        protected abstract bool TimerEnabled { get; }
-        protected abstract double TimerIntervalMs { get; }
-        protected virtual TimeSpan WaitTimeout => TimeSpan.FromSeconds(60);
-        protected virtual TimeSpan CleanupTimeout => TimeSpan.FromSeconds(30);
-
-        /// <summary>
-        /// Habilita la validación centralizada del contrato de inicialización:
-        /// Pid, NombreProceso y NombreDisplay.
-        /// </summary>
-        protected virtual bool ValidarContratoInicializacion => true;
-
-        /// <summary>
-        /// Indica si el servicio ejecuta una tarea de fondo de larga duración (ej. un TCP listener)
-        /// además o en lugar del timer. Por defecto deshabilitado para preservar el comportamiento
-        /// de los servicios basados en timer existentes.
-        /// </summary>
-        protected virtual bool EjecutarTareaLarga => false;
-
-        /// <summary>
-        /// Tarea de fondo de larga duración (ej. loop de un TCP listener). Sólo se invoca cuando
-        /// <see cref="EjecutarTareaLarga"/> es true.
-        /// </summary>
-        protected virtual Task TareaLargaAsync(CancellationToken ct) => Task.CompletedTask;
-
-        /// <summary>
-        /// Permite señalizar de forma síncrona la detención de la tarea de fondo (ej. detener un
-        /// TcpListener) para desbloquear operaciones de espera bloqueantes como AcceptTcpClientAsync.
-        /// </summary>
-        protected virtual void DetenerTareaLarga() { }
-
-        /// <summary>
-        /// Indica si el servicio cuenta con los recursos mínimos para ejecutar la terminación particular.
-        /// </summary>
-        protected virtual bool InicializacionCompleta => true;
-
-        /// <summary>
-        /// Libera recursos particulares del servicio al finalizar el ciclo de terminación.
-        /// </summary>
-        protected virtual void LiberarRecursosTerminacion() { }
-
-        protected abstract void Inicializacion(string[] args, CancellationToken ct);
-        protected abstract Task ParametrizacionesAsync(CancellationToken ct);
-        protected abstract Task OnTimerAsync(CancellationToken ct);
-        protected abstract Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask);
-
-#if DEBUG
-        private bool _debugSingleShot;
-#endif
-
-        /// <summary>
-        /// Utilidad para ejecutar como consola en modo DEBUG.
-        /// </summary>
-        public void DebugRun(string[] args)
-        {
-#if DEBUG
-            if (!Environment.UserInteractive)
-                throw new InvalidOperationException("DebugRun sólo debe ejecutarse desde una consola interactiva en modo DEBUG.");
-
-            OnStart(args);
-            Console.WriteLine("Servicio iniciado en modo DEBUG. Presiona ENTER para detener...");
-            Console.ReadLine();
-            OnStop();
-#else
-            throw new InvalidOperationException("DebugRun no está disponible en compilaciones RELEASE.");
-#endif
-        }
-
-        /// <summary>
-        /// Contrato OnStart.
-        /// </summary>
-        protected override void OnStart(string[] args)
-        {
-            try
-            {
-                ServiceName = NombreServicioLog;
-
-                _cts = new CancellationTokenSource();
-                _startupTask = Task.Run(() => StartupAsync(args, _cts.Token));
-            }
-            catch (Exception ex)
-            {
-                HandleStartupFailure(ex);
-            }
-        }
-
-        /// <summary>
-        /// Contrato OnStop.
-        /// </summary>
-        protected override void OnStop()
-        {
-            try
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|OnStop|Finalizando Servicio.");
-
-                var waitTimeout = WaitTimeout;
-                var cleanupTimeout = CleanupTimeout;
-
-                if (!Environment.UserInteractive)
-                    RequestAdditionalTime((int)(waitTimeout + cleanupTimeout + TimeSpan.FromSeconds(5)).TotalMilliseconds);
-
-                _timerServicio?.Stop();
-                _cts?.Cancel();
-                DetenerTareaLarga();
-
-                using (CancellationTokenSource waitCts = new CancellationTokenSource(waitTimeout))
-                using (CancellationTokenSource cleanupCts = new CancellationTokenSource(cleanupTimeout))
-                {
-                    TimeSpan totalTimeout = waitTimeout + cleanupTimeout;
-                    Task terminacionTask = Task.Run(() => EjecutarTerminacionAsync(waitCts.Token, cleanupCts.Token, _startupTask, Task.WhenAll(_runningTask, _backgroundTask)));
-
-                    Task completedTask = Task.WhenAny(terminacionTask, Task.Delay(totalTimeout)).GetAwaiter().GetResult();
-
-                    if (completedTask != terminacionTask)
-                    {
-                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"WARN|OnStop|La terminación excedió {totalTimeout.TotalSeconds} segundos. Se continúa cierre para no bloquear SCM.");
-                        return;
-                    }
-
-                    terminacionTask.GetAwaiter().GetResult();
-                }
-
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|OnStop|Terminación exitosa de bases de datos.");
-            }
-            catch (Exception ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|OnStop|{ex}");
-            }
-            finally
-            {
-                _timerServicio?.Dispose();
-                _cts?.Dispose();
-            }
-        }
-
-        private async Task EjecutarTerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
-        {
-            try
-            {
-                if (!InicializacionCompleta)
-                {
-                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|OnStop|Terminación omitida por inicialización incompleta.");
-                    return;
-                }
-
-                await TerminacionAsync(waitCt, cleanupCt, startupTask, runningTask).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                //Apagado normal
-            }
-            catch (Exception ex)
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|TerminacionAsync|{ex}");
-            }
-            finally
-            {
-                try
-                {
-                    LiberarRecursosTerminacion();
-                }
-                catch (Exception ex)
-                {
-                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|LiberarRecursosTerminacion|{ex}");
-                }
-            }
-        }
-
-        /// <summary>
-        /// Espera a que una tarea activa finalice o se cancele por timeout.
-        /// </summary>
-        protected static async Task EsperarTareaActivaAsync(Task task, string descripcion, CancellationToken ct)
-        {
-            if (task == null || task.IsCompleted)
-                return;
-
-            Task timeoutTask = Task.Delay(Timeout.Infinite, ct);
-            Task completedTask = await Task.WhenAny(task, timeoutTask).ConfigureAwait(false);
-
-            if (completedTask != task)
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"WARN|OnStop|Timeout esperando terminación de {descripcion}.");
-        }
-
-        /// <summary>
-        /// Wrapper público del método de espera de tarea activa.
-        /// </summary>
-        public static Task EsperarTareaActivaWrapperAsync(Task task, string descripcion, CancellationToken ct)
-            => EsperarTareaActivaAsync(task, descripcion, ct);
-
-        private void InicializarTimer()
-        {
-            _timerServicio = new System.Timers.Timer
-            {
-                Enabled = false,
-                AutoReset = true,
-                Interval = TimerIntervalMs
-            };
-
-            _timerServicio.Elapsed += async (sender, e) =>
-            {
-                if (_cts?.IsCancellationRequested == true)
-                    return;
-
-                try
-                {
-                    await OnTimerElapsedAsync(_cts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Apagado normal
-                }
-                catch (Exception ex)
-                {
-                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Elapsed|{ex}");
-                }
-            };
-        }
-
-        private async Task StartupAsync(string[] args, CancellationToken ct)
-        {
-            try
-            {
-                Inicializacion(args, ct);
-                InicializarTimer();
-
-                await ParametrizacionesAsync(ct).ConfigureAwait(false);
-
-                if (ValidarContratoInicializacion)
-                    ValidarContratoInicializacionProceso();
-
-                if (!ct.IsCancellationRequested && TimerEnabled && _timerServicio != null)
-                {
-                    try
-                    {
-                        _timerServicio.Start();
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        // Apagado normal
-                    }
-                }
-
-                if (!ct.IsCancellationRequested && EjecutarTareaLarga)
-                {
-                    _backgroundTask = TareaLargaAsync(ct);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Apagado normal
-            }
-            catch (Exception ex)
-            {
-                HandleStartupFailure(ex);
-                throw;
-            }
-        }
-
-        private void ValidarContratoInicializacionProceso()
-        {
-            object configuracion = ObtenerConfiguracionProceso();
-            if (configuracion == null)
-            {
-                throw new InvalidOperationException("No fue posible validar el contrato de inicialización: no se encontró un objeto de configuración con propiedades Pid, NombreProceso y NombreDisplay.");
-            }
-
-            Type tipo = configuracion.GetType();
-            PropertyInfo propiedadPid = tipo.GetProperty("Pid", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            PropertyInfo propiedadNombreProceso = tipo.GetProperty("NombreProceso", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            PropertyInfo propiedadNombreDisplay = tipo.GetProperty("NombreDisplay", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-            object pid = propiedadPid?.GetValue(configuracion, null);
-            string nombreProceso = propiedadNombreProceso?.GetValue(configuracion, null) as string;
-            string nombreDisplay = propiedadNombreDisplay?.GetValue(configuracion, null) as string;
-
-            int pidNumero = pid is int pidEntero ? pidEntero : 0;
-            bool pidValido = pidNumero > 0;
-            if (!pidValido || string.IsNullOrWhiteSpace(nombreProceso) || string.IsNullOrWhiteSpace(nombreDisplay))
-            {
-                throw new InvalidOperationException($"Contrato de inicialización inválido. Pid='{pid}', NombreProceso='{nombreProceso}', NombreDisplay='{nombreDisplay}'.");
-            }
-
-            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|Inicializacion|Contrato validado: PID={pidNumero}, NombreProceso='{nombreProceso}', NombreDisplay='{nombreDisplay}'.");
-        }
-
-        private object ObtenerConfiguracionProceso()
-        {
-            Type hostType = GetType();
-            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-            object porConvencion = hostType.GetField("_configuracionBase", flags)?.GetValue(this)
-                                ?? hostType.GetField("_configuracion", flags)?.GetValue(this)
-                                ?? hostType.GetProperty("Configuracion", flags)?.GetValue(this, null)
-                                ?? hostType.GetProperty("ConfiguracionBase", flags)?.GetValue(this, null);
-            if (porConvencion != null)
-                return porConvencion;
-
-            foreach (FieldInfo field in hostType.GetFields(flags))
-            {
-                object value = field.GetValue(this);
-                if (EsConfiguracionConContrato(value))
-                    return value;
-            }
-
-            foreach (PropertyInfo property in hostType.GetProperties(flags))
-            {
-                if (property.GetIndexParameters().Length > 0)
-                    continue;
-
-                object value;
-                try
-                {
-                    value = property.GetValue(this, null);
-                }
-                catch
-                {
-                    continue;
-                }
-
-                if (EsConfiguracionConContrato(value))
-                    return value;
-            }
-
-            return null;
-        }
-
-        private static bool EsConfiguracionConContrato(object instancia)
-        {
-            if (instancia == null)
-                return false;
-
-            Type tipo = instancia.GetType();
-            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-            return tipo.GetProperty("Pid", flags) != null
-                && tipo.GetProperty("NombreProceso", flags) != null
-                && tipo.GetProperty("NombreDisplay", flags) != null;
-        }
-
-        private async Task OnTimerElapsedAsync(CancellationToken ct)
-        {
-#if DEBUG
-            if (_debugSingleShot)
-                return;
-
-            _debugSingleShot = true;
-#endif
-
-            if (!await _tickLock.WaitAsync(0, ct).ConfigureAwait(false))
-                return;
-
-            try
-            {
-                await _startupTask.ConfigureAwait(false);
-                _runningTask = OnTimerAsync(ct);
-                await _runningTask.ConfigureAwait(false);
-            }
-            catch (Exception ex) when (!(ex is OperationCanceledException))
-            {
-                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Realiza_timer|Se presenta exception: {ex}");
-            }
-            finally
-            {
-                _runningTask = Task.CompletedTask;
-                _tickLock.Release();
-            }
-        }
-
-        private void HandleStartupFailure(Exception ex)
-        {
-            if (Interlocked.Exchange(ref _startupFailureSignaled, 1) == 1)
-                return;
-
-            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|OnStart|{ex}");
-            TryWriteEventLog($"Error en OnStart: {ex}");
-
-            ExitCode = 1;
-            _ = Task.Run(() => Stop());
-        }
-
-        private void TryWriteEventLog(string message)
-        {
-            try
-            {
-                if (!EventLog.SourceExists(NombreServicioLog))
-                {
-                    EventLog.CreateEventSource(NombreServicioLog, "Application");
-                }
-
-                EventLog.WriteEntry(NombreServicioLog,
-                    message,
-                    EventLogEntryType.Error);
-            }
-            catch
-            {
-                //No-op
-            }
-        }
-    }
-}
-
-
-USE [InterfacesT24]
-GO
-SET ANSI_NULLS ON
-GO
-SET QUOTED_IDENTIFIER ON
-GO
-/***********************************************************************
-NOMBRE              :  dbo.usp_SpidGenCda_MarcarOperacionProcesada
-SISTEMA/BD          :  InterfacesT24
-AUTOR               :  Rafael Domínguez
-FECHA               :  2026-08-03
-
-DESCRIPCIÓN         :
-Marca una operación como PROCESADA en el plan de trabajo maestro.
-
-ALCANCE / NOTAS     :
-- Operación DML.
-- Actualiza el estado de la operación por folio y tipo de operación.
-
-PARÁMETROS          :
-@Folio         BIGINT
-@TipoOperacion VARCHAR(10)
-
-CONTROL DE CAMBIOS  :
-2026-08-03 | Rafael Domínguez | Creación SP
-***********************************************************************/
-CREATE OR ALTER PROCEDURE dbo.usp_SpidGenCda_MarcarOperacionProcesada
-(
-      @Folio         BIGINT
-    , @TipoOperacion VARCHAR(10)
-)
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
-
-    BEGIN TRY
-        DECLARE @FilasAfectadas INT;
-
-        BEGIN TRANSACTION;
-
-        UPDATE dbo.tb_srv_plan_trabajo_maestro
-        SET
-              cve_estatus          = 'PROCESADA'
-            , flg_terminado        = 1
-            , fec_fin              = GETDATE()
-            , num_estatus_especial = 0
-        WHERE
-                folio          = @Folio
-            AND tipo_operacion = @TipoOperacion;
-
-        SET @FilasAfectadas = @@ROWCOUNT;
-
-        COMMIT TRANSACTION;
-
-        SELECT
-              @FilasAfectadas AS FilasAfectadas
-            , CASE WHEN @FilasAfectadas > 0 THEN 1 ELSE 0 END AS Afecto;
-
-    END TRY
-    BEGIN CATCH
-        IF XACT_STATE() <> 0
-            ROLLBACK TRANSACTION;
-
-        INSERT INTO auditoria.errorlog
-        (
-              errornumber
-            , errorseverity
-            , errorstate
-            , errorprocedure
-            , errorline
-            , errormessage
-        )
-        VALUES
-        (
-              ERROR_NUMBER()
-            , ERROR_SEVERITY()
-            , ERROR_STATE()
-            , ERROR_PROCEDURE()
-            , ERROR_LINE()
-            , ERROR_MESSAGE()
-        );
-
-        THROW;
-
-    END CATCH;
-END;
-GO
-
-USE [InterfacesT24]
-GO
-SET ANSI_NULLS ON
-GO
-SET QUOTED_IDENTIFIER ON
-GO
-
-/***********************************************************************
-NOMBRE              :  dbo.usp_SpidGenCda_ObtenerRegistrosCda
-SISTEMA/BD          :  InterfacesT24
-AUTOR               :  Rafael Domínguez
-FECHA               :  2026-08-03
-
-DESCRIPCIÓN         :
-Obtiene las operaciones pendientes del plan de trabajo para generación
-de CDA.
-
-ALCANCE / NOTAS     :
-- Consulta de operaciones ENT_SPID pendientes.
-- Mantiene la lógica legacy de selección por tipo de operación y alias.
-
-PARÁMETROS          :
-@ListaTiposOperacion NVARCHAR(MAX)
-@AliasProceso        VARCHAR(50)
-
-CONTROL DE CAMBIOS  :
-2026-08-03 | Rafael Domínguez | Creación SP
-***********************************************************************/
-CREATE OR ALTER PROCEDURE dbo.usp_SpidGenCda_ObtenerRegistrosCda
-(
-      @ListaTiposOperacion NVARCHAR(MAX)
-    , @AliasProceso        VARCHAR(50)
-)
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
-
-    BEGIN TRY
-
-        ------------------------------------------------------------------
-        -- Convierte "'Tipo1','Tipo2','Tipo3'" a tabla
-        ------------------------------------------------------------------
-        DECLARE @ListaTipos TABLE
-        (
-            tipo_operacion VARCHAR(50)
-        );
-
-        DECLARE @xml XML;
-
-        SET @xml = CAST(
-            '<x>' + REPLACE(REPLACE(@ListaTiposOperacion, '''', ''), ',', '</x><x>') + '</x>'
-            AS XML
-        );
-
-        INSERT INTO @ListaTipos (tipo_operacion)
-        SELECT T.c.value('.', 'VARCHAR(50)')
-        FROM @xml.nodes('/x') T(c);
-
-        ------------------------------------------------------------------
-        -- SQL LEGACY (MISMA LÓGICA)
-        ------------------------------------------------------------------
-        SELECT
-              Det_plan.servicio
-            , Det_plan.tipo_operacion
-            , Det_plan.folio
-            , Det_resumen.fec_valor
-        FROM
-        (
-            SELECT
-                  Det.folio
-                , Det.tipo_operacion
-                , MIN(Det.orden_ejecucion) AS orden_ejecucion
-                , Mto.fec_valor
-            FROM dbo.tb_srv_plan_trabajo_maestro  AS Mto WITH (NOLOCK)
-            JOIN dbo.tb_srv_plan_trabajo_detalle  AS Det WITH (NOLOCK)
-                ON  Mto.folio = Det.folio
-                AND Mto.tipo_operacion = Det.tipo_operacion
-            WHERE
-                    Mto.flg_terminado = 0
-                AND Mto.flg_cierre    = 0
-                AND Mto.tipo_operacion IN
-                    (
-                        SELECT tipo_operacion
-                        FROM @ListaTipos
-                    )
-                AND Det.flg_terminado = 0
-            GROUP BY
-                  Det.folio
-                , Det.tipo_operacion
-                , Mto.fec_valor
-        ) AS Det_resumen
-        JOIN dbo.tb_srv_plan_trabajo_detalle AS Det_plan WITH (NOLOCK)
-            ON  Det_plan.folio            = Det_resumen.folio
-            AND Det_plan.tipo_operacion   = Det_resumen.tipo_operacion
-            AND Det_plan.orden_ejecucion  = Det_resumen.orden_ejecucion
-        WHERE
-            Det_plan.alias_proceso = @AliasProceso
-        ORDER BY
-            Det_plan.fec_inicio;
-
-    END TRY
-    BEGIN CATCH
-        INSERT INTO auditoria.errorlog
-        (
-              errornumber
-            , errorseverity
-            , errorstate
-            , errorprocedure
-            , errorline
-            , errormessage
-        )
-        VALUES
-        (
-              ERROR_NUMBER()
-            , ERROR_SEVERITY()
-            , ERROR_STATE()
-            , ERROR_PROCEDURE()
-            , ERROR_LINE()
-            , ERROR_MESSAGE()
-        );
-
-        THROW;
-    END CATCH;
-END;
-GO
-
-
+SPEI CEP GEN CDA Recommendations
+SPEI_CEP_GEN_CDA - Architecture and Code Quality Recommendations
+Date: 2026-10-14. Source HEAD: d2c6dbdfda32a99ab87a09a8069c5a0d1b29bab3.
+Solution: SPEI_CEP_GEN_CDA.sln (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA.sln). Compared against LoansApp architecture/coding practices (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review checklist (../BaseLine_Docs/code_review.md). See portfolio control (./_ORCHESTRATION.md), understanding (../architecture/SPEI_CEP_GEN_CDA/Application_understanding_technical_document.md), review trail (./_SPEI_CEP_GEN_CDA_ExhaustiveReview_Progress.md) and dated Word companion (./SPEI_CEP_GEN_CDA_Recommendations_10142026.docx).
+Audit complete; remediation not performed. There are 19 unique open findings: 13 MustChange/rewrite, five rewrite_recommended, one NiceToRewrite_ifTimePermits. Severity: four Blocker, 14 Major, one Minor. This is an implementation assessment, not a release approval, PR verdict, fidelity percentage or acceptance-criteria sign-off.
+1. Solution Overview
+This timer-driven Windows Service polls TOMI work, obtains ENT_SPEI/CISE complements, maps each to a CDA, looks up customer RFC information through T24 views and calls the existing SPEI CEP insertion procedure. It then updates process aliases, service bookkeeping and the parent work item. It is receipt-generation/completion software; the reviewed source does not establish direct funds movement or a service-supervisor role.
+Order / tier	Project	Kind / target	Relative project path
+1 / 0	Aplicacion	Application library, netstandard2.0, x86	Aplicacion\Aplicacion.csproj
+2 / 1	Infraestructura	Repository library, net48, x86	Infraestructura\Infraestructura.csproj
+3 / 1	PuebasUnitarias	MSTest library, .NET Framework 4.8, x86	PuebasUnitarias\PuebasUnitarias.csproj
+4 / 2	SPEI_CEP_GEN_CDAN	Windows Service, .NET Framework 4.8, x86	SPEI_CEP_GEN_CDA\SPEI_CEP_GEN_CDAN.csproj
+
+Four direct project edges: Infraestructura -> Aplicacion; tests -> Aplicacion; host -> Aplicacion and Infraestructura. No cycle. Tier zero is internal independence, not proof that external references resolve. The host project filename has a final N; its assembly is SPEI_CEP_GEN_CDA. Solution x64 labels do not establish actual x64 binaries.
+Logical connection / role	Existing procedure
+TOMI / InterfacesT24 - poll	usp_SpeiGenCda_ObtenerRegistrosCda
+TOMI / InterfacesT24 - details	usp_SpeiGenCda_RecuperarDetalles
+TOMI / InterfacesT24 - parent mark	usp_SpeiGenCda_MarcarOperacionProcesada
+T24_VW / VistasT24 - RFC	usp_SpeiGenCda_ObtenerRfcClienteT24
+SPEI1 / Enlace - insertion	sp_InterfaceMW_SPEI_CEP
+
+Four local definitions and the metadata-existence checker are tracked. The SPEI insertion definition, deployed schemas and actual connection mapping are not supplied. The current DAO sends operation key/date/time/node, not RFC; no missing-RFC-argument defect is inferred without the existing procedure's contract.
+2. Scope and Methodology Note
+Every line of every tracked text file was read, not sampled. The work resumed from the application checkpoint, persisted each remaining project/support batch, and verified the original source hashes before advancing coverage.
+Batch	Text files	Physical lines	Final status
+Aplicacion	15	685	Full read complete
+Infraestructura	5	208	Full read complete
+PuebasUnitarias	6	1,312	Full read complete
+Host	5	378	Full read complete
+SQL	5	445	Full read complete
+Root/support/historical TXT	6	877	Full read complete
+Total	42	3,905	No pending text ranges
+
+The 48-file manifest (./_SPEI_CEP_GEN_CDA_FileManifest.csv) records original SHA256, bytes, lines, HEAD and review disposition; the file list (./_SPEI_CEP_GEN_CDA_FileList.txt) fixes scope. Ignored/generated outputs, package caches and Git internals are excluded.
+• Four tracked DLLs received assembly identity/architecture/API metadata inspection only:
+MUFG_T24 1.0.0.0 MSIL, SimpleInjector 5.0.0.0 MSIL, MySql.Data 5.2.5.0 MSIL and Oracle.DataAccess 2.112.1.0 X86. They were not executed, decompiled or source-audited.
+• Both historical PDFs were text-extracted locally and read completely: required 13 pages /
+447 extracted lines; optional 21 pages / 740 lines. Every page was nonempty and extraction permitted. These counts are additional historical text, not part of the 3,905 source lines. This was not visual/PDF-layout verification. The 266-line historical TXT was fully read with BOM-aware Windows-1252 fallback after ambiguous viewer output.
+• The historical documents use General/Entradas as their reference. All 20 old topics were
+dispositioned in the progress trail; they were not copied into the backlog as current defects.
+• Current shared MUFG_T24 source was read only to verify consumed lifecycle, result, token,
+cloning and identity contracts. Per the checklist, no library-local defect is charged here. The bundled DLL is not established as equivalent to that source or the deployed library.
+• The baseline's blank evidence/count fields are not treated as measurements. Its stated
+practices and the review checklist's applicable boundary/logging/persistence/testability sections guide recommendations alongside direct bug analysis.
+• Repository exclusions are honored: no system-parameter/date/holiday differences, no claimed
+functional distinction between IniciaProceso and ActualizaEjecucion, no new SPEI/Enlace wrapper or stored procedure, and no legacy-source edit. Literal Moq call matching remains a test-wiring issue even where lifecycle operations are business-equivalent.
+Quantified Cross-Checks
+These supplement the full read; they are not test execution or coverage:
+Check	Observed declaration / source count
+Test inventory	16 TestMethod attributes, three DataRow attributes, 19 Assert lines, seven Verify calls
+Cancellation safety net	All 16 Act paths use CancellationToken.None; no cancellation-source scenario
+Invalid concrete handler mocks	Four new Mock<ENT_SPEI> constructions
+Repeated test setup	14 directory-creation blocks and 14 Config.Rutas assignments; no TestInitialize/TestCleanup
+Application DTO construction	Four ProcesoDTO constructions, four AlertaDTO constructions, two terminal alias calls
+Dependency paths	Five absolute HintPaths; two distinct missing target DLLs
+Provider boundaries	Five query-result consumption sites across four DAOs omit Exito/cause checks
+SQL hazards	Three NOLOCK eligibility hints; three fallible audit writes before original rethrow
+Application named-pattern checks	Zero throw-ex/new-Exception(ex.Message), named MD5/SHA1/DES/3DES/ECB, or Result/Wait/GetAwaiter matches
+
+The named-pattern checks are not an SCA/CVE/license verdict or proof of universal security. No application/configuration files were changed. No application dependencies were restored or installed, no live SQL/SCM/service was invoked, and no full build, test suite or coverage run was performed. The available x86 .NET 8 runtime has no SDK; expected private DLLs, configured test packages/adapters and .NET Framework 4.8 targeting references are absent. Framework MSBuild alone is not a validated mixed SDK/classic build toolchain.
+A checksum-verified public PDFBox 3.0.8 JAR was downloaded for local extraction after the native Windows filter failed. No document/code content was uploaded. Isolated exact-property and framework-conversion probes reproduced SC-A4/SC-I2; they are not application tests.
+3. What's Already Good
+• Repository interfaces (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Interfaces/IDetallesCise.cs#L1)
+separate orchestration from database adapters. Existing direct stored procedures do not warrant an ORM or wrapper layer by themselves.
+• RFC cancellation (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L157)
+is explicitly rethrown; cancellation also bypasses the ordinary per-folio error route at OperacionServicio:151 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L151).
+• Ordinary per-operation failures (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L155)
+are logged/recorded/alerted rather than universally swallowed. Preserve intentional continuation.
+• CDA construction (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Modelos/Cda.cs#L45)
+guards a null complement before dereferencing it.
+• Host composition (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L64)
+already uses shared lifecycle and DI. Effective inherited startup metadata validation and tick serialization rule out invented uninitialized-PID/overlapping-timer defects.
+• Master update (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_MarcarOperacionProcesada.sql#L44)
+is transactional and reports affected rows. All four local procedure catch blocks have active THROW; SC-S2 is conditional cause replacement, not a blanket swallow allegation.
+• The actual test project (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/PuebasUnitarias.csproj#L1)
+contains behavioral tests and mocks; this is not a zero-test solution. SC-T1/T2 explain why its existence is insufficient as a release safety net.
+4. Findings by Project
+Each finding belongs to exactly one category. Blocker/Major/Minor use the approved checklist, not penetration-test severity. Current snippets are excerpts or explicitly labeled shapes; recommended code/pseudocode is illustrative, not an applied or fully compiled patch. Preserve repository logging/localization and real API contracts when implementing.
+4.1 Aplicacion - Tier 0
+MustChange/rewrite
+SC-A1 - Remove raw RFC/customer identifiers from logs
+Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Evidence: ENT:154 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L154), ENT:177 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L177), Cda:71 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Modelos/Cda.cs#L71).
+Current log interpolation includes these three raw fields; actual sensitive values are omitted:
+Code block (text)
+{rfc}
+{cda.RFCCURPBeneficiario}
+{this.customerCode}
+Ordinary INFO logs unnecessarily disclose personal/customer identifiers. Retention, readership and downstream redaction are unknown; asynchronous writing/rotation does not make the content safe. Replace those fields with safe correlation and outcome, using an approved masking helper only if necessary:
+Code block (csharp)
+Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Consulta RFC completada para folio {folio}");
+Do not move raw data into exception/alert text or invent an unapproved hashing scheme. Benefit: preserve operational diagnosis without propagating identifiers. Regression / JIRA SC-A1: capture all three normal/fallback/error paths; full synthetic RFC and customer strings must never appear in logs. Review alert/exception text as well.
+SC-A2 - Complete the parent only after all required complement outcomes
+Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Evidence: ENT:73 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L73), ENT:103 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L103), mark SQL:44 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_MarcarOperacionProcesada.sql#L44), poll SQL:69 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L69).
+Current control-flow shape:
+Code block (text)
+foreach complement:
+    observe cancellation
+    insert complement
+    if inserted: terminate aliases/service and mark whole folio/type processed
+The mark sets master PROCESADA/flg_terminado=1, while polling selects unfinished masters. With two complements, first success followed by cancellation at the next token check leaves unattempted work beneath a finished parent. Cancellation bypasses the ordinary error writer; this scenario does not assume how external error procedures might reopen other failures. Details UNION ALL (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_RecuperarDetalles.sql#L52) supports both node projections; production cardinality/idempotency is still unknown.
+Recommended shape:
+Code block (text)
+for each complement:
+    insert and record its approved outcome
+after every required outcome satisfies the agreed completion policy:
+    perform the correctly scoped terminal updates
+    require confirmed parent marking
+    log confirmed completion
+Verify which alias/service updates are folio-level before moving them. Preserve the explicit legacy no-row policy until owners approve otherwise. Agree recoverability/idempotency using existing SPEI APIs/TOMI state; no new wrapper/SP, assumed rollback or arbitrary distributed transaction. Benefit: parent state represents all required work, not the first success. Regression / JIRA SC-A2: two complements; cancel after first insertion, fail the second, restart safely, and assert parent ordering/discoverability and no duplicate first insertion.
+SC-A3 - Check the parent-mark Boolean before completion success
+Category: MustChange/rewrite. Severity: Major. Priority: P1. Related family: GEN-9. Evidence: ENT:103 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L103), DAO:47 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseDao.cs#L47).
+Code block (csharp)
+await _detallesCise.MarcarOperacionProcesadaAsync(folio, tipoOperacion, ct).ConfigureAwait(false);
+The DAO returns Afecto == true with strict affected-row enforcement off. Awaiting alone does not confirm a mark, yet unconditional completion logging follows. At SC-A2's correct terminal point, require the result:
+Code block (csharp)
+bool marcada = await _detallesCise.MarcarOperacionProcesadaAsync(folio, tipoOperacion, ct)
+    .ConfigureAwait(false);
+if (!marcada)
+    throw new InvalidOperationException($"No se confirmó el cierre del folio {folio}");
+Route failure through existing error/notification handling; retain cancellation and safe context. SC-I1 separately preserves provider causes; SC-A2 separately fixes timing. Benefit: insertion is not confused with confirmed persisted parent completion. Regression / JIRA SC-A3: true, false/zero-row, exception and cancellation; false must be explicitly observable and must not emit the completion-success message.
+SC-A4 - Agree and enforce one identifier-length boundary
+Category: MustChange/rewrite. Severity: Major. Priority: P2. Evidence: Cda:22 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Modelos/Cda.cs#L22).
+Code block (csharp)
+if (_rfcCurpBeneficiario.Length > 18)
+    return _rfcCurpBeneficiario.Substring(0, 17);
+The exact extracted getter probe returned 17 -> 17, 18 -> 18, 19 -> 17 and 20 -> 17; empty/null/whitespace returned ND. That discontinuity is reproduced, not the intended width. The current DAO does not send this field to the SPEI SP, so rejected/malformed CEP persistence is not established.
+Only if owners confirm maximum 18, the consistent replacement is:
+Code block (csharp)
+return _rfcCurpBeneficiario.Length > 18
+    ? _rfcCurpBeneficiario.Substring(0, 18)
+    : _rfcCurpBeneficiario;
+If 17 or explicit rejection is required, implement that approved contract consistently instead; do not silently trim meaningful input or label a guessed width as correct. Benefit: stable, documented model behavior. Regression / JIRA SC-A4: assert exact strings for null, empty, whitespace, 1/17/18/19/20 characters and meaningful whitespace under the approved policy.
+SC-A5 - Make compatible shared dependencies reproducible
+Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Central finding: GEN-1. Evidence: app:12 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Aplicacion.csproj#L12), infra:16 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Infraestructura.csproj#L16), tests:77 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/PuebasUnitarias.csproj#L77), host:63 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDAN.csproj#L63).
+Code block (xml)
+<HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+Four MUFG_T24 paths plus host SimpleInjector are machine-local; both distinct targets are absent. No portfolio nuget.config/MUFG-named package archive was found. This does not prove an organization-wide feed does not exist. The bundled old MUFG copy lacks current host/runner/ logging types, so redirecting paths to it is not a reliable repair.
+Follow GEN-1's centralized versioned-package plan, not four path hacks. Conceptual manifest:
+Code block (xml)
+<PackageReference Include="MUFG_T24" Version="APPROVED_COMPATIBLE_VERSION" />
+This is not a known published package/version. Verify netstandard2.0/net48 compatibility, x86/transitive provider requirements, API shape and the approved source of SimpleInjector. Do not retarget layers blindly or replace a missing dependency with a stale binary. Benefit: clean developer/CI builds select a known compatible dependency set. Regression / JIRA SC-A5: approved clean restore, supported x86 Debug/Release builds, transitive deployment and isolated startup. No successful SPEI build was established here.
+rewrite_recommended
+SC-A6 - Expose partial/no-row cycle outcomes without changing legacy policy
+Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: ENT:77 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L77), ENT:107 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L107), operation:186 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L186), host:130 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L130).
+Code block (csharp)
+if (!ordenPagoInsertada)
+    continue;
+// The complement loop can still end with:
+return true;
+The same Boolean represents inserted, mixed and entirely skipped work; the outer operation can also continue after logged folio errors, and the host discards its Boolean. Individual errors are observable; the aggregate contract is coarse. The no-row skip is explicitly legacy behavior, not automatically a defect.
+Start with the smallest safe summary; introduce a type only if consumers need it:
+Code block (text)
+Folio: Attempted=2, Inserted=1, NoRow=1, TerminalStateConfirmed=false
+Cycle: CompletedFolios=..., FailedFolios=..., SkippedFolios=...
+Wire handler, orchestrator and host together if the API changes. Preserve accepted no-row, unknown-operation, alert and per-folio continuation behavior. Benefit: distinguish productive, partial and no-op cycles. Regression / JIRA SC-A6: all inserted, all no-row, mixed, unknown operation and exception; assert exact summary counts and unchanged approved decisions.
+SC-A7 - Extract counted local lifecycle/alert construction
+Category: rewrite_recommended. Severity: Major. Priority: P3. Evidence: ENT:49 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L49), ENT:84 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L84), operation:68 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L68), operation:158 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L158).
+Current repeated shape: four ProcesoDTO initializers, four AlertaDTO initializers and two terminal calls; terminal blocks repeat folio/type/service/process/PID while changing alias.
+Code block (text)
+construct terminal DTO for first alias -> TerminaProceso
+construct nearly identical terminal DTO for final alias -> TerminaProceso
+After SC-A2 establishes granularity, extract only genuinely shared local construction:
+Code block (csharp)
+await _controlServicio.TerminaProceso(CrearProceso(folio, _configuracion.AliasProceso), ct);
+await _controlServicio.TerminaProceso(CrearProceso(folio, _configuracion.AliasProcesoFin), ct);
+CrearProceso is illustrative, not an existing API. Preserve both aliases, ordering, all shared fields and distinct alert messages/severity. Do not add a factory hierarchy or remove a required call merely because it looks similar. Benefit: reduce metadata drift without obscuring business flow. Regression / JIRA SC-A7: assert both aliases/all fields and the four distinct alert paths.
+NiceToRewrite_ifTimePermits
+None in this project; documentation-only SC-N1 is in support below.
+4.2 Infraestructura - Tier 1
+MustChange/rewrite
+SC-I1 - Distinguish provider failure from legitimate empty/no-row results
+Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Central family: GEN-11. Evidence: poll:36 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/SondeoDao.cs#L36), details:36 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseDao.cs#L36), mark:50 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseDao.cs#L50), insert:43 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseSpeiDao.cs#L43), RFC:33 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseT24Dao.cs#L33).
+Code block (csharp)
+return resultado.Data;
+// Other sites reduce the same contract to:
+return resultado.Data.FirstOrDefault();
+return resultado.Data.FirstOrDefault()?.RFC;
+All five query sites omit Exito/Exception checks, including marking's Afecto reduction. Verified effective shared overloads initialize non-null Data, default to non-strict behavior and can return Exito=false/Exception for SQL or mapping failure. Thus failed polling can look empty, failed details can look missing, failed insertion can become the approved null/no-row skip, failed RFC lookup can look absent, and failed marking can lose its real cause. Successful emptiness itself is not the defect.
+Guard technical failure before reducing Data/Afecto at every site:
+Code block (csharp)
+if (!resultado.Exito)
+    throw new InvalidOperationException("Falló el procedimiento de inserción CEP.", resultado.Exception);
+return resultado.Data.FirstOrDefault();
+Use safe procedure/operation context and existing error/notification handling; keep cancellation and original causes. Do not blanket-enable strict affected-row enforcement: valid empty reads/ legacy no-row responses must remain distinguishable. SC-A3 checks caller Boolean success; this ticket preserves the DAO failure channel. Do not change MUFG_T24 or add a SPEI SP here. Benefit: technical errors cannot masquerade as valid business emptiness or a successful cycle. Regression / JIRA SC-I1: each of five paths: Exito=true empty, Exito=false empty/partial Data, SQL/mapping exception and cancellation; assert exact cause and approved downstream decision.
+rewrite_recommended
+SC-I2 - Make the existing SPEI operation-key conversion explicit
+Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: SPEI DAO:34 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseSpeiDao.cs#L34).
+Code block (csharp)
+Convert.ToInt64(cda.idFolioOperacion)
+The source property is decimal; this conversion rounds fractions. An isolated framework probe returned 42.4 -> 42, 42.5 -> 42 and 42.6 -> 43. Fractional production keys are not established, and the deployed parameter precision is unknown; this is a defensive contract recommendation. If the existing approved API requires integral Int64, guard scale/range:
+Code block (csharp)
+decimal key = cda.idFolioOperacion;
+if (key != decimal.Truncate(key) || key < long.MinValue || key > long.MaxValue)
+    throw new ArgumentOutOfRangeException(nameof(cda), "La clave debe ser un Int64 integral.");
+long operationKey = decimal.ToInt64(key);
+Preserve allowed signed values; do not invent a positive-only rule. If the approved API accepts decimals, use that existing contract instead of introducing another procedure. Benefit: malformed input cannot silently select a neighboring key. Regression / JIRA SC-I2: whole/fractional/halfway values, signed limits and overflow; assert exact @op_clave, not merely that a call occurred.
+NiceToRewrite_ifTimePermits
+None. Shared dependency packaging is consolidated in SC-A5, not repeated per project.
+4.3 PuebasUnitarias - Tier 1
+MustChange/rewrite
+SC-T1 - Repair concrete mock, constructor and literal overload contracts
+Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: orchestrator fixture:63 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L63), setup:192 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L192), alert verification:287 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L287), lifecycle expectation:661 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L661), actual constructor:30 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L30).
+Code block (csharp)
+var _entSpei = new Mock<ENT_SPEI>();
+_entSpei.Setup(t => t.ProcesarOperacionCISEAsync("1006", It.IsAny<CancellationToken>()));
+Four fixtures request a no-argument proxy, but the class has only a five-argument constructor. The target method is non-virtual, so supplying constructor arguments alone still cannot make Moq intercept it. Old tokenless alert expectations also target a different overload than current token-bearing calls. A lifecycle test verifies ActualizaEJecucion while the handler literally calls IniciaProceso: business equivalence does not make an unconfigured mock forward calls. These are independently verifiable static fixture defects, not executed test failures.
+Recommended repair:
+Code block (text)
+Construct a real ENT_SPEI with its five mocked dependencies.
+Configure/verify the actual DAO/control/alert overloads and token identity.
+Only if handler isolation is necessary, introduce one minimal handler interface and
+wire its application consumer, host registration and tests in the same change.
+Do not make every method virtual for Moq. Preserve exempt parameter/date/holiday policies and the agreed functional equivalence of lifecycle operations. Benefit: fixtures reach Act and test real contracts. Regression / JIRA SC-T1: all four orchestrator fixtures and stale lifecycle/alert expectations pass with compatible dependencies; report actual discovered/executed cases.
+SC-T2 - Add regression cases for the verified integrity/failure/stop defects
+Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: happy handler:448 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L448), lifecycle test:593 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L593), two-complement mapping:18 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ProcesamientoCiseUT.cs#L18).
+Code block (csharp)
+var resultado = await _entSpei.ProcesarOperacionCISEAsync("1006", CancellationToken.None);
+Assert.IsTrue(resultado);
+All 16 Act paths use CancellationToken.None. The existing two-complement test checks mapping, not completion/recovery order. No test checks false parent marking, provider Exito=false/partial Data, identifier boundaries/redaction, or host timeout/disposal. The loose happy-path mark mock can default false while the test accepts true, missing SC-A3. Tests reference application only; infrastructure/host behavior needs an appropriate isolated seam.
+Add cases that expose the original defects:
+Code block (text)
+cancel between two complement inserts -> no premature terminal parent; safe retry
+false parent mark -> explicit failure and no completion-success message
+provider failure vs successful empty insert -> distinct outcome and preserved cause
+identifier boundaries -> exact approved values; raw strings absent from captured logs
+stop timeout -> active dependencies not disposed; no false idle/persistence success
+Use deterministic fakes/mocks, real token cancellation, exact parameters/DTOs/call order and test-owned logging. No production SCM/DB/credentials. Preserve approved no-row continuation. Benefit: the safety net detects actual defects rather than only Boolean happy paths. Regression / JIRA SC-T2: demonstrate linked cases fail the original behavior and pass after their fixes; publish real test/coverage output, never an invented zero-percent metric.
+rewrite_recommended
+SC-T3 - Isolate repeated fixture/global logging state
+Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: ENT fixture:54 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L54), operation fixture:74 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L74), mapping fixture:18 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ProcesamientoCiseUT.cs#L18).
+Code block (csharp)
+var rutasLogs = Path.Combine(Path.GetTempPath(), "SPEI_CEP_GEN_CDA");
+Directory.CreateDirectory(rutasLogs);
+Config.Rutas = new RutasConfiguracion { /* shared directory */ };
+Fourteen directory/setup blocks mutate static logging configuration without TestInitialize/ TestCleanup. Mapping tests construct logging models without their own fixture. Specific logger failure or observed parallel-run failure is not claimed; state/order coupling and repeated shared output are concrete.
+Code block (text)
+save previous static configuration
+create a unique exact test-owned directory, or use the approved in-memory sink
+share only small common fixture setup; retain scenario-specific assertions
+restore configuration and clean only the owned path, even after test failure
+serialize unavoidable static-state tests until the seam is isolated
+Benefit: independent runs and less setup drift. Regression / JIRA SC-T3: run each test alone, reversed/random order, cleanup after failure and supported concurrent runners. Never recursively delete a shared temp root.
+NiceToRewrite_ifTimePermits
+None; do not rename public/shared APIs solely to modernize test style.
+4.4 Windows Service Host - Tier 2
+MustChange/rewrite
+SC-H1 - Require actual quiescence before terminal state/container disposal
+Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: waits:158 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L158), disposal:180 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L180).
+Current effective control-flow shape:
+Code block (text)
+await bounded helper for startup and running tasks
+persist idle/termination
+finally: dispose container
+The verified compatibility helper delegates to the base wait wrapper, which logs/returns normally on timeout without completing the supplied task. Default wait/cleanup budgets are 60/30 seconds. Slow/uncooperative work can therefore retain disposed dependencies or continue after a terminal-state claim. Initialization availability is not quiescence. This is local consumption of a bounded contract, not a new library defect.
+Code block (text)
+request cancellation and stop new work through the existing base
+wait within supported SCM budget; inspect actual completion of both supplied tasks
+if still active: explicitly record incomplete stop; do not claim idle completion
+release operation-owned/container resources exactly once after actual quiescence,
+using an approved observed deferred-disposal/failure policy
+An early return above finally is insufficient because unconditional Dispose still runs. Do not replace the budget with an unlimited synchronous wait or unobserved fire-and-forget. Benefit: resource ownership remains safe when cancellation is late or ignored. Regression / JIRA SC-H1: completed/null, faulted, cancel-aware and still-pending startup/tick tasks, wait cancellation and repeated stop; assert state/disposal ordering and bounded response.
+SC-H2 - Confirm database cleanup before the local success message
+Category: MustChange/rewrite. Severity: Major. Priority: P1. Central family: GEN-9. Evidence: idle:162 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L162), termination:165 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L165), success:167 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L167).
+Code block (csharp)
+await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, serviceName, cleanupCt);
+await _controlServicio.ActualizaTerminacion(serviceName, cleanupCt);
+Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+The compatibility Boolean can be false; termination can return Exito=false/Exception without throwing. Some shared failures already log/alert and consuming the compatibility Boolean is documented optional. The definite local issue is the unconditional persistence-success claim.
+Code block (text)
+capture idle Boolean (or approved existing typed outcome) and termination result
+require each necessary outcome; preserve cause and cleanup cancellation/budget
+on failure: explicitly record incomplete DB cleanup
+emit this local success message only after confirmed success
+Apply SC-H1's quiescence guard. Inherited base success logging is dependency context and is not an aggregate database-persistence guarantee; do not promise a local fix removes it. Benefit: SCM stop is distinguishable from confirmed database cleanup. Regression / JIRA SC-H2: both succeed, either fails, provider exception and cancellation; the quoted local message must be absent for unsuccessful cleanup.
+rewrite_recommended
+SC-H3 - Reconcile approved GEN/ENV runtime identities
+Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: Program:17 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/Program.cs#L17), host identity:33 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L33), configuration:64 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L64).
+Code block (text)
+runner / host identity: SPEI_CEP_ENV_CDA
+loaded configuration:  SPEI_CEP_GEN_CDA
+The shared runner uses identity for Global mutex and EventLog source, not only a description. Source mismatch is verified; a deployed collision or SCM failure is not.
+Code block (text)
+confirm SCM name / config key / EventLog source / mutex identity / historical aliases
+derive runner and host identity consistently from the approved map
+migrate any required aliases explicitly; verify sender and generator coexist safely
+Do not blindly rename a registered service or duplicate standing GEN-14's library-local ServiceName setter issue. Designer Service1 text alone is not a new initialization defect. Benefit: avoid unintended sender/generator singleton coupling and misleading diagnosis. Regression / JIRA SC-H3: isolated approved identities, sender/generator coexistence and legacy alias migration with the actual approved DLL; no production SCM action during this audit.
+NiceToRewrite_ifTimePermits
+None; hosting modernization is a gated architecture choice, not another mandatory rewrite.
+4.5 SQL and Root/Support
+MustChange/rewrite
+SC-S1 - Base work eligibility on committed state
+Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: poll SQL:69 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L69), third hint:86 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L86).
+Code block (sql)
+FROM dbo.tb_srv_plan_trabajo_maestro Mto WITH (NOLOCK),
+     dbo.tb_srv_plan_trabajo_detalle Det WITH (NOLOCK)
+Three NOLOCK hints cover authoritative work-plan eligibility. An uncommitted producer/master/ detail state can drive an external receipt insert before producer rollback; that rollback cannot undo the external action. Concurrent movement may also produce missing/duplicate reads. This is an evidenced isolation risk, not an observed incident.
+Code block (text)
+use DBA-approved committed/snapshot eligibility reads
+prove the selected detail row itself satisfies approved unfinished/alias rules
+if multiple workers are supported, use existing approved ownership/idempotency
+validate actual constraints, plans, blocking and latency before rollout
+Removing NOLOCK under verified read-committed settings is the smallest candidate; confirm snapshot/index/locking policy rather than enabling it blindly. The outer order/alias join relies on cardinality constraints, so order ties are a validation gate, not a separate proven defect without schema. A read-only poll/machine-local mutex is not a cross-host claim. Benefit: only committed eligible work drives generation. Regression / JIRA SC-S1: producer insert/update then rollback during polling; master/detail completion races; actual alias/order ties; supported multi-worker cases only if applicable. Measure real execution plans/latency in an isolated DBA fixture.
+SC-S2 - Preserve the primary SQL error when audit insertion fails
+Category: MustChange/rewrite. Severity: Major. Priority: P2. Evidence: mark:64 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_MarcarOperacionProcesada.sql#L64), poll:95 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L95), details:67 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_RecuperarDetalles.sql#L67).
+Current catch shape:
+Code block (sql)
+BEGIN CATCH
+    INSERT INTO auditoria.errorlog (...) VALUES (ERROR_NUMBER(), ...);
+    THROW;
+END CATCH;
+Three fallible audit writes occur before original THROW. If the audit insert fails, control does not reach that rethrow and the caller sees the secondary failure instead. The marking procedure correctly rolls back first, but independent error-log storage can still fail.
+Code block (text)
+capture original metadata; complete required rollback
+protect auxiliary audit insertion under the approved diagnostic policy
+if auditing fails, explicitly expose the secondary diagnostic via a supported wired channel
+rethrow the original operation error; never return success or use an empty catch
+Do not assume client collection of SQL warnings unless it is actually wired. Coordinate with SC-I1 so the application preserves the true operation cause. This is the causal-diagnostics variant of the portfolio's GEN-11 failure-visibility family, not another shared-library defect. Benefit: original incident diagnosis survives degraded audit storage. Regression / JIRA SC-S2: force primary operation and independent audit-write failures; assert original number/procedure/cause and visible secondary diagnostics. No live SQL was run.
+SC-S3 - Correct Release-to-Debug solution mapping
+Category: MustChange/rewrite. Severity: Major. Priority: P2. Evidence: solution:42 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA.sln#L42).
+Code block (text)
+{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.ActiveCfg = Debug|Any CPU
+{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.Build.0 = Debug|Any CPU
+A requested solution Release|Any CPU build selects the application's Debug configuration, potentially combining unlike artifacts. Fix those two mappings, preserving unrelated entries:
+Code block (text)
+{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.ActiveCfg = Release|Any CPU
+{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.Build.0 = Release|Any CPU
+Confirm the approved platform matrix; tracked x86 targets are not automatically changed. Benefit: requested release configuration produces corresponding application artifacts. Regression / JIRA SC-S3: after SC-A5/toolchain availability, inspect evaluated project Configuration/Platform and assert Release output/optimization/symbol policy for every supported solution build. A configuration label alone is not a successful-build test.
+rewrite_recommended
+None additional. Historical style suggestions were evaluated, not turned into speculative tickets.
+NiceToRewrite_ifTimePermits
+SC-N1 - Replace the template README with an approved service runbook
+Category: NiceToRewrite_ifTimePermits. Severity: Minor. Priority: P3. Evidence: README:1 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/README.md#L1).
+Current content is a generic GitLab onboarding/README template, not service operating guidance:
+Code block (text)
+generic repository setup / collaboration / README-writing advice
+no approved service build, configuration, stop/recovery or reconciliation procedure
+Recommended service-specific outline:
+Code block (text)
+purpose and project/procedure map
+approved dependency versions/source, x86 build/test commands
+GEN/ENV SCM/config/EventLog/mutex identities and configuration keys, without secrets
+isolated deployment, bounded stop, recovery/reconciliation and rollback
+owners, evidence and unresolved contract decisions
+Keep unavailable values pending until approved; do not execute/reuse the template force-push advice as an operational step. The audit handover is not itself a tested production runbook. Benefit: a newcomer can reproduce an approved build and follow safe operating instructions. Regression / JIRA SC-N1: an independent engineer follows the approved runbook in isolation. No production README edit or deployment was performed here.
+5. Architecture-Fit Note
+Apply the control document's architecture guidance (./_ORCHESTRATION.md): this is timer-polled, multi-step receipt generation with shared Windows/service/database contracts, not an observed HTTP API, continuous socket listener or necessarily a durable saga. Quality findings alone do not justify a wholesale rewrite. Fix integrity/privacy/provider/lifetime defects, make outcomes explicit and establish executable tests before changing hosting.
+Option	Fit with observed workload	Trade-off / decision gate
+Retain current Windows Service	Lowest immediate migration risk; existing SCM, timer and shared-library integration	Fix findings and verify deployed API/identity/stop contracts; retain bounded lifecycle
+Modern .NET Worker Service	Potentially simpler packaging, DI/lifetimes and telemetry	Prove provider/shared-library/framework compatibility, x86 needs and operational migration budget
+Scheduled job	Could fit if each polling batch can finish and restart independently	Requires accepted schedule/latency, bounded duration, ownership and restart/idempotency guarantees
+Durable queue/job workflow	Could make per-complement progress and retry explicit	Requires measured volume/SLA and approved infrastructure/contracts; adds operating complexity
+
+Unknown: SLA/RTO/RPO, volumes, poll cadence requirements, actual complement cardinality, cross-host ownership, existing SP idempotency, deployment constraints, cost and staffing. No queue, cloud, microservice or transaction-coordinator purchase/re-platform is recommended as the first move.
+6. JIRA-Ready Backlog
+These are proposed issue IDs/titles, not remotely created issues. Categories/severities match the 19 finding sections exactly. Priorities are review recommendations, not business-assigned dates. GEN references consolidate shared remediation; they do not add to the local finding count.
+ID	Title	Category	Severity	Project / files	Priority	Acceptance / dependency
+SC-A1	Remove raw RFC/customer logging	MustChange/rewrite	Blocker	Aplicacion: ENT_SPEI, Cda	P1	Three paths; no full synthetic identifier in logs/alerts/errors
+SC-A2	Delay parent completion until required complements accounted for	MustChange/rewrite	Blocker	Aplicacion: ENT_SPEI; TOMI contract	P1	Two-complement cancel/failure/retry preserves discoverability and safe insertion
+SC-A3	Confirm parent-mark Boolean before success	MustChange/rewrite	Major	Aplicacion: ENT_SPEI	P1	False/zero-row yields explicit failure and no completion success; coordinate SC-A2/I1
+SC-A4	Agree/enforce identifier width boundary	MustChange/rewrite	Major	Aplicacion: Cda	P2	Approved exact null/whitespace/17/18/19/20 outputs, not guessed maximum
+SC-A5	Pin compatible shared dependencies under GEN-1	MustChange/rewrite	Blocker	All four projects / five HintPaths	P1	Approved clean restore, supported x86 Debug/Release builds and isolated startup
+SC-A6	Expose partial/no-row aggregate outcomes	rewrite_recommended	Major	Handler, operation, host consumer	P2	Exact counts across inserted/skipped/failed cycles; legacy decisions unchanged
+SC-A7	Extract repeated local DTO construction	rewrite_recommended	Major	Aplicacion: ENT_SPEI, OperacionServicio	P3	After SC-A2; preserve both aliases/all DTO fields and four alert variants
+SC-I1	Preserve provider failure before Data/Afecto reduction	MustChange/rewrite	Blocker	Infraestructura: four DAOs / five sites	P1	Failed empty/partial data differs from successful empty; original cause retained
+SC-I2	Enforce existing operation-key type contract	rewrite_recommended	Major	DetallesCiseSpeiDao	P2	Approved signed scale/range; exact @op_clave for fractions/limits
+SC-T1	Repair constructor/member/token mock contracts	MustChange/rewrite	Major	OperacionServicioUT, ENT_SPEIUT	P1	Four real/seamed fixtures reach Act; actual overload/token verified; runnable after SC-A5
+SC-T2	Add linked integrity/failure/stop regressions	MustChange/rewrite	Major	Tests; isolated infrastructure/host seams	P1	Detect original linked defects; publish actual execution after SC-T1/dependency repair
+SC-T3	Isolate repeated global logging fixtures	rewrite_recommended	Major	All three test classes	P2	Unique owned output, state restored, individual/reordered/concurrent runs safe
+SC-H1	Defer terminal state/disposal until actual quiescence	MustChange/rewrite	Major	ServiceHost termination	P1	Pending tasks after bounded wait cannot cause premature disposal/idle success
+SC-H2	Confirm cleanup outcomes before local success log	MustChange/rewrite	Major	ServiceHost termination	P1	Either failure/cancellation suppresses local success; preserve cause/budget/SC-H1 ordering
+SC-H3	Reconcile approved GEN/ENV identities	rewrite_recommended	Major	Program, ServiceHost	P2	Approved SCM/config/mutex/EventLog map and isolated sender/generator coexistence
+SC-S1	Use committed eligible work-plan reads	MustChange/rewrite	Major	Polling SQL	P1	Rollback/isolation, alias/order and supported ownership cases; measured plans/latency
+SC-S2	Retain primary SQL error on audit-write failure	MustChange/rewrite	Major	Mark/poll/details SQL catch blocks	P2	Primary error plus observable secondary diagnostic; approved wired DBA policy
+SC-S3	Repair application Release solution mapping	MustChange/rewrite	Major	SPEI_CEP_GEN_CDA.sln:42-43	P2	Evaluated Release configuration/output across supported matrix; SC-A5/toolchain
+SC-N1	Write approved build/deploy/recovery README	NiceToRewrite_ifTimePermits	Minor	README.md	P3	Independent isolated walkthrough; actual owners/contracts, no secrets or guessed commands
+
+Suggested ownership: application maintainers/QA for SC-A/T, repository maintainers for SC-I, service/platform owners for SC-H/A5/S3, DBA with application owners for SC-S1/S2, and operations for the approved SC-N1 runbook. These are roles to agree, not existing assignments or estimates.
+7. Verification, Release Gates and Open Contracts
+7.1 What This Audit Verified
+Exhaustive text coverage, explicit binary/history disposition, source evidence, graph metadata, finding/backlog consistency and scoped document/Word-package structure are audit checks. The final machine-readable validation result is retained with the handover package. All 48 original source hashes/bytes and HEAD must match before its final pass is accepted. The getter/conversion probes reproduce current behavior only; no defect was fixed.
+7.2 What Remains Unverified
+• Full build/type-check, restore, test suite and measured coverage: prerequisites are unavailable.
+• Actual deployed shared DLL/version/API, transitive providers and service identity/registration.
+• SQL schema/indexes/constraints/permissions, actual SP body/parameter/result semantics,
+idempotency, affected-row guarantees, isolation policy and live performance.
+• Live cancellation, stop/disposal, database cleanup, safe retry/reconciliation and deployment.
+• Visual Microsoft Word/Mermaid/PDF rendering, pagination and visual sign-off. The Word file
+has styled OpenXML content; structural validation does not replace a human layout review.
+• SCA/CVE/license/security-testing conclusions or acceptance-criteria/fidelity conformance.
+No source remediation or production action was performed. Static review completion is not approval to deploy. Keep failed-provider results distinct from valid legacy emptiness.
+7.3 Owner Decisions Required Before Implementation
+Contract	Needed evidence / decision
+Complements and terminal state	Required cardinality/outcomes, alias granularity, discoverability and safe restart
+Existing SPEI interface	Real parameter/result/empty/idempotency contract; no invented RFC parameter or new wrapper
+Identifiers	Approved width/overlength/whitespace policy and log-data classification
+Dependencies/build	Approved compatible MUFG package/version/feed, framework/x86 matrix and CI toolchain
+Service operations	GEN/ENV identities, supported stop budget, incomplete-stop/deferred-disposal ownership
+SQL	Committed/snapshot policy, indexes/unique constraints and observable secondary-error channel
+Tests/rollout	Isolated fixtures, exact regression evidence, rollback and reconciliation ownership
+
+7.4 Recommended Sequence
+1. Obtain contracts and restore a compatible reproducible build path (SC-A5); repair fixture
+wiring (SC-T1) so regression results become meaningful.
+2. Address disclosure, parent completion and provider outcomes (SC-A1/A2/A3/I1), with failing
+regression cases that verify exact required outcomes rather than proxy counts.
+3. Make stop/quiescence/persistence and committed polling safe (SC-H1/H2/S1); preserve causal
+SQL diagnostics (SC-S2). Validate in isolation with actual approved dependencies/contracts.
+4. Resolve width/key/identity/configuration contracts (SC-A4/I2/H3/S3), then improve aggregate
+observability and local fixture/DTO duplication (SC-A6/A7/T3); complete linked SC-T2 evidence.
+5. Publish the approved runbook (SC-N1), perform an isolated operational/rollback walkthrough,
+then consider architecture modernization only if measured needs justify it.
+See handover playbook (./_SPEI_CEP_GEN_CDA_HANDOVER_PLAYBOOK.md), complete handover inventory (./_SPEI_CEP_GEN_CDA_HANDOVER_INVENTORY.csv) and prompt history (./_SPEI_CEP_GEN_CDA_PROMPT_HISTORY.md). Findings remain open until separately authorized implementation and actual regression/operational evidence demonstrate closure.
