@@ -1,412 +1,1414 @@
-SPEI CEP GEN CDA Recommendations
-SPEI_CEP_GEN_CDA - Architecture and Code Quality Recommendations
-Date: 2026-10-14. Source HEAD: d2c6dbdfda32a99ab87a09a8069c5a0d1b29bab3.
-Solution: SPEI_CEP_GEN_CDA.sln (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA.sln). Compared against LoansApp architecture/coding practices (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review checklist (../BaseLine_Docs/code_review.md). See portfolio control (./_ORCHESTRATION.md), understanding (../architecture/SPEI_CEP_GEN_CDA/Application_understanding_technical_document.md), review trail (./_SPEI_CEP_GEN_CDA_ExhaustiveReview_Progress.md) and dated Word companion (./SPEI_CEP_GEN_CDA_Recommendations_10142026.docx).
-Audit complete; remediation not performed. There are 19 unique open findings: 13 MustChange/rewrite, five rewrite_recommended, one NiceToRewrite_ifTimePermits. Severity: four Blocker, 14 Major, one Minor. This is an implementation assessment, not a release approval, PR verdict, fidelity percentage or acceptance-criteria sign-off.
-1. Solution Overview
-This timer-driven Windows Service polls TOMI work, obtains ENT_SPEI/CISE complements, maps each to a CDA, looks up customer RFC information through T24 views and calls the existing SPEI CEP insertion procedure. It then updates process aliases, service bookkeeping and the parent work item. It is receipt-generation/completion software; the reviewed source does not establish direct funds movement or a service-supervisor role.
-Order / tier	Project	Kind / target	Relative project path
-1 / 0	Aplicacion	Application library, netstandard2.0, x86	Aplicacion\Aplicacion.csproj
-2 / 1	Infraestructura	Repository library, net48, x86	Infraestructura\Infraestructura.csproj
-3 / 1	PuebasUnitarias	MSTest library, .NET Framework 4.8, x86	PuebasUnitarias\PuebasUnitarias.csproj
-4 / 2	SPEI_CEP_GEN_CDAN	Windows Service, .NET Framework 4.8, x86	SPEI_CEP_GEN_CDA\SPEI_CEP_GEN_CDAN.csproj
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
-Four direct project edges: Infraestructura -> Aplicacion; tests -> Aplicacion; host -> Aplicacion and Infraestructura. No cycle. Tier zero is internal independence, not proof that external references resolve. The host project filename has a final N; its assembly is SPEI_CEP_GEN_CDA. Solution x64 labels do not establish actual x64 binaries.
-Logical connection / role	Existing procedure
-TOMI / InterfacesT24 - poll	usp_SpeiGenCda_ObtenerRegistrosCda
-TOMI / InterfacesT24 - details	usp_SpeiGenCda_RecuperarDetalles
-TOMI / InterfacesT24 - parent mark	usp_SpeiGenCda_MarcarOperacionProcesada
-T24_VW / VistasT24 - RFC	usp_SpeiGenCda_ObtenerRfcClienteT24
-SPEI1 / Enlace - insertion	sp_InterfaceMW_SPEI_CEP
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Clase que contiene el flujo principal del procesamiento ENT_SPEI.
+    /// </summary>
+    public class ENT_SPEI : ProcesamientoCISE
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IDetallesCise _detallesCise;
+        private readonly IDetallesCiseSpei _detallesCiseSpei;
+        private readonly IDetallesCiseT24 _detallesCiseT24;
 
-Four local definitions and the metadata-existence checker are tracked. The SPEI insertion definition, deployed schemas and actual connection mapping are not supplied. The current DAO sends operation key/date/time/node, not RFC; no missing-RFC-argument defect is inferred without the existing procedure's contract.
-2. Scope and Methodology Note
-Every line of every tracked text file was read, not sampled. The work resumed from the application checkpoint, persisted each remaining project/support batch, and verified the original source hashes before advancing coverage.
-Batch	Text files	Physical lines	Final status
-Aplicacion	15	685	Full read complete
-Infraestructura	5	208	Full read complete
-PuebasUnitarias	6	1,312	Full read complete
-Host	5	378	Full read complete
-SQL	5	445	Full read complete
-Root/support/historical TXT	6	877	Full read complete
-Total	42	3,905	No pending text ranges
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ENT_SPEI(Configuracion configuracion, IControlServicio controlServicio, IDetallesCise detallesCise, IDetallesCiseSpei detallesCiseSpei, IDetallesCiseT24 detallesCiseT24)
+            : base(detallesCise)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _detallesCise = detallesCise;
+            _detallesCiseSpei = detallesCiseSpei;
+            _detallesCiseT24 = detallesCiseT24;
+        }
 
-The 48-file manifest (./_SPEI_CEP_GEN_CDA_FileManifest.csv) records original SHA256, bytes, lines, HEAD and review disposition; the file list (./_SPEI_CEP_GEN_CDA_FileList.txt) fixes scope. Ignored/generated outputs, package caches and Git internals are excluded.
-• Four tracked DLLs received assembly identity/architecture/API metadata inspection only:
-MUFG_T24 1.0.0.0 MSIL, SimpleInjector 5.0.0.0 MSIL, MySql.Data 5.2.5.0 MSIL and Oracle.DataAccess 2.112.1.0 X86. They were not executed, decompiled or source-audited.
-• Both historical PDFs were text-extracted locally and read completely: required 13 pages /
-447 extracted lines; optional 21 pages / 740 lines. Every page was nonempty and extraction permitted. These counts are additional historical text, not part of the 3,905 source lines. This was not visual/PDF-layout verification. The 266-line historical TXT was fully read with BOM-aware Windows-1252 fallback after ambiguous viewer output.
-• The historical documents use General/Entradas as their reference. All 20 old topics were
-dispositioned in the progress trail; they were not copied into the backlog as current defects.
-• Current shared MUFG_T24 source was read only to verify consumed lifecycle, result, token,
-cloning and identity contracts. Per the checklist, no library-local defect is charged here. The bundled DLL is not established as equivalent to that source or the deployed library.
-• The baseline's blank evidence/count fields are not treated as measurements. Its stated
-practices and the review checklist's applicable boundary/logging/persistence/testability sections guide recommendations alongside direct bug analysis.
-• Repository exclusions are honored: no system-parameter/date/holiday differences, no claimed
-functional distinction between IniciaProceso and ActualizaEjecucion, no new SPEI/Enlace wrapper or stored procedure, and no legacy-source edit. Literal Moq call matching remains a test-wiring issue even where lifecycle operations are business-equivalent.
-Quantified Cross-Checks
-These supplement the full read; they are not test execution or coverage:
-Check	Observed declaration / source count
-Test inventory	16 TestMethod attributes, three DataRow attributes, 19 Assert lines, seven Verify calls
-Cancellation safety net	All 16 Act paths use CancellationToken.None; no cancellation-source scenario
-Invalid concrete handler mocks	Four new Mock<ENT_SPEI> constructions
-Repeated test setup	14 directory-creation blocks and 14 Config.Rutas assignments; no TestInitialize/TestCleanup
-Application DTO construction	Four ProcesoDTO constructions, four AlertaDTO constructions, two terminal alias calls
-Dependency paths	Five absolute HintPaths; two distinct missing target DLLs
-Provider boundaries	Five query-result consumption sites across four DAOs omit Exito/cause checks
-SQL hazards	Three NOLOCK eligibility hints; three fallible audit writes before original rethrow
-Application named-pattern checks	Zero throw-ex/new-Exception(ex.Message), named MD5/SHA1/DES/3DES/ECB, or Result/Wait/GetAwaiter matches
+        /// <summary>
+        /// Flujo principal de ENT_SPEI: orquestador.
+        /// </summary>
+        public async Task<bool> ProcesarOperacionCISEAsync(string folio, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            const string tipoOperacion = ConstantesServicio.EntSpei;
 
-The named-pattern checks are not an SCA/CVE/license verdict or proof of universal security. No application/configuration files were changed. No application dependencies were restored or installed, no live SQL/SCM/service was invoked, and no full build, test suite or coverage run was performed. The available x86 .NET 8 runtime has no SDK; expected private DLLs, configured test packages/adapters and .NET Framework 4.8 targeting references are absent. Framework MSBuild alone is not a validated mixed SDK/classic build toolchain.
-A checksum-verified public PDFBox 3.0.8 JAR was downloaded for local extraction after the native Windows filter failed. No document/code content was uploaded. Isolated exact-property and framework-conversion probes reproduced SC-A4/SC-I2; they are not application tests.
-3. What's Already Good
-• Repository interfaces (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Interfaces/IDetallesCise.cs#L1)
-separate orchestration from database adapters. Existing direct stored procedures do not warrant an ORM or wrapper layer by themselves.
-• RFC cancellation (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L157)
-is explicitly rethrown; cancellation also bypasses the ordinary per-folio error route at OperacionServicio:151 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L151).
-• Ordinary per-operation failures (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L155)
-are logged/recorded/alerted rather than universally swallowed. Preserve intentional continuation.
-• CDA construction (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Modelos/Cda.cs#L45)
-guards a null complement before dereferencing it.
-• Host composition (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L64)
-already uses shared lifecycle and DI. Effective inherited startup metadata validation and tick serialization rule out invented uninitialized-PID/overlapping-timer defects.
-• Master update (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_MarcarOperacionProcesada.sql#L44)
-is transactional and reports affected rows. All four local procedure catch blocks have active THROW; SC-S2 is conditional cause replacement, not a blanket swallow allegation.
-• The actual test project (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/PuebasUnitarias.csproj#L1)
-contains behavioral tests and mocks; this is not a zero-test solution. SC-T1/T2 explain why its existence is insufficient as a release safety net.
-4. Findings by Project
-Each finding belongs to exactly one category. Blocker/Major/Minor use the approved checklist, not penetration-test severity. Current snippets are excerpts or explicitly labeled shapes; recommended code/pseudocode is illustrative, not an applied or fully compiled patch. Preserve repository logging/localization and real API contracts when implementing.
-4.1 Aplicacion - Tier 0
-MustChange/rewrite
-SC-A1 - Remove raw RFC/customer identifiers from logs
-Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Evidence: ENT:154 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L154), ENT:177 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L177), Cda:71 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Modelos/Cda.cs#L71).
-Current log interpolation includes these three raw fields; actual sensitive values are omitted:
-Code block (text)
-{rfc}
-{cda.RFCCURPBeneficiario}
-{this.customerCode}
-Ordinary INFO logs unnecessarily disclose personal/customer identifiers. Retention, readership and downstream redaction are unknown; asynchronous writing/rotation does not make the content safe. Replace those fields with safe correlation and outcome, using an approved masking helper only if necessary:
-Code block (csharp)
-Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Consulta RFC completada para folio {folio}");
-Do not move raw data into exception/alert text or invent an unapproved hashing scheme. Benefit: preserve operational diagnosis without propagating identifiers. Regression / JIRA SC-A1: capture all three normal/fallback/error paths; full synthetic RFC and customer strings must never appear in logs. Review alert/exception text as well.
-SC-A2 - Complete the parent only after all required complement outcomes
-Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Evidence: ENT:73 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L73), ENT:103 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L103), mark SQL:44 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_MarcarOperacionProcesada.sql#L44), poll SQL:69 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L69).
-Current control-flow shape:
-Code block (text)
-foreach complement:
-    observe cancellation
-    insert complement
-    if inserted: terminate aliases/service and mark whole folio/type processed
-The mark sets master PROCESADA/flg_terminado=1, while polling selects unfinished masters. With two complements, first success followed by cancellation at the next token check leaves unattempted work beneath a finished parent. Cancellation bypasses the ordinary error writer; this scenario does not assume how external error procedures might reopen other failures. Details UNION ALL (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_RecuperarDetalles.sql#L52) supports both node projections; production cardinality/idempotency is still unknown.
-Recommended shape:
-Code block (text)
-for each complement:
-    insert and record its approved outcome
-after every required outcome satisfies the agreed completion policy:
-    perform the correctly scoped terminal updates
-    require confirmed parent marking
-    log confirmed completion
-Verify which alias/service updates are folio-level before moving them. Preserve the explicit legacy no-row policy until owners approve otherwise. Agree recoverability/idempotency using existing SPEI APIs/TOMI state; no new wrapper/SP, assumed rollback or arbitrary distributed transaction. Benefit: parent state represents all required work, not the first success. Regression / JIRA SC-A2: two complements; cancel after first insertion, fail the second, restart safely, and assert parent ordering/discoverability and no duplicate first insertion.
-SC-A3 - Check the parent-mark Boolean before completion success
-Category: MustChange/rewrite. Severity: Major. Priority: P1. Related family: GEN-9. Evidence: ENT:103 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L103), DAO:47 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseDao.cs#L47).
-Code block (csharp)
-await _detallesCise.MarcarOperacionProcesadaAsync(folio, tipoOperacion, ct).ConfigureAwait(false);
-The DAO returns Afecto == true with strict affected-row enforcement off. Awaiting alone does not confirm a mark, yet unconditional completion logging follows. At SC-A2's correct terminal point, require the result:
-Code block (csharp)
-bool marcada = await _detallesCise.MarcarOperacionProcesadaAsync(folio, tipoOperacion, ct)
-    .ConfigureAwait(false);
-if (!marcada)
-    throw new InvalidOperationException($"No se confirmó el cierre del folio {folio}");
-Route failure through existing error/notification handling; retain cancellation and safe context. SC-I1 separately preserves provider causes; SC-A2 separately fixes timing. Benefit: insertion is not confused with confirmed persisted parent completion. Regression / JIRA SC-A3: true, false/zero-row, exception and cancellation; false must be explicitly observable and must not emit the completion-success message.
-SC-A4 - Agree and enforce one identifier-length boundary
-Category: MustChange/rewrite. Severity: Major. Priority: P2. Evidence: Cda:22 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Modelos/Cda.cs#L22).
-Code block (csharp)
-if (_rfcCurpBeneficiario.Length > 18)
-    return _rfcCurpBeneficiario.Substring(0, 17);
-The exact extracted getter probe returned 17 -> 17, 18 -> 18, 19 -> 17 and 20 -> 17; empty/null/whitespace returned ND. That discontinuity is reproduced, not the intended width. The current DAO does not send this field to the SPEI SP, so rejected/malformed CEP persistence is not established.
-Only if owners confirm maximum 18, the consistent replacement is:
-Code block (csharp)
-return _rfcCurpBeneficiario.Length > 18
-    ? _rfcCurpBeneficiario.Substring(0, 18)
-    : _rfcCurpBeneficiario;
-If 17 or explicit rejection is required, implement that approved contract consistently instead; do not silently trim meaningful input or label a guessed width as correct. Benefit: stable, documented model behavior. Regression / JIRA SC-A4: assert exact strings for null, empty, whitespace, 1/17/18/19/20 characters and meaningful whitespace under the approved policy.
-SC-A5 - Make compatible shared dependencies reproducible
-Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Central finding: GEN-1. Evidence: app:12 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Aplicacion.csproj#L12), infra:16 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Infraestructura.csproj#L16), tests:77 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/PuebasUnitarias.csproj#L77), host:63 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDAN.csproj#L63).
-Code block (xml)
-<HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-Four MUFG_T24 paths plus host SimpleInjector are machine-local; both distinct targets are absent. No portfolio nuget.config/MUFG-named package archive was found. This does not prove an organization-wide feed does not exist. The bundled old MUFG copy lacks current host/runner/ logging types, so redirecting paths to it is not a reliable repair.
-Follow GEN-1's centralized versioned-package plan, not four path hacks. Conceptual manifest:
-Code block (xml)
-<PackageReference Include="MUFG_T24" Version="APPROVED_COMPATIBLE_VERSION" />
-This is not a known published package/version. Verify netstandard2.0/net48 compatibility, x86/transitive provider requirements, API shape and the approved source of SimpleInjector. Do not retarget layers blindly or replace a missing dependency with a stale binary. Benefit: clean developer/CI builds select a known compatible dependency set. Regression / JIRA SC-A5: approved clean restore, supported x86 Debug/Release builds, transitive deployment and isolated startup. No successful SPEI build was established here.
-rewrite_recommended
-SC-A6 - Expose partial/no-row cycle outcomes without changing legacy policy
-Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: ENT:77 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L77), ENT:107 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L107), operation:186 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L186), host:130 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L130).
-Code block (csharp)
-if (!ordenPagoInsertada)
-    continue;
-// The complement loop can still end with:
-return true;
-The same Boolean represents inserted, mixed and entirely skipped work; the outer operation can also continue after logged folio errors, and the host discards its Boolean. Individual errors are observable; the aggregate contract is coarse. The no-row skip is explicitly legacy behavior, not automatically a defect.
-Start with the smallest safe summary; introduce a type only if consumers need it:
-Code block (text)
-Folio: Attempted=2, Inserted=1, NoRow=1, TerminalStateConfirmed=false
-Cycle: CompletedFolios=..., FailedFolios=..., SkippedFolios=...
-Wire handler, orchestrator and host together if the API changes. Preserve accepted no-row, unknown-operation, alert and per-folio continuation behavior. Benefit: distinguish productive, partial and no-op cycles. Regression / JIRA SC-A6: all inserted, all no-row, mixed, unknown operation and exception; assert exact summary counts and unchanged approved decisions.
-SC-A7 - Extract counted local lifecycle/alert construction
-Category: rewrite_recommended. Severity: Major. Priority: P3. Evidence: ENT:49 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L49), ENT:84 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L84), operation:68 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L68), operation:158 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/OperacionServicio.cs#L158).
-Current repeated shape: four ProcesoDTO initializers, four AlertaDTO initializers and two terminal calls; terminal blocks repeat folio/type/service/process/PID while changing alias.
-Code block (text)
-construct terminal DTO for first alias -> TerminaProceso
-construct nearly identical terminal DTO for final alias -> TerminaProceso
-After SC-A2 establishes granularity, extract only genuinely shared local construction:
-Code block (csharp)
-await _controlServicio.TerminaProceso(CrearProceso(folio, _configuracion.AliasProceso), ct);
-await _controlServicio.TerminaProceso(CrearProceso(folio, _configuracion.AliasProcesoFin), ct);
-CrearProceso is illustrative, not an existing API. Preserve both aliases, ordering, all shared fields and distinct alert messages/severity. Do not add a factory hierarchy or remove a required call merely because it looks similar. Benefit: reduce metadata drift without obscuring business flow. Regression / JIRA SC-A7: assert both aliases/all fields and the four distinct alert paths.
-NiceToRewrite_ifTimePermits
-None in this project; documentation-only SC-N1 is in support below.
-4.2 Infraestructura - Tier 1
-MustChange/rewrite
-SC-I1 - Distinguish provider failure from legitimate empty/no-row results
-Category: MustChange/rewrite. Severity: Blocker. Priority: P1. Central family: GEN-11. Evidence: poll:36 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/SondeoDao.cs#L36), details:36 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseDao.cs#L36), mark:50 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseDao.cs#L50), insert:43 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseSpeiDao.cs#L43), RFC:33 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseT24Dao.cs#L33).
-Code block (csharp)
-return resultado.Data;
-// Other sites reduce the same contract to:
-return resultado.Data.FirstOrDefault();
-return resultado.Data.FirstOrDefault()?.RFC;
-All five query sites omit Exito/Exception checks, including marking's Afecto reduction. Verified effective shared overloads initialize non-null Data, default to non-strict behavior and can return Exito=false/Exception for SQL or mapping failure. Thus failed polling can look empty, failed details can look missing, failed insertion can become the approved null/no-row skip, failed RFC lookup can look absent, and failed marking can lose its real cause. Successful emptiness itself is not the defect.
-Guard technical failure before reducing Data/Afecto at every site:
-Code block (csharp)
-if (!resultado.Exito)
-    throw new InvalidOperationException("Falló el procedimiento de inserción CEP.", resultado.Exception);
-return resultado.Data.FirstOrDefault();
-Use safe procedure/operation context and existing error/notification handling; keep cancellation and original causes. Do not blanket-enable strict affected-row enforcement: valid empty reads/ legacy no-row responses must remain distinguishable. SC-A3 checks caller Boolean success; this ticket preserves the DAO failure channel. Do not change MUFG_T24 or add a SPEI SP here. Benefit: technical errors cannot masquerade as valid business emptiness or a successful cycle. Regression / JIRA SC-I1: each of five paths: Exito=true empty, Exito=false empty/partial Data, SQL/mapping exception and cancellation; assert exact cause and approved downstream decision.
-rewrite_recommended
-SC-I2 - Make the existing SPEI operation-key conversion explicit
-Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: SPEI DAO:34 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Infraestructura/Repositorios/DetallesCiseSpeiDao.cs#L34).
-Code block (csharp)
-Convert.ToInt64(cda.idFolioOperacion)
-The source property is decimal; this conversion rounds fractions. An isolated framework probe returned 42.4 -> 42, 42.5 -> 42 and 42.6 -> 43. Fractional production keys are not established, and the deployed parameter precision is unknown; this is a defensive contract recommendation. If the existing approved API requires integral Int64, guard scale/range:
-Code block (csharp)
-decimal key = cda.idFolioOperacion;
-if (key != decimal.Truncate(key) || key < long.MinValue || key > long.MaxValue)
-    throw new ArgumentOutOfRangeException(nameof(cda), "La clave debe ser un Int64 integral.");
-long operationKey = decimal.ToInt64(key);
-Preserve allowed signed values; do not invent a positive-only rule. If the approved API accepts decimals, use that existing contract instead of introducing another procedure. Benefit: malformed input cannot silently select a neighboring key. Regression / JIRA SC-I2: whole/fractional/halfway values, signed limits and overflow; assert exact @op_clave, not merely that a call occurred.
-NiceToRewrite_ifTimePermits
-None. Shared dependency packaging is consolidated in SC-A5, not repeated per project.
-4.3 PuebasUnitarias - Tier 1
-MustChange/rewrite
-SC-T1 - Repair concrete mock, constructor and literal overload contracts
-Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: orchestrator fixture:63 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L63), setup:192 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L192), alert verification:287 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L287), lifecycle expectation:661 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L661), actual constructor:30 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/Aplicacion/Servicios/ENT_SPEI.cs#L30).
-Code block (csharp)
-var _entSpei = new Mock<ENT_SPEI>();
-_entSpei.Setup(t => t.ProcesarOperacionCISEAsync("1006", It.IsAny<CancellationToken>()));
-Four fixtures request a no-argument proxy, but the class has only a five-argument constructor. The target method is non-virtual, so supplying constructor arguments alone still cannot make Moq intercept it. Old tokenless alert expectations also target a different overload than current token-bearing calls. A lifecycle test verifies ActualizaEJecucion while the handler literally calls IniciaProceso: business equivalence does not make an unconfigured mock forward calls. These are independently verifiable static fixture defects, not executed test failures.
-Recommended repair:
-Code block (text)
-Construct a real ENT_SPEI with its five mocked dependencies.
-Configure/verify the actual DAO/control/alert overloads and token identity.
-Only if handler isolation is necessary, introduce one minimal handler interface and
-wire its application consumer, host registration and tests in the same change.
-Do not make every method virtual for Moq. Preserve exempt parameter/date/holiday policies and the agreed functional equivalence of lifecycle operations. Benefit: fixtures reach Act and test real contracts. Regression / JIRA SC-T1: all four orchestrator fixtures and stale lifecycle/alert expectations pass with compatible dependencies; report actual discovered/executed cases.
-SC-T2 - Add regression cases for the verified integrity/failure/stop defects
-Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: happy handler:448 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L448), lifecycle test:593 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L593), two-complement mapping:18 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ProcesamientoCiseUT.cs#L18).
-Code block (csharp)
-var resultado = await _entSpei.ProcesarOperacionCISEAsync("1006", CancellationToken.None);
-Assert.IsTrue(resultado);
-All 16 Act paths use CancellationToken.None. The existing two-complement test checks mapping, not completion/recovery order. No test checks false parent marking, provider Exito=false/partial Data, identifier boundaries/redaction, or host timeout/disposal. The loose happy-path mark mock can default false while the test accepts true, missing SC-A3. Tests reference application only; infrastructure/host behavior needs an appropriate isolated seam.
-Add cases that expose the original defects:
-Code block (text)
-cancel between two complement inserts -> no premature terminal parent; safe retry
-false parent mark -> explicit failure and no completion-success message
-provider failure vs successful empty insert -> distinct outcome and preserved cause
-identifier boundaries -> exact approved values; raw strings absent from captured logs
-stop timeout -> active dependencies not disposed; no false idle/persistence success
-Use deterministic fakes/mocks, real token cancellation, exact parameters/DTOs/call order and test-owned logging. No production SCM/DB/credentials. Preserve approved no-row continuation. Benefit: the safety net detects actual defects rather than only Boolean happy paths. Regression / JIRA SC-T2: demonstrate linked cases fail the original behavior and pass after their fixes; publish real test/coverage output, never an invented zero-percent metric.
-rewrite_recommended
-SC-T3 - Isolate repeated fixture/global logging state
-Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: ENT fixture:54 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ENT_SPEIUT.cs#L54), operation fixture:74 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/OperacionServicioUT.cs#L74), mapping fixture:18 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/PuebasUnitarias/ProcesamientoCiseUT.cs#L18).
-Code block (csharp)
-var rutasLogs = Path.Combine(Path.GetTempPath(), "SPEI_CEP_GEN_CDA");
-Directory.CreateDirectory(rutasLogs);
-Config.Rutas = new RutasConfiguracion { /* shared directory */ };
-Fourteen directory/setup blocks mutate static logging configuration without TestInitialize/ TestCleanup. Mapping tests construct logging models without their own fixture. Specific logger failure or observed parallel-run failure is not claimed; state/order coupling and repeated shared output are concrete.
-Code block (text)
-save previous static configuration
-create a unique exact test-owned directory, or use the approved in-memory sink
-share only small common fixture setup; retain scenario-specific assertions
-restore configuration and clean only the owned path, even after test failure
-serialize unavoidable static-state tests until the seam is isolated
-Benefit: independent runs and less setup drift. Regression / JIRA SC-T3: run each test alone, reversed/random order, cleanup after failure and supported concurrent runners. Never recursively delete a shared temp root.
-NiceToRewrite_ifTimePermits
-None; do not rename public/shared APIs solely to modernize test style.
-4.4 Windows Service Host - Tier 2
-MustChange/rewrite
-SC-H1 - Require actual quiescence before terminal state/container disposal
-Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: waits:158 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L158), disposal:180 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L180).
-Current effective control-flow shape:
-Code block (text)
-await bounded helper for startup and running tasks
-persist idle/termination
-finally: dispose container
-The verified compatibility helper delegates to the base wait wrapper, which logs/returns normally on timeout without completing the supplied task. Default wait/cleanup budgets are 60/30 seconds. Slow/uncooperative work can therefore retain disposed dependencies or continue after a terminal-state claim. Initialization availability is not quiescence. This is local consumption of a bounded contract, not a new library defect.
-Code block (text)
-request cancellation and stop new work through the existing base
-wait within supported SCM budget; inspect actual completion of both supplied tasks
-if still active: explicitly record incomplete stop; do not claim idle completion
-release operation-owned/container resources exactly once after actual quiescence,
-using an approved observed deferred-disposal/failure policy
-An early return above finally is insufficient because unconditional Dispose still runs. Do not replace the budget with an unlimited synchronous wait or unobserved fire-and-forget. Benefit: resource ownership remains safe when cancellation is late or ignored. Regression / JIRA SC-H1: completed/null, faulted, cancel-aware and still-pending startup/tick tasks, wait cancellation and repeated stop; assert state/disposal ordering and bounded response.
-SC-H2 - Confirm database cleanup before the local success message
-Category: MustChange/rewrite. Severity: Major. Priority: P1. Central family: GEN-9. Evidence: idle:162 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L162), termination:165 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L165), success:167 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L167).
-Code block (csharp)
-await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, serviceName, cleanupCt);
-await _controlServicio.ActualizaTerminacion(serviceName, cleanupCt);
-Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
-The compatibility Boolean can be false; termination can return Exito=false/Exception without throwing. Some shared failures already log/alert and consuming the compatibility Boolean is documented optional. The definite local issue is the unconditional persistence-success claim.
-Code block (text)
-capture idle Boolean (or approved existing typed outcome) and termination result
-require each necessary outcome; preserve cause and cleanup cancellation/budget
-on failure: explicitly record incomplete DB cleanup
-emit this local success message only after confirmed success
-Apply SC-H1's quiescence guard. Inherited base success logging is dependency context and is not an aggregate database-persistence guarantee; do not promise a local fix removes it. Benefit: SCM stop is distinguishable from confirmed database cleanup. Regression / JIRA SC-H2: both succeed, either fails, provider exception and cancellation; the quoted local message must be absent for unsuccessful cleanup.
-rewrite_recommended
-SC-H3 - Reconcile approved GEN/ENV runtime identities
-Category: rewrite_recommended. Severity: Major. Priority: P2. Evidence: Program:17 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/Program.cs#L17), host identity:33 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L33), configuration:64 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA/ServiceHost.cs#L64).
-Code block (text)
-runner / host identity: SPEI_CEP_ENV_CDA
-loaded configuration:  SPEI_CEP_GEN_CDA
-The shared runner uses identity for Global mutex and EventLog source, not only a description. Source mismatch is verified; a deployed collision or SCM failure is not.
-Code block (text)
-confirm SCM name / config key / EventLog source / mutex identity / historical aliases
-derive runner and host identity consistently from the approved map
-migrate any required aliases explicitly; verify sender and generator coexist safely
-Do not blindly rename a registered service or duplicate standing GEN-14's library-local ServiceName setter issue. Designer Service1 text alone is not a new initialization defect. Benefit: avoid unintended sender/generator singleton coupling and misleading diagnosis. Regression / JIRA SC-H3: isolated approved identities, sender/generator coexistence and legacy alias migration with the actual approved DLL; no production SCM action during this audit.
-NiceToRewrite_ifTimePermits
-None; hosting modernization is a gated architecture choice, not another mandatory rewrite.
-4.5 SQL and Root/Support
-MustChange/rewrite
-SC-S1 - Base work eligibility on committed state
-Category: MustChange/rewrite. Severity: Major. Priority: P1. Evidence: poll SQL:69 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L69), third hint:86 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L86).
-Code block (sql)
-FROM dbo.tb_srv_plan_trabajo_maestro Mto WITH (NOLOCK),
-     dbo.tb_srv_plan_trabajo_detalle Det WITH (NOLOCK)
-Three NOLOCK hints cover authoritative work-plan eligibility. An uncommitted producer/master/ detail state can drive an external receipt insert before producer rollback; that rollback cannot undo the external action. Concurrent movement may also produce missing/duplicate reads. This is an evidenced isolation risk, not an observed incident.
-Code block (text)
-use DBA-approved committed/snapshot eligibility reads
-prove the selected detail row itself satisfies approved unfinished/alias rules
-if multiple workers are supported, use existing approved ownership/idempotency
-validate actual constraints, plans, blocking and latency before rollout
-Removing NOLOCK under verified read-committed settings is the smallest candidate; confirm snapshot/index/locking policy rather than enabling it blindly. The outer order/alias join relies on cardinality constraints, so order ties are a validation gate, not a separate proven defect without schema. A read-only poll/machine-local mutex is not a cross-host claim. Benefit: only committed eligible work drives generation. Regression / JIRA SC-S1: producer insert/update then rollback during polling; master/detail completion races; actual alias/order ties; supported multi-worker cases only if applicable. Measure real execution plans/latency in an isolated DBA fixture.
-SC-S2 - Preserve the primary SQL error when audit insertion fails
-Category: MustChange/rewrite. Severity: Major. Priority: P2. Evidence: mark:64 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_MarcarOperacionProcesada.sql#L64), poll:95 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_ObtenerRegistrosCda.sql#L95), details:67 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SQL/usp_SpeiGenCda_RecuperarDetalles.sql#L67).
-Current catch shape:
-Code block (sql)
-BEGIN CATCH
-    INSERT INTO auditoria.errorlog (...) VALUES (ERROR_NUMBER(), ...);
-    THROW;
-END CATCH;
-Three fallible audit writes occur before original THROW. If the audit insert fails, control does not reach that rethrow and the caller sees the secondary failure instead. The marking procedure correctly rolls back first, but independent error-log storage can still fail.
-Code block (text)
-capture original metadata; complete required rollback
-protect auxiliary audit insertion under the approved diagnostic policy
-if auditing fails, explicitly expose the secondary diagnostic via a supported wired channel
-rethrow the original operation error; never return success or use an empty catch
-Do not assume client collection of SQL warnings unless it is actually wired. Coordinate with SC-I1 so the application preserves the true operation cause. This is the causal-diagnostics variant of the portfolio's GEN-11 failure-visibility family, not another shared-library defect. Benefit: original incident diagnosis survives degraded audit storage. Regression / JIRA SC-S2: force primary operation and independent audit-write failures; assert original number/procedure/cause and visible secondary diagnostics. No live SQL was run.
-SC-S3 - Correct Release-to-Debug solution mapping
-Category: MustChange/rewrite. Severity: Major. Priority: P2. Evidence: solution:42 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/SPEI_CEP_GEN_CDA.sln#L42).
-Code block (text)
-{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.ActiveCfg = Debug|Any CPU
-{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.Build.0 = Debug|Any CPU
-A requested solution Release|Any CPU build selects the application's Debug configuration, potentially combining unlike artifacts. Fix those two mappings, preserving unrelated entries:
-Code block (text)
-{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.ActiveCfg = Release|Any CPU
-{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.Build.0 = Release|Any CPU
-Confirm the approved platform matrix; tracked x86 targets are not automatically changed. Benefit: requested release configuration produces corresponding application artifacts. Regression / JIRA SC-S3: after SC-A5/toolchain availability, inspect evaluated project Configuration/Platform and assert Release output/optimization/symbol policy for every supported solution build. A configuration label alone is not a successful-build test.
-rewrite_recommended
-None additional. Historical style suggestions were evaluated, not turned into speculative tickets.
-NiceToRewrite_ifTimePermits
-SC-N1 - Replace the template README with an approved service runbook
-Category: NiceToRewrite_ifTimePermits. Severity: Minor. Priority: P3. Evidence: README:1 (../../SPEI_SPID/SPEI_CEP_GEN_CDA/README.md#L1).
-Current content is a generic GitLab onboarding/README template, not service operating guidance:
-Code block (text)
-generic repository setup / collaboration / README-writing advice
-no approved service build, configuration, stop/recovery or reconciliation procedure
-Recommended service-specific outline:
-Code block (text)
-purpose and project/procedure map
-approved dependency versions/source, x86 build/test commands
-GEN/ENV SCM/config/EventLog/mutex identities and configuration keys, without secrets
-isolated deployment, bounded stop, recovery/reconciliation and rollback
-owners, evidence and unresolved contract decisions
-Keep unavailable values pending until approved; do not execute/reuse the template force-push advice as an operational step. The audit handover is not itself a tested production runbook. Benefit: a newcomer can reproduce an approved build and follow safe operating instructions. Regression / JIRA SC-N1: an independent engineer follows the approved runbook in isolation. No production README edit or deployment was performed here.
-5. Architecture-Fit Note
-Apply the control document's architecture guidance (./_ORCHESTRATION.md): this is timer-polled, multi-step receipt generation with shared Windows/service/database contracts, not an observed HTTP API, continuous socket listener or necessarily a durable saga. Quality findings alone do not justify a wholesale rewrite. Fix integrity/privacy/provider/lifetime defects, make outcomes explicit and establish executable tests before changing hosting.
-Option	Fit with observed workload	Trade-off / decision gate
-Retain current Windows Service	Lowest immediate migration risk; existing SCM, timer and shared-library integration	Fix findings and verify deployed API/identity/stop contracts; retain bounded lifecycle
-Modern .NET Worker Service	Potentially simpler packaging, DI/lifetimes and telemetry	Prove provider/shared-library/framework compatibility, x86 needs and operational migration budget
-Scheduled job	Could fit if each polling batch can finish and restart independently	Requires accepted schedule/latency, bounded duration, ownership and restart/idempotency guarantees
-Durable queue/job workflow	Could make per-complement progress and retry explicit	Requires measured volume/SLA and approved infrastructure/contracts; adds operating complexity
+            //Inicia el monitoreo del proceso...
+            await _controlServicio.IniciaProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.ServicioPlan,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value,
+                NombreProceso = _configuracion.NombreProceso
+            }, ct).ConfigureAwait(false);
 
-Unknown: SLA/RTO/RPO, volumes, poll cadence requirements, actual complement cardinality, cross-host ownership, existing SP idempotency, deployment constraints, cost and staffing. No queue, cloud, microservice or transaction-coordinator purchase/re-platform is recommended as the first move.
-6. JIRA-Ready Backlog
-These are proposed issue IDs/titles, not remotely created issues. Categories/severities match the 19 finding sections exactly. Priorities are review recommendations, not business-assigned dates. GEN references consolidate shared remediation; they do not add to the local finding count.
-ID	Title	Category	Severity	Project / files	Priority	Acceptance / dependency
-SC-A1	Remove raw RFC/customer logging	MustChange/rewrite	Blocker	Aplicacion: ENT_SPEI, Cda	P1	Three paths; no full synthetic identifier in logs/alerts/errors
-SC-A2	Delay parent completion until required complements accounted for	MustChange/rewrite	Blocker	Aplicacion: ENT_SPEI; TOMI contract	P1	Two-complement cancel/failure/retry preserves discoverability and safe insertion
-SC-A3	Confirm parent-mark Boolean before success	MustChange/rewrite	Major	Aplicacion: ENT_SPEI	P1	False/zero-row yields explicit failure and no completion success; coordinate SC-A2/I1
-SC-A4	Agree/enforce identifier width boundary	MustChange/rewrite	Major	Aplicacion: Cda	P2	Approved exact null/whitespace/17/18/19/20 outputs, not guessed maximum
-SC-A5	Pin compatible shared dependencies under GEN-1	MustChange/rewrite	Blocker	All four projects / five HintPaths	P1	Approved clean restore, supported x86 Debug/Release builds and isolated startup
-SC-A6	Expose partial/no-row aggregate outcomes	rewrite_recommended	Major	Handler, operation, host consumer	P2	Exact counts across inserted/skipped/failed cycles; legacy decisions unchanged
-SC-A7	Extract repeated local DTO construction	rewrite_recommended	Major	Aplicacion: ENT_SPEI, OperacionServicio	P3	After SC-A2; preserve both aliases/all DTO fields and four alert variants
-SC-I1	Preserve provider failure before Data/Afecto reduction	MustChange/rewrite	Blocker	Infraestructura: four DAOs / five sites	P1	Failed empty/partial data differs from successful empty; original cause retained
-SC-I2	Enforce existing operation-key type contract	rewrite_recommended	Major	DetallesCiseSpeiDao	P2	Approved signed scale/range; exact @op_clave for fractions/limits
-SC-T1	Repair constructor/member/token mock contracts	MustChange/rewrite	Major	OperacionServicioUT, ENT_SPEIUT	P1	Four real/seamed fixtures reach Act; actual overload/token verified; runnable after SC-A5
-SC-T2	Add linked integrity/failure/stop regressions	MustChange/rewrite	Major	Tests; isolated infrastructure/host seams	P1	Detect original linked defects; publish actual execution after SC-T1/dependency repair
-SC-T3	Isolate repeated global logging fixtures	rewrite_recommended	Major	All three test classes	P2	Unique owned output, state restored, individual/reordered/concurrent runs safe
-SC-H1	Defer terminal state/disposal until actual quiescence	MustChange/rewrite	Major	ServiceHost termination	P1	Pending tasks after bounded wait cannot cause premature disposal/idle success
-SC-H2	Confirm cleanup outcomes before local success log	MustChange/rewrite	Major	ServiceHost termination	P1	Either failure/cancellation suppresses local success; preserve cause/budget/SC-H1 ordering
-SC-H3	Reconcile approved GEN/ENV identities	rewrite_recommended	Major	Program, ServiceHost	P2	Approved SCM/config/mutex/EventLog map and isolated sender/generator coexistence
-SC-S1	Use committed eligible work-plan reads	MustChange/rewrite	Major	Polling SQL	P1	Rollback/isolation, alias/order and supported ownership cases; measured plans/latency
-SC-S2	Retain primary SQL error on audit-write failure	MustChange/rewrite	Major	Mark/poll/details SQL catch blocks	P2	Primary error plus observable secondary diagnostic; approved wired DBA policy
-SC-S3	Repair application Release solution mapping	MustChange/rewrite	Major	SPEI_CEP_GEN_CDA.sln:42-43	P2	Evaluated Release configuration/output across supported matrix; SC-A5/toolchain
-SC-N1	Write approved build/deploy/recovery README	NiceToRewrite_ifTimePermits	Minor	README.md	P3	Independent isolated walkthrough; actual owners/contracts, no secrets or guessed commands
+            Config.EscribirLog($"INFO|procesaOperacion|Buscando información en SPEI del folio: {folio}.");
 
-Suggested ownership: application maintainers/QA for SC-A/T, repository maintainers for SC-I, service/platform owners for SC-H/A5/S3, DBA with application owners for SC-S1/S2, and operations for the approved SC-N1 runbook. These are roles to agree, not existing assignments or estimates.
-7. Verification, Release Gates and Open Contracts
-7.1 What This Audit Verified
-Exhaustive text coverage, explicit binary/history disposition, source evidence, graph metadata, finding/backlog consistency and scoped document/Word-package structure are audit checks. The final machine-readable validation result is retained with the handover package. All 48 original source hashes/bytes and HEAD must match before its final pass is accepted. The getter/conversion probes reproduce current behavior only; no defect was fixed.
-7.2 What Remains Unverified
-• Full build/type-check, restore, test suite and measured coverage: prerequisites are unavailable.
-• Actual deployed shared DLL/version/API, transitive providers and service identity/registration.
-• SQL schema/indexes/constraints/permissions, actual SP body/parameter/result semantics,
-idempotency, affected-row guarantees, isolation policy and live performance.
-• Live cancellation, stop/disposal, database cleanup, safe retry/reconciliation and deployment.
-• Visual Microsoft Word/Mermaid/PDF rendering, pagination and visual sign-off. The Word file
-has styled OpenXML content; structural validation does not replace a human layout review.
-• SCA/CVE/license/security-testing conclusions or acceptance-criteria/fidelity conformance.
-No source remediation or production action was performed. Static review completion is not approval to deploy. Keep failed-provider results distinct from valid legacy emptiness.
-7.3 Owner Decisions Required Before Implementation
-Contract	Needed evidence / decision
-Complements and terminal state	Required cardinality/outcomes, alias granularity, discoverability and safe restart
-Existing SPEI interface	Real parameter/result/empty/idempotency contract; no invented RFC parameter or new wrapper
-Identifiers	Approved width/overlength/whitespace policy and log-data classification
-Dependencies/build	Approved compatible MUFG package/version/feed, framework/x86 matrix and CI toolchain
-Service operations	GEN/ENV identities, supported stop budget, incomplete-stop/deferred-disposal ownership
-SQL	Committed/snapshot policy, indexes/unique constraints and observable secondary-error channel
-Tests/rollout	Isolated fixtures, exact regression evidence, rollback and reconciliation ownership
+            //Obtiene los CDA de los complementos de la operación...
+            List<CDA> operacionesCDA = await this.ObtenerCdasAsync(folio, ct).ConfigureAwait(false);
 
-7.4 Recommended Sequence
-1. Obtain contracts and restore a compatible reproducible build path (SC-A5); repair fixture
-wiring (SC-T1) so regression results become meaningful.
-2. Address disclosure, parent completion and provider outcomes (SC-A1/A2/A3/I1), with failing
-regression cases that verify exact required outcomes rather than proxy counts.
-3. Make stop/quiescence/persistence and committed polling safe (SC-H1/H2/S1); preserve causal
-SQL diagnostics (SC-S2). Validate in isolation with actual approved dependencies/contracts.
-4. Resolve width/key/identity/configuration contracts (SC-A4/I2/H3/S3), then improve aggregate
-observability and local fixture/DTO duplication (SC-A6/A7/T3); complete linked SC-T2 evidence.
-5. Publish the approved runbook (SC-N1), perform an isolated operational/rollback walkthrough,
-then consider architecture modernization only if measured needs justify it.
-See handover playbook (./_SPEI_CEP_GEN_CDA_HANDOVER_PLAYBOOK.md), complete handover inventory (./_SPEI_CEP_GEN_CDA_HANDOVER_INVENTORY.csv) and prompt history (./_SPEI_CEP_GEN_CDA_PROMPT_HISTORY.md). Findings remain open until separately authorized implementation and actual regression/operational evidence demonstrate closure.
+            //Extrae el RFC...
+            foreach (CDA cda in operacionesCDA)
+            {
+                ct.ThrowIfCancellationRequested();
+                string rfc = await this.ObtenerRfcAsync(cda, folio, ct).ConfigureAwait(false);
+                cda.RFCCURPBeneficiario = rfc is null ? ConstantesServicio.ND : rfc;
+            }
+
+            //Inserta la orden de pago de cada complemento y termina su proceso...
+            foreach (CDA cda in operacionesCDA)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                bool ordenPagoInsertada = await this.InsertarOrdenPagoAsync(cda, folio, ct).ConfigureAwait(false);
+                if (!ordenPagoInsertada)
+                {
+                    //El SP no regresó filas para este CDA; se replica el comportamiento legacy: continúa silenciosamente con el siguiente CDA...
+                    continue;
+                }
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO()
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.ServicioPlan,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                }, ct).ConfigureAwait(false);
+                await _controlServicio.TerminaProceso(new ProcesoDTO()
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.ServicioPlan,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProcesoFin,
+                    PId = _configuracion.Pid.Value
+                }, ct).ConfigureAwait(false);
+                await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct).ConfigureAwait(false);
+                await _detallesCise.MarcarOperacionProcesadaAsync(folio, tipoOperacion, ct).ConfigureAwait(false);
+                Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Se termina el procesamiento de la operación op_clave={folio}");
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Obtiene los CDA y termina en caso de no haber ninguno.
+        /// </summary>
+        internal async Task<List<CDA>> ObtenerCdasAsync(string folio, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            List<CDA> operacionesCDA = await this.ObtencionDatosAsync(folio, ct).ConfigureAwait(false);
+            bool encontrado = operacionesCDA.Count > 0;
+
+            //Verifica si el CDA tiene fecha valida...
+            foreach (CDA cda in operacionesCDA)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (cda.fechaT24 is null)
+                {
+                    encontrado = false;
+                    break;
+                }
+            }
+
+            //Si no pudo obtener sus complementos o no tiene fecha valida...
+            if (operacionesCDA.Count is 0 || !encontrado)
+                throw new Exception("No se encontro el detalle de la operación");
+
+            return operacionesCDA;
+        }
+
+        /// <summary>
+        /// Obtiene el RFC y lo asigna.
+        /// </summary>
+        internal async Task<string> ObtenerRfcAsync(CDA cda, string folio, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Si no se encuentra el RFC, se asigna ND para que el proceso continúe...
+            cda.RFCCURPBeneficiario = ConstantesServicio.ND;
+            if (!string.Equals(cda.customerCode, ConstantesServicio.ND, StringComparison.Ordinal))
+            {
+                try
+                {
+                    Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Extracción RFC {ConstantesServicio.uspObtenerRfcClienteT24}");
+                    string rfc = await _detallesCiseT24.ObtenerRfcAsync(cda.customerCode, ct).ConfigureAwait(false);
+                    Config.EscribirLog($"INFO|ProcesaOperacion_CISE|RFC extraído para el folio {folio}:{rfc}");
+                    return rfc;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|No se pudo el RFC del Beneficiario, por lo que se mandará con ND. Error: {ex}");
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Inserta la orden de pago y retorna su resultado.
+        /// </summary>
+        internal async Task<bool> InsertarOrdenPagoAsync(CDA cda, string folio, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Inserta la orden de pago...
+            Config.EscribirLog($"INFO|ProcesaOperacion_CISE|-> sp_InterfaceMW_SPEI_CEP {cda.idFolioOperacion} {cda.fechaT24} {cda.horaT24} {cda.queNodo} {cda.RFCCURPBeneficiario}");
+            InsercionDto resultado = await _detallesCiseSpei.InsertarOrdenPagoAsync(cda, ct).ConfigureAwait(false);
+
+            //Si el SP no regresó filas, se replica el comportamiento legacy: continúa sin error...
+            if (resultado is null)
+                return false;
+
+            Config.EscribirLog($"INFO|ProcesaOperacion_CISE|Status Ejecucion --> {resultado.errorCode}");
+
+            //Si por lo menos hay un detalle que no puede insertar, detiene el proceso...
+            if (resultado.errorCode != 0)
+            {
+                Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|Error al insertar los datos de la orden de pago.  op_clave={cda.idFolioOperacion},{cda.fechaT24},{cda.horaT24}");
+                Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|Carga a CEP_SPEI|{resultado.errorMessage}");
+                throw new Exception($"No encontró el CDA teoricamente recien insertado op_clave={folio}");
+            }
+
+            return true;
+        }
+
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Servicios;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Infraestructura.Logging;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion
+{
+    /// <summary>
+    /// Clase que contiene el flujo principal del procesamiento (equivalente a Definiciones).
+    /// </summary>
+    public class OperacionServicio
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IAlertas _alertas;      
+        private readonly IParametrizacion _parametrizacion;
+        private readonly IRecuperacionDatos<OperacionDTO> _recuperacionDatos;
+        private readonly ENT_SPEI _entSpei;
+        private readonly EstadoHorarioOperacion _estadoHorarioOperacion;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public OperacionServicio(Configuracion configuracion, IControlServicio controlServicio, IAlertas alertas, IParametrizacion parametrizacion, IRecuperacionDatos<OperacionDTO> recuperacionDatos, ENT_SPEI entSpei, EstadoHorarioOperacion estadoHorarioOperacion)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _alertas = alertas;
+            _parametrizacion = parametrizacion;
+            _recuperacionDatos = recuperacionDatos;
+            _entSpei = entSpei;
+            _estadoHorarioOperacion = estadoHorarioOperacion;
+        }
+
+        /// <summary>
+        /// Control del flujo principal del procesamiento.
+        /// </summary>
+        public async Task<bool> EjecutarProcedimientosAsync(CancellationToken ct)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                //Marca la ejecución del servicio...
+                await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio, ct).ConfigureAwait(false);
+
+                //Obtiene los parámetros del sistema...
+                _configuracion.FechaSistema = await _parametrizacion.ObtenerFechaSistemaAsync(ct).ConfigureAwait(false);
+                _configuracion.EsDiaHabil = await _controlServicio.EsDiaHabil(ct).ConfigureAwait(false);
+                _configuracion.ParametrosSistema = await _parametrizacion.ObtenerParametrosSistemaAsync(ConstantesServicio.ParametrosSistema, ct).ConfigureAwait(false);
+
+                //Valida que sea día hábil...
+                if (!_configuracion.EsDiaHabil.Value)
+                {
+                    Config.EscribirLog("ERROR|Ejecuta_Procedimientos|Hoy es un día inhábil.");
+                    await _alertas.InsertarAlerta(new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = ConstantesClaveAviso.Error,
+                        Descipcion = "Hoy es un día inhábil",
+                        PId = _configuracion.Pid.Value,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = new Exception($"Hoy es un día inhábil.")
+                    }, ct).ConfigureAwait(false);
+                    return false;
+                }
+
+                //Valida el horario de operación...
+                TimeSpan timeHoraSistema = _parametrizacion.ObtenerHoraSistema();
+                string horaSistema = timeHoraSistema.ToString(@"hh\:mm");
+                TimeSpan horaOperacionInicio = ConversionHelper.ParseTimeSpanRequerido(_configuracion.ParametrosSistema[ConstantesGenerales.HoraOPInicio], ConstantesGenerales.HoraOPInicio);
+                TimeSpan horaOperacionFin = ConversionHelper.ParseTimeSpanRequerido(_configuracion.ParametrosSistema[ConstantesGenerales.HoraOPCepFin], ConstantesGenerales.HoraOPCepFin);
+
+                if (timeHoraSistema >= horaOperacionInicio
+                    && timeHoraSistema <= horaOperacionFin)
+                {
+                    if (!_estadoHorarioOperacion.EnHorarioOperacion)
+                    {
+                        _estadoHorarioOperacion.EnHorarioOperacion = true;
+                        Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Inicio horario de operaciones, HoraSistema='{horaSistema}'.");
+                    }
+                }
+                else
+                {
+                    if (_estadoHorarioOperacion.EnHorarioOperacion)
+                    {
+                        _estadoHorarioOperacion.EnHorarioOperacion = false;
+                        Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Termina horario de operaciones, HoraSistema='{horaSistema}'");
+                    }
+                }
+
+                if (!_estadoHorarioOperacion.EnHorarioOperacion)
+                {
+                    Config.EscribirLog("ERROR|Ejecuta_Procedimientos|El servicio está fuera de horario.");
+                    await _alertas.InsertarAlerta(new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = ConstantesClaveAviso.Error,
+                        Descipcion = "El servicio está fuera de horario",
+                        PId = _configuracion.Pid.Value,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = new Exception($"El servicio '{_configuracion.NombreServicio}' está fuera de horario.")
+                    }, ct).ConfigureAwait(false);
+                    return false;
+                }
+
+                //Recupera los datos de procesamiento...
+                IEnumerable<OperacionDTO> operaciones = await _recuperacionDatos.RecuperarDatosAsync(ct).ConfigureAwait(false);
+
+                //Realiza un procesamiento diferente de acuerdo al tipo de operación...
+                foreach (OperacionDTO operacion in operaciones)
+                {
+                    using (Logging.BeginOperacionScope(operacion.tipo_operacion, operacion.folio.ToString()))
+                    {
+                        try
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            bool resultado = false;
+
+                            Config.EscribirLog($"INFO|Ejecuta_Procedimientos|***** TipoOperacion:{operacion.tipo_operacion}, folio:{operacion.folio} *****");
+                            switch (operacion.tipo_operacion)
+                            {
+                                case ConstantesServicio.EntSpei:
+                                    resultado = await _entSpei.ProcesarOperacionCISEAsync(operacion.folio.ToString(), ct).ConfigureAwait(false);
+                                    break;
+                                default:
+                                    throw new Exception($"Tipo de operación desconocida:'{operacion.tipo_operacion}'");
+                            }
+
+                            if (resultado)
+                                Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Se termina procesamiento de folio: {operacion.folio}");
+                            else
+                                Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Error Salida durante el procesamiento del folio: {operacion.folio}");
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Error en la ejecución del folio {operacion.folio}, excepción: {ex}");
+                            await _controlServicio.ActualizaErrorProceso(new ProcesoDTO()
+                            {
+                                Folio = operacion.folio.ToString(),
+                                TipoOperacion = operacion.tipo_operacion,
+                                Servicio = _configuracion.NombreServicio,
+                                NombreProceso = _configuracion.NombreProceso,
+                                AliasProceso = _configuracion.AliasProceso,
+                                Excepcion = ex,
+                                PId = _configuracion.Pid.Value
+                            }, ct).ConfigureAwait(false);
+                            await _alertas.InsertarAlerta(new AlertaDTO()
+                            {
+                                Folio = operacion.folio.ToString(),
+                                TipoOPeracion = operacion.tipo_operacion,
+                                Servicio = _configuracion.NombreServicio,
+                                ClaveAviso = ConstantesClaveAviso.Critico,
+                                Descipcion = ex.Message,
+                                PId = _configuracion.Pid.Value,
+                                NombreProceso = _configuracion.NombreProceso,
+                                Exception = ex
+                            }, ct).ConfigureAwait(false);
+                        }
+                    }
+                }
+
+                //Marca el termino del servicio...
+                await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct).ConfigureAwait(false);
+
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                Config.EscribirLog("INFO|Ejecuta_Procedimientos|Operación cancelada.");
+                return false;
+            }
+            catch (Exception ex) 
+            {
+                Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Se presenta exception: {ex}");
+                await _alertas.InsertarAlerta(new AlertaDTO()
+                {
+                    Folio = null,
+                    TipoOPeracion = null,
+                    Servicio = _configuracion.NombreServicio,
+                    ClaveAviso = ConstantesClaveAviso.Critico,
+                    Descipcion = null,
+                    PId = _configuracion.Pid.Value,
+                    NombreProceso = _configuracion.NombreProceso,
+                    Exception = ex
+                }, ct).ConfigureAwait(false);
+            }
+            return false;
+        }
+
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using MUFG_T24.Comunes;
+using System;
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Modelo que permite crear un CDA con los datos de un ComplementoCiseDTO.
+    /// </summary>
+    public class CDA
+    {
+        private string _rfcCurpBeneficiario = ConstantesServicio.ND;
+
+        public long idFolioCDA { get; set; }
+        public decimal idFolioOperacion { get; set; }
+        public decimal fechaOperacion { get; set; }
+        public string fechaT24 { get; set; }
+        public string horaT24 { get; set; }
+        public string queNodo { get; set; }
+        public string customerCode { get; set; }
+        public string RFCCURPBeneficiario
+        {
+            get
+            {
+                if (_rfcCurpBeneficiario.Length > 18)
+                    return _rfcCurpBeneficiario.Substring(0, 17);
+
+                return _rfcCurpBeneficiario;
+            }
+            set
+            {
+                if (!string.IsNullOrEmpty(value) && value.TrimStart().Length > 0)
+                    _rfcCurpBeneficiario = value;
+                else
+                    _rfcCurpBeneficiario = ConstantesServicio.ND;
+            }
+        }
+
+        /// <summary>
+        /// Constructor
+        /// </summary>
+        public CDA(string folio, ComplementoCiseDTO complementoCISE_DTO)
+        {
+            if (complementoCISE_DTO is null)
+            {
+                Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|Recupera Fecha y Hora Autoriza T24 en SPEI del folio: {folio}.");
+                throw new Exception("No se encontro el detalle de la operación");
+            }
+
+            this.idFolioCDA = 0;
+            this.idFolioOperacion = complementoCISE_DTO.op_clave;
+            this.fechaOperacion = complementoCISE_DTO.op_fecha_oper;
+
+            if (complementoCISE_DTO.fechaT24 != null)
+            {
+                this.fechaT24 = complementoCISE_DTO.fechaT24;
+                this.horaT24 = complementoCISE_DTO.horaT24;
+                this.queNodo = complementoCISE_DTO.NODO.ToString();
+                Config.EscribirLog($"INFO|ProcesaOperacion_CISE|DATOS T24 {complementoCISE_DTO.fechaT24} --> {complementoCISE_DTO.horaT24} --> {complementoCISE_DTO.NODO}");
+            }
+            else
+            {
+                Config.EscribirLog($"ERROR|ProcesaOperacion_CISE|Recupera Fecha y Hora Autoriza T24 en SPEI del folio: {folio}.");
+            }
+
+            if (complementoCISE_DTO.T24_CUSTOMER_CODE != null)
+                this.customerCode = complementoCISE_DTO.T24_CUSTOMER_CODE;
+            else
+                this.customerCode = ConstantesServicio.ND;
+
+            Config.EscribirLog($"INFO|ProcesaOperacion_CISE|DATOS T24 {this.customerCode}");
+        }
+
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Inicializacion_dtos;
+using MUFG_T24.Repositorios;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorios
+{
+    /// <summary>
+    /// Clase de recuperación de datos detalle de InterfacesT24.
+    /// </summary>
+    public class DetallesCiseDao : RepositorioMaestro, IDetallesCise
+    {
+        private readonly Configuracion _configuracion;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public DetallesCiseDao(Configuracion configuracion)
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null) 
+        {
+            _configuracion = configuracion;
+        }
+
+        /// <summary>
+        /// Obtiene los detalles del folio proporcionado.
+        /// </summary>
+        public async Task<IEnumerable<ComplementoCiseDTO>> RecuperarDetallesAsync(string folio, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var resultado = await EjecutarStoredProcedureQuery<ComplementoCiseDTO>(ConstantesServicio.uspRecuperarDetalles, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaSistema", _configuracion.FechaSistema));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", folio));
+            }, ct).ConfigureAwait(false);
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Marca la operacion como PROCESADA en el plan de trabajo maestro.
+        /// </summary>
+        public async Task<bool> MarcarOperacionProcesadaAsync(string folio, string tipoOperacion, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(ConstantesServicio.uspMarcarOperacionProcesada, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", tipoOperacion));
+            }, ct, validarAfectacion: false).ConfigureAwait(false);
+            return resultado.Afecto == true;
+        }       
+
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Data;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorios
+{
+    /// <summary>
+    /// Clase de recuperación de datos detalle de Enlace.
+    /// </summary>
+    public class DetallesCiseSpeiDao : RepositorioMaestro, IDetallesCiseSpei
+    {
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public DetallesCiseSpeiDao()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.SPEI1, null, null) { }
+
+        /// <summary>
+        /// Inserta una orden de pago.
+        /// </summary>
+        public async Task<InsercionDto> InsertarOrdenPagoAsync(CDA cda, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var resultado = await EjecutarStoredProcedureQuery<InsercionDto>(ConstantesServicio.uspInsertarOrdenPago, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_clave", Convert.ToInt64(cda.idFolioOperacion)));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaT24", Convert.ToInt64(cda.fechaT24)));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@HoraT24", cda.horaT24));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@QueNodo", Convert.ToInt64(cda.queNodo)));
+            }, lector => new InsercionDto()
+            {
+                errorCode = Convert.ToInt32(lector.GetValue(0)),
+                errorMessage = Convert.ToString(lector.GetValue(1))
+            }, ct, validarAfectacion: false).ConfigureAwait(false);
+            return resultado.Data.FirstOrDefault();
+        }
+       
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorios
+{
+    /// <summary>
+    /// Clase de recuperación de datos detalle de VistasT24.
+    /// </summary>
+    public class DetallesCiseT24Dao : RepositorioMaestro, IDetallesCiseT24
+    {
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public DetallesCiseT24Dao()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW, null, null) { }
+
+        /// <summary>
+        /// Obtiene el RFC correspondiente al codigo de cliente.
+        /// </summary>
+        public async Task<string> ObtenerRfcAsync(string customerCode, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var resultado = await EjecutarStoredProcedureQuery<T24CustomerRfcDTO>(ConstantesServicio.uspObtenerRfcClienteT24, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@CUSTOMER_CODE", customerCode));
+            }, ct).ConfigureAwait(false);
+            return resultado.Data.FirstOrDefault()?.RFC;
+        }
+
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Repositorios;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorios
+{
+    /// <summary>
+    /// Clase de recuperación de datos principales.
+    /// </summary>
+    public class SondeoDao : RepositorioMaestro, IRecuperacionDatos<OperacionDTO>
+    {
+        private readonly Configuracion _configuracion;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public SondeoDao(Configuracion configuracion)
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null) 
+        {
+            _configuracion = configuracion;
+        }
+
+        /// <summary>
+        /// Obtiene los registros con los que realiza su operación.
+        /// </summary>
+        public async Task<IEnumerable<OperacionDTO>> RecuperarDatosAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var resultado = await EjecutarStoredProcedureQuery<OperacionDTO>(ConstantesServicio.uspObtenerRegistrosCda, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@ListaTiposOperacion", _configuracion.ListaTipos));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@AliasProceso", _configuracion.AliasProceso));
+            }, ct).ConfigureAwait(false);
+            return resultado.Data;
+        }
+
+    }
+}
+
+using Aplicacion;
+using Aplicacion.DTOs;
+using Aplicacion.Interfaces;
+using Aplicacion.Servicios;
+using Infraestructura.Repositorios;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Infraestructura.Logging;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SPEI_CEP_GEN_CDA
+{
+    /// <summary>
+    /// Clase principal del servicio Windows (presentación).
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private const double DefaultTimerIntervalMs = 10000;
+
+        private Container _containerDI;
+        private Configuracion _configuracionBase;
+
+        protected override string NombreServicioLog => NombreServicio.SPEI_CEP_ENV_CDA.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? DefaultTimerIntervalMs;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost() { }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+            _configuracionBase = new Configuracion();
+
+            //Inicializa la obtención de la configuración general y el logging...
+            {
+                ConfiguracionEncriptadaHelper.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.SPEI_CEP_GEN_CDA.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+                _configuracionBase.MaxTimeout = servicioMainConfiguracion.MaxTimeout;
+
+                _configuracionBase.AliasProceso = servicioMainConfiguracion.AliasProceso;
+                _configuracionBase.AliasProcesoFin = servicioMainConfiguracion.AliasProcesoFin;
+                _configuracionBase.ServicioPlan = servicioMainConfiguracion.ServicioPlan;
+                _configuracionBase.MonedaDefault = servicioMainConfiguracion.MonedaDefault;
+                _configuracionBase.ListaTipos = servicioMainConfiguracion.ListaTipos;
+
+                Logging.Init(_configuracionBase.PathLog, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+            }
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            //Registra los componentes...
+            _containerDI.Register<OperacionServicio>();
+            _containerDI.Register<ENT_SPEI>();
+            _containerDI.Register<IRecuperacionDatos<OperacionDTO>, SondeoDao>();
+            _containerDI.Register<IDetallesCise, DetallesCiseDao>();
+            _containerDI.Register<IDetallesCiseSpei, DetallesCiseSpeiDao>();
+            _containerDI.Register<IDetallesCiseT24, DetallesCiseT24Dao>();
+
+            _containerDI.Verify();
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, ct).ConfigureAwait(false);
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ParametrizacionesAsync|{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>   
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<OperacionServicio>();
+                    await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
+
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                //Apagado normal
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
+            }
+            finally
+            {
+                _containerDI?.Dispose();
+            }
+        }
+
+    }
+}
+
+using MUFG_T24.Comunes;
+using MUFG_T24.ControladorServicios_Utilidades;
+
+namespace SPEI_CEP_GEN_CDA
+{ 
+    /// <summary>
+    /// Clase de entrada.
+    /// </summary>
+    internal static class Program
+    {
+        /// <summary>
+        /// Punto de entrada Main.
+        /// </summary>
+        static void Main(string[] args)
+        {
+            WindowsServiceProgramRunner.Run(
+                NombreServicio.SPEI_CEP_ENV_CDA.ToString(),
+                () => new ServiceHost(),
+                args
+                #if DEBUG
+                , (service, startupArgs) => ((ServiceHost)service).DebugRun(startupArgs)
+                #endif
+                );
+        }
+
+    }
+}
+
+USE [InterfacesT24]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+/***********************************************************************
+NOMBRE              :  dbo.usp_SpeiGenCda_MarcarOperacionProcesada
+SISTEMA/BD          :  InterfacesT24
+AUTOR               :  Rafael Domínguez
+FECHA               :  2026-08-03
+
+DESCRIPCIÓN         :
+Marca como procesada una operación en el plan de trabajo maestro.
+
+ALCANCE / NOTAS     :
+- Operación de actualización.
+- Mantiene la lógica legacy.
+- Devuelve filas afectadas para validación del DAO.
+
+PARÁMETROS          :
+@Folio         BIGINT
+@TipoOperacion VARCHAR(10)
+
+CONTROL DE CAMBIOS  :
+2026-08-03 | Rafael Domínguez | Creación SP
+***********************************************************************/
+CREATE OR ALTER PROCEDURE [dbo].[usp_SpeiGenCda_MarcarOperacionProcesada]
+(
+      @Folio          BIGINT
+    , @TipoOperacion  VARCHAR(10)
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @FilasAfectadas INT = 0;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        UPDATE dbo.tb_srv_plan_trabajo_maestro
+           SET cve_estatus          = 'PROCESADA',
+               flg_terminado        = 1,
+               fec_fin              = GETDATE(),
+               num_estatus_especial = 0
+         WHERE folio          = @Folio
+           AND tipo_operacion = @TipoOperacion;
+
+        SET @FilasAfectadas = @@ROWCOUNT;
+
+        COMMIT TRANSACTION;
+
+        SELECT
+              @FilasAfectadas AS FilasAfectadas
+            , CASE WHEN @FilasAfectadas > 0 THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS Afecto;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+
+        INSERT INTO Auditoria.ErrorLog
+        (
+              ErrorNumber
+            , ErrorSeverity
+            , ErrorState
+            , ErrorProcedure
+            , ErrorLine
+            , ErrorMessage
+        )
+        VALUES
+        (
+              ERROR_NUMBER()
+            , ERROR_SEVERITY()
+            , ERROR_STATE()
+            , ERROR_PROCEDURE()
+            , ERROR_LINE()
+            , ERROR_MESSAGE()
+        );
+
+        THROW;
+    END CATCH;
+END;
+GO
+
+USE [InterfacesT24]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+/***********************************************************************
+NOMBRE              :  dbo.usp_SpeiGenCda_ObtenerRegistrosCda
+SISTEMA/BD          :  InterfacesT24
+AUTOR               :  Rafael Domínguez
+FECHA               :  2026-08-03
+
+DESCRIPCIÓN         :
+Obtiene los registros pendientes de generación de CDA para SPEI,
+filtrando por lista de tipos de operación y alias de proceso.
+
+ALCANCE / NOTAS     :
+- Operación de consulta.
+- Mantiene la lógica legacy.
+
+PARÁMETROS          :
+@ListaTiposOperacion NVARCHAR(MAX)
+@AliasProceso        VARCHAR(50)
+
+CONTROL DE CAMBIOS  :
+2026-08-03 | Rafael Domínguez | Creación SP
+***********************************************************************/
+CREATE OR ALTER PROCEDURE dbo.usp_SpeiGenCda_ObtenerRegistrosCda
+(
+      @ListaTiposOperacion NVARCHAR(MAX)
+    , @AliasProceso        VARCHAR(50)
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+
+        DECLARE @ListaTipos TABLE
+        (
+            tipo_operacion VARCHAR(10)
+        );
+
+        DECLARE @xml XML;
+
+        SET @xml = CAST(
+            '<x>' + REPLACE(REPLACE(@ListaTiposOperacion, '''', ''), ',', '</x><x>') + '</x>'
+            AS XML
+        );
+
+        INSERT INTO @ListaTipos (tipo_operacion)
+        SELECT T.c.value('.', 'VARCHAR(10)')
+        FROM @xml.nodes('/x') T(c);
+
+        SELECT
+              Det_plan.servicio
+            , Det_plan.tipo_operacion
+            , Det_plan.folio
+            , Det_resumen.fec_valor
+        FROM
+        (
+            SELECT
+                  Det.folio
+                , Det.tipo_operacion
+                , MIN(Det.orden_ejecucion) AS orden_ejecucion
+                , Mto.fec_valor
+            FROM dbo.tb_srv_plan_trabajo_maestro  Mto WITH (NOLOCK)
+               , dbo.tb_srv_plan_trabajo_detalle  Det WITH (NOLOCK)
+            WHERE Mto.flg_terminado = 0
+              AND Mto.flg_cierre    = 0
+              AND Mto.tipo_operacion IN
+                  (
+                      SELECT tipo_operacion
+                      FROM @ListaTipos
+                  )
+              AND Mto.folio          = Det.folio
+              AND Mto.tipo_operacion = Det.tipo_operacion
+              AND Det.flg_terminado  = 0
+            GROUP BY
+                  Det.folio
+                , Det.tipo_operacion
+                , Mto.fec_valor
+        ) Det_resumen
+        , tb_srv_plan_trabajo_detalle Det_plan WITH (NOLOCK)
+        WHERE Det_plan.folio           = Det_resumen.folio
+          AND Det_plan.tipo_operacion  = Det_resumen.tipo_operacion
+          AND Det_plan.orden_ejecucion = Det_resumen.orden_ejecucion
+          AND Det_plan.alias_proceso   = @AliasProceso
+        ORDER BY Det_plan.fec_inicio;
+
+    END TRY
+    BEGIN CATCH
+        INSERT INTO auditoria.errorlog
+        (
+              errornumber
+            , errorseverity
+            , errorstate
+            , errorprocedure
+            , errorline
+            , errormessage
+        )
+        VALUES
+        (
+              ERROR_NUMBER()
+            , ERROR_SEVERITY()
+            , ERROR_STATE()
+            , ERROR_PROCEDURE()
+            , ERROR_LINE()
+            , ERROR_MESSAGE()
+        );
+
+        THROW;
+    END CATCH;
+END;
+GO
+
+USE [InterfacesT24]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+/***********************************************************************
+NOMBRE              :  dbo.usp_SpeiGenCda_RecuperarDetalles
+SISTEMA/BD          :  InterfacesT24
+AUTOR               :  Rafael Dom�nguez
+FECHA               :  2026-08-03
+
+DESCRIPCI�N         :
+Recupera el detalle SPEI requerido para generar CDA por folio y fecha
+del sistema.
+
+ALCANCE / NOTAS     :
+- Operaci�n de consulta.
+- Mantiene la l�gica legacy.
+
+PAR�METROS          :
+@FechaSistema CHAR(8)
+@Folio        NUMERIC(18,0)
+
+CONTROL DE CAMBIOS  :
+2026-08-03 | Rafael Dom�nguez | Creaci�n SP
+***********************************************************************/
+CREATE OR ALTER PROCEDURE dbo.usp_SpeiGenCda_RecuperarDetalles
+(
+      @FechaSistema  CHAR(8)
+    , @Folio         NUMERIC(18,0)
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+
+        SELECT
+              1 AS NODO
+            , REPLACE(A.NF_FECHAAUTORIZACION,'/','') AS fechaT24
+            , REPLACE(A.NF_HORA_AUTORIZACION,':','') AS horaT24
+            , A.op_clave
+            , A.op_fecha_oper
+            , A.T24_CUSTOMER_CODE
+        FROM dbo.TB_TOMBIN_NF_ENTRADAS_SPEI A
+        WHERE A.op_fecha_oper = @FechaSistema
+          AND A.op_clave      = @Folio
+
+        UNION ALL
+
+        SELECT
+              2 AS NODO
+            , REPLACE(A.NF_FECHAAUTORIZACION,'/','') AS fechaT24
+            , REPLACE(A.NF_HORA_AUTORIZACION,':','') AS horaT24
+            , A.op_clave
+            , A.op_fecha_oper
+            , A.T24_CUSTOMER_CODE
+        FROM dbo.TB_TOMBIN_NF_ENTRADAS_SPEI_2 A
+        WHERE A.op_fecha_oper = @FechaSistema
+          AND A.op_clave      = @Folio;
+
+    END TRY
+    BEGIN CATCH
+        INSERT INTO auditoria.errorlog
+        (
+              errornumber
+            , errorseverity
+            , errorstate
+            , errorprocedure
+            , errorline
+            , errormessage
+        )
+        VALUES
+        (
+              ERROR_NUMBER()
+            , ERROR_SEVERITY()
+            , ERROR_STATE()
+            , ERROR_PROCEDURE()
+            , ERROR_LINE()
+            , ERROR_MESSAGE()
+        );
+
+        THROW;
+    END CATCH;
+END;
+GO
+
+
+Aplicacion.csproj
+
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>AplicacionSPEICEPGEN</AssemblyName>
+    <PlatformTarget>x86</PlatformTarget>
+    <Platforms>AnyCPU;x64;x86</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MUFG_T24">
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
+
+Infraestructura.csproj
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>InfraestructuraSPEICEPGEN</AssemblyName>
+    <PlatformTarget>x86</PlatformTarget>
+    <Platforms>AnyCPU;x86</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="MUFG_T24">
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
+
+
+SPEI_CEP_GEN_CDAN.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>SPEI_CEP_GEN_CDA</RootNamespace>
+    <AssemblyName>SPEI_CEP_GEN_CDA</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup>
+    <StartupObject />
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, PublicKeyToken=2eed977a6ac043c8, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="SimpleInjector">
+      <HintPath>D:\ServiceCMS\SimpleInjector.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Configuration" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Numerics" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="ServiceHost.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ServiceHost.Designer.cs">
+      <DependentUpon>ServiceHost.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Program.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj">
+      <Project>{54cc424c-8227-4e2a-a81f-9d6e0daa9726}</Project>
+      <Name>Aplicacion</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\Infraestructura\Infraestructura.csproj">
+      <Project>{29917ce7-77fb-4cd4-b196-5a6a3ba132e1}</Project>
+      <Name>Infraestructura</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
+
+
+SPEI_CEP_GEN_CDA.sln
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.4.11612.150
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SPEI_CEP_GEN_CDAN", "SPEI_CEP_GEN_CDA\SPEI_CEP_GEN_CDAN.csproj", "{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Aplicacion", "Aplicacion\Aplicacion.csproj", "{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Infraestructura", "Infraestructura\Infraestructura.csproj", "{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PuebasUnitarias", "PuebasUnitarias\PuebasUnitarias.csproj", "{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|Any CPU = Release|Any CPU
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Debug|x64.Build.0 = Debug|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Debug|x86.ActiveCfg = Debug|x86
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Debug|x86.Build.0 = Debug|x86
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Release|x64.ActiveCfg = Release|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Release|x64.Build.0 = Release|Any CPU
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Release|x86.ActiveCfg = Release|x86
+		{2635B66F-7B6E-4439-8584-CBCFBEDAC5AE}.Release|x86.Build.0 = Release|x86
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Debug|x64.ActiveCfg = Debug|x64
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Debug|x64.Build.0 = Debug|x64
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Debug|x86.ActiveCfg = Debug|x86
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Debug|x86.Build.0 = Debug|x86
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.ActiveCfg = Debug|Any CPU
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|Any CPU.Build.0 = Debug|Any CPU
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|x64.ActiveCfg = Release|x64
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|x64.Build.0 = Release|x64
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|x86.ActiveCfg = Release|x86
+		{54CC424C-8227-4E2A-A81F-9D6E0DAA9726}.Release|x86.Build.0 = Release|x86
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Debug|x64.Build.0 = Debug|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Debug|x86.ActiveCfg = Debug|x86
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Debug|x86.Build.0 = Debug|x86
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Release|x64.ActiveCfg = Release|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Release|x64.Build.0 = Release|Any CPU
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Release|x86.ActiveCfg = Release|x86
+		{29917CE7-77FB-4CD4-B196-5A6A3BA132E1}.Release|x86.Build.0 = Release|x86
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Debug|x64.Build.0 = Debug|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Debug|x86.ActiveCfg = Debug|x86
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Debug|x86.Build.0 = Debug|x86
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Release|x64.ActiveCfg = Release|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Release|x64.Build.0 = Release|Any CPU
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Release|x86.ActiveCfg = Release|x86
+		{5BAE121B-7C5A-42D5-A3DD-585CCD2F81E9}.Release|x86.Build.0 = Release|x86
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {811BF4BF-7F6C-46FE-998A-446457D33B91}
+	EndGlobalSection
+EndGlobal
+
+
