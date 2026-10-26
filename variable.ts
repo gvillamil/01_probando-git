@@ -1,2063 +1,717 @@
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using Aplicacion.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Modelos;
-using System;
-using System.ServiceProcess;
-using System.Threading.Tasks;
+Despachador Recommendations
+Despachador - Architecture & Code Quality Recommendations
+Solution: General/Despachador/Despachador.sln (../../General/Despachador/Despachador.sln) Reviewed source: branch CodeReview, commit dad77cc6d1baee05d41d56973fa70106bcef3984 (2026-10-08, clean working tree, identical to origin/CodeReview) Compared against: LoansApp architecture and coding baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md) See also: _ORCHESTRATION.md (_ORCHESTRATION.md) for the portfolio methodology, template, and standing findings; ControladorServicios_Recommendations.md (ControladorServicios_Recommendations.md) (same shared host base, CS-FR-1) and MUFG_Library_Recommendations.md (MUFG_Library_Recommendations.md) (the shared MUFG_T24 library).
+1. Solution Overview (low/no-dependency -> high dependency)
+Tier	Project	Kind	Path
+0	AplicacionDespachador (root namespace Aplicacion)	.NET Framework 4.8 class library (classic csproj, PlatformTarget x86, packages.config, Newtonsoft.Json 13.0.4)	AplicacionDespachador.csproj (../../General/Despachador/Aplicacion/AplicacionDespachador.csproj)
+1	InfraestructuraDespachador (root namespace Infraestructura)	.NET Framework 4.8 class library (classic csproj, x86): two SQL repositories on the shared repository base, a generated WCF proxy for the T24 account-balance web service, and a raw TCP client	InfraestructuraDespachador.csproj (../../General/Despachador/Infraestructura/InfraestructuraDespachador.csproj)
+2	Despachador	.NET Framework 4.8 Windows Service host (Exe, classic csproj, x86, SimpleInjector 5.5.0) derived from the shared WindowsServiceDespachador base	Despachador.csproj (../../General/Despachador/Despachador/Despachador.csproj)
+2	PruebasUnitarias	MSTest 2.2.10 / Moq 4.20.72 project (net48, classic csproj, packages.config); references only the application project	PruebasUnitarias.csproj (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj)
 
-namespace Aplicacion.Service
+Artifacts outside the four projects: eleven SQL scripts in SQL/ (ten stored procedures and one combined DDL script), a WiX installer project in Setup/ that is not listed in the solution (Despachador.wixproj (../../General/Despachador/Setup/Despachador.wixproj)), and a short design note (ArquitecturaCifradoTCP.md (../../General/Despachador/Docs/ArquitecturaCifradoTCP.md)).
+What this solution actually does: Despachador is the central work dispatcher of the T24 interface chain: a Windows Service (identity Despachador) that decides which downstream service must process the next step of each pending work-plan operation and hands those operations to that service in batches over TCP. It is signal-driven, not timer-driven: the shared WindowsServiceDespachador base disables the timer, and the application service runs its own loops. At start-up the host loads the dispatcher limits from the encrypted service configuration (CantidadPaquete, LimitePaquetesPendientes, LimiteConcurrencia, log path and size), registers the run in the database, and the application service reads the business date, the business-day flag, and ten system parameters (the reading window HORA_LECTURA_INICIO/HORA_LECTURA_FIN, the T24 operating window HORA_OP_INICIO/HORA_OP_FIN, the endpoint and credentials of the T24 account-balance web service, and the two "sin fondos" retry parameters); it then loads the per-service and per-type control rows (maximum workers, priority, IP, and port) and fetches the first batch with usp_despachador_ObtenerOperacionesPendientes (TOP (CantidadPaquete x LimiteConcurrencia), ordered by type priority). Two detached loops follow: a 30-second safety loop that refreshes parameters, control rows, and pending operations while the reading window is open, and a semaphore-driven loop that, whenever a worker slot is free, picks the service/type with pending packages by service priority, type priority, occupancy, and idle time, and launches one worker task per package (a package is at most CantidadPaquete operations of one service and type). A worker applies the pre-dispatch rules, serializes the package as JSON, encrypts it with AES-CBC, sends it in a length-prefixed TCP frame to the downstream listener (Lectura, T24, HotScan, or ActualizaEstatus; address and port come from the control tables, with 127.0.0.1 as the column default), and reads a plaintext JSON result. For the T24 service the pre-dispatch rules are a business-day and HORA_OP_* window gate; for every service except Lectura and HotScan they deny operations dated before the system date (except TMD operations at T24, which skip both date rules), allow operations dated after it only when usp_despachador_RevisarRECCBatch returns them (cancellations in RECC status; the MFX branch applies no status test, DSP-FR-31), and, for TMD operations whose next unfinished step is T24_REGISTRO, apply a "sin fondos" retry throttle and an account-balance check through the T24 SOAP web service; for an operation without enough funds the worker attempts to stamp the work-plan master row (num_estatus_especial = 2) and to record it in TB_SRV_T24_MW_ADMON_FOLIOS with status SF. The worker computes an outcome (Claimed, ReturnedToPending, Error) that the orchestrator never reads (DSP-FR-4). The three dispatcher limits and the downstream addresses live in the encrypted configuration and in database tables, so their production values are not visible here.
+2. Scope & Methodology Note
+This is a new review after the authoritative reset dated 2026-10-07. The tracker row was Not started and no earlier Despachador_Recommendations.md was present in docs/recommendation/ when this review began; findings or severities from older audit runs, including the stale Phase 0 inventory (77 files), were not used as evidence.
+• Read 71/71 Git-tracked files, 7,024/7,024 lines, in full and line by line, in batches tracked on disk: 33 C# files / 4,360 lines (application 20 files, infrastructure 6 including the 627-line generated WCF proxy Reference.cs, host 4, tests 3), the four project files, the solution, four packages.config files and three app.config/App.config files, the nine WSDL/XSD/.svcmap/.svcinfo/.datasource files of the Connected Service (405 lines), eleven SQL scripts (1,183 lines; seven are UTF-16LE, one UTF-8 with BOM, three Windows-1252), the WiX project and Product.wxs, the design note, .editorconfig, .gitattributes, and .gitignore. By project, all tracked files: application 23 files / 1,645 lines, infrastructure 18 / 1,672, host 7 / 339, tests 5 / 1,567, SQL 11 / 1,183, installer 2 / 83, design note 1 / 19, solution-level files 4 / 516. git status is clean and the working tree holds no untracked or ignored source.
+• Compared the ten procedures with their copies in the SQL project StoredProcedures/MWD_DB (branch develop, commit f64ecf2, 2026-09-02; the General/Despachador folder was last changed on 2026-07-09 in commit d0ca32d): after normalizing line breaks and trailing blanks, six procedures differ in behavior and four differ only in how header comments are wrapped (DSP-FR-30). A decode-aware scan of the 1,241 .sql files under StoredProcedures/MWD_DB and this repository's SQL/ found no file that defines usp_despachador_MarcarErrorFechaPasada or usp_Comun_ActualizarEnUso, two procedures that the shared library calls (DSP-FR-6, DSP-FR-30). The downstream effect of the "sin fondos" stamp was traced in 017 usp_ReplicasActualizaOperacionesPendientesCMS.sql:111 (../../StoredProcedures/MWD_DB/DBMDW/CMS/Replicas/Bot/Procedures/017%20usp_ReplicasActualizaOperacionesPendientesCMS.sql#L111) and 017 usp_ReplicasActualizaOperacionesPendientesCMS.sql:146-155 (../../StoredProcedures/MWD_DB/DBMDW/CMS/Replicas/Bot/Procedures/017%20usp_ReplicasActualizaOperacionesPendientesCMS.sql#L146-L155).
+• Traced only the shared MUFG_T24 contracts (workspace copy under General/MUFGT24_BTMUM_64, branch CR3rdround, commit d1e49a0) that control effective behavior here: the host base and its stop sequence, the program runner, the Despachador and TCP service bases, the TCP contract, encryption, parameter and run-state loading, the repository adapter and its validarAfectacion contract, alerts, logging, and configuration defaults. These external reads verify behavior; they are not counted as solution-owned files.
+• Supplemented the full read with quantified, case-sensitive scans over the 25 authored production C# files (generated proxy and AssemblyInfo.cs files excluded): zero matches for .Result, .Wait(, GetResult, async void, and throw ex;; one DateTime.Now (DespachadorWorker.cs:356 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L356)); three Task.Run calls, all fire-and-forget (_ =); 11 catch (Exception; 7 new Exception(; 67 Logging.Write* calls; 6 Pid.Value dereferences; 10 EjecutarStoredProcedureQuery calls, six reads without strict validation and four writes with validarAfectacion: true, and no reference to .Exito anywhere in the repositories; 3 ConfigureAwait calls (host only); 4 uses of the [Obsolete] ConstantesGenerales. In the tests: 13 [TestMethod] methods (15 cases with three DataRow rows), 29 Assert. calls, 30 .Verify( calls, and nine calls that pass It.IsAny values as real arguments.
+• Code blocks that precede a Recommendation are excerpts of existing code, abridged for reading (... marks a gap, long statements are joined onto one line, and trailing // comments are the reviewer's, not the source's). Code blocks after a Recommendation are proposed code, not existing code.
+• Three throwaway console experiments support DSP-FR-1, DSP-FR-16, and DSP-FR-19. They were compiled in %TEMP% with the machine's .NET Framework C# compiler (CLR 4.0.30319): (1) a loopback listener that accepts and never writes; NetworkStream.ReadAsync(buffer, 0, 4, token) with a token cancelled after 1,500 ms was still WaitingForActivation after 6,039 ms and completed only when the client socket was closed (ObjectDisposedException); (2) new BasicHttpBinding() reports Security.Mode = None, default SendTimeout 00:01:00 and ReceiveTimeout 00:10:00, and a ChannelFactory for an https:// address throws ArgumentException: The provided URI scheme 'https' is invalid; expected 'http'; (3) an IL listing of System.ServiceProcess.ServiceBase shows Stop calling DeferredStop, which makes a callvirt to OnStop, so Stop() runs OnStop synchronously on the calling thread. None of them ran under a real Service Control Manager or against T24.
+• Provenance: CodeReview equals origin/CodeReview. The large refactor is commit b3ca997 (2026-09-09, "Code Review NTT, HMN & Copilot Fixes": the Afecto result-set contract in the four write procedures, WITH (NOLOCK) removed from two procedures, the WiX project, the design note, and the removal of duplicate DTOs and interfaces); the last commit dad77cc (2026-10-08) only renames one procedure constant. origin/develop (4ff22dd, 2026-07-31) and origin/main (610463d, 2026-04-14) are older lineages and were not reviewed.
+• No JIRA/ADO work item or acceptance criteria was supplied. Business expectations are limited to behavior expressed by code, SQL, and the portfolio baseline. There is no README.md on this branch.
+• Production source was not modified. Build and test execution were unavailable: dotnet, modern MSBuild, vstest.console, nuget, and vswhere are not installed (only the .NET Framework 4.0 MSBuild exists), the D: drive and D:\ServiceCMS\MUFG_T24.dll are absent, and there is no packages folder. Validation is therefore static plus the experiments above and document/tooling checks. By static reading, two of the 15 test cases are expected to fail because of a fixed calendar date (DSP-FR-27).
+Finding Summary
+Category	Blocker	Major	Minor	Total
+MustChange/rewrite	3	17	0	20
+rewrite_recommended	0	4	5	9
+NiceToRewrite_ifTimePermits	0	0	5	5
+Total	3	21	10	34
+
+Fresh Cross-Cutting Checks
+Candidate	Result	Current evidence
+GEN-1 absolute DLL references	Yes	All four projects reference D:\ServiceCMS\MUFG_T24.dll (application (../../General/Despachador/Aplicacion/AplicacionDespachador.csproj#L36-L39), infrastructure (../../General/Despachador/Infraestructura/InfraestructuraDespachador.csproj#L36-L39), host (../../General/Despachador/Despachador/Despachador.csproj#L43-L46), tests (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj#L58-L61), the last without a public-key token); no nuget.config, package feed, or CI definition exists in the repository and the path is absent on the audit machine (DSP-FR-2).
+GEN-2 zero automated tests	Partial	The Phase 0 pattern text lists Despachador among the solutions with no test project; that is stale. A real MSTest/Moq project exists (13 methods, 15 cases), but two cases are expected to fail by calendar date, the T24 middleware credentials are literals in nine tests, the project references only the application assembly, and nothing covers the dispatch loop, the response handling, the repositories, the SOAP and TCP clients, or the host (DSP-FR-26, DSP-FR-27, DSP-FR-28).
+GEN-3 duplicate project files	No	Four distinct project files, each compiling its own folder. The only unreferenced project is the WiX installer (Despachador.wixproj (../../General/Despachador/Setup/Despachador.wixproj)), which is not in the solution (DSP-FR-33).
+GEN-4 near-identical solutions	Not applicable	Despachador is not in any pair listed under GEN-4, and this review did not compare it with other solutions.
+GEN-5 sensitive logging	Yes	Account numbers and balances are written at INFO level in the funds check (DespachadorWorker.cs:436 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L436), wsT24.cs:94 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L94)); no credential is logged (the password parameter is declared sensitive, OperacionServicio.cs:664 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L664)) (DSP-FR-18).
+GEN-6 undisposed signing helper	No	No signing or certificate helper is constructed; the WCF client leak is a different defect (DSP-FR-17).
+GEN-7 finalization only on success	Yes (expected)	When the initial refresh fails, the host stops itself from inside the start-up task, so the shared OnStop waits on that same task for its full 60-second timeout, the 30-second cleanup token has already expired, and the termination writes cannot run (DSP-FR-23). Not run under the Service Control Manager.
+GEN-8 nullable PID dereference	No (latent)	The shared ObtenerProcesoActualAsync always assigns the PID before any of the six Pid.Value reads (ServiceHost.cs:93 (../../General/Despachador/Despachador/ServiceHost.cs#L93), OperacionServicio.cs:140 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L140), OperacionServicio.cs:697 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L697), DespachadorWorker.cs:103 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L103), DespachadorWorker.cs:181 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L181), DespachadorWorker.cs:212 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L212)); recorded as a defensive fix only (DSP-FR-12).
+GEN-9 discarded service-state results	Yes	ActualizaEJecucion, both MarcarPuertoEnUsoAsync calls, and both ActualizaTerminacion calls discard their results, and the four InsertarAlerta calls discard the Boolean (DSP-FR-24).
+GEN-10 out-of-hours alert per tick	No	The reading-window and T24-window alerts fire only on a state transition (OperacionServicio.cs:688-700 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L688-L700), DespachadorWorker.cs:172-184 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L172-L184), DespachadorWorker.cs:203-215 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L203-L215)), although two loops and several workers update the shared flags without synchronization (DSP-FR-11). Past-dated operations, however, are re-logged at ERROR on every poll (DSP-FR-6).
+GEN-11 repository failure looks like empty/success	Yes (read side)	All six read paths return Data without reading Exito (ParametrizacionControlDao.cs:36-37 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L36-L37), ParametrizacionControlDao.cs:46-47 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L46-L47), ParametrizacionControlDao.cs:56-60 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L56-L60), RecuperacionDatos.cs:47-53 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L47-L53), RecuperacionDatos.cs:75-81 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L75-L81), RecuperacionDatos.cs:90-95 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L90-L95)); the four writes use strict validation and throw instead of returning false (DSP-FR-15). Root: LIB-FR-56.
+GEN-12 culture-dependent money/date conversion	No (latent)	The schedule and funds-check conversions use the invariant-culture helpers; DateTime.Now is read once for the retry throttle (DespachadorWorker.cs:356 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L356)) and the window parse shares CS-FR-5 (DSP-FR-14).
+GEN-13 stored-procedure contract drift	Yes	The repository's four write procedures and the SQL project's copies disagree on the Afecto contract, two more differ in NOLOCK, and two shared procedures that the library calls are defined nowhere (DSP-FR-30).
+GEN-14 ServiceName assigned in OnStart	Yes (expected)	The host derives from the base and never sets a name earlier (ServiceHost.Designer.cs:1-24 (../../General/Despachador/Despachador/ServiceHost.Designer.cs#L1-L24)), so the inherited assignment (WindowsServiceHostBase.cs:99 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L99)) is expected to throw even though the value equals the installed name; not run under the Service Control Manager (DSP-FR-1).
+
+Items Requiring Business/Integration Confirmation
+These are not classified as defects without the missing contract evidence:
+• Dispatch semantics and idempotency. Confirm what each downstream service does when it receives an operation it already claimed or finished (DSP-FR-4, DSP-FR-8, DSP-FR-9): whether a repeated dispatch of the same folio is harmless, and which procedure or flag stops the work-plan selector from returning an operation that a service has taken but not yet finished.
+• Deployed procedures. List the InterfacesT24 procedures that actually exist with their current definitions, in particular the four write procedures (with or without the SELECT FilasAfectadas, Afecto), usp_despachador_MarcarErrorFechaPasada, and usp_Comun_ActualizarEnUso; confirm the database collation (seven of the ten constants differ from the CREATE PROCEDURE names only in letter case, which is harmless under a case-insensitive collation) (DSP-FR-30).
+• Past-dated and `TMD` rules. Confirm the intended handling of operations whose value date is earlier than the system date (deny and leave pending, or mark an error) and the reason TMD operations bypass both the past-date and the future-date rules (DespachadorWorker.cs:243-256 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L243-L256)) (DSP-FR-6).
+• "Sin fondos" semantics. Confirm whether a failed or unparsable balance query should be treated as "insufficient funds" (the current behavior), whether the replica process that turns num_estatus_especial = 2 into the CMS reason OPERACION SIN FONDOS runs for TMD rows in production, and what the business expects when the balance service is unavailable (DSP-FR-5).
+• T24 balance web service. Provide the production value of ACCT_BALANCE_API_ENDPOINT (the code and the generated proxy are plain HTTP), whether the middleware account is a shared or a per-service identity, whether the test-file credentials are real and need rotation, and the service's own timeout and throughput limits (DSP-FR-16, DSP-FR-17, DSP-FR-26).
+• Volumes and limits. CantidadPaquete, LimitePaquetesPendientes, LimiteConcurrencia, and the per-service and per-type maximums come from encrypted configuration and database rows; provide production values and typical and peak pending counts, since the head-of-line and churn analysis (DSP-FR-9) and the TopN window depend on them.
+• **HORA_* formats.** The tests use HH:mm text; confirm the production format and whether an overnight window is ever required (the shared parser reads 0600 as 600 days and has no overnight support, CS-FR-5) (DSP-FR-14).
+• `RECC` coverage. Confirm which operation types the T24 service can receive and whether TEF_Local and NOM_TEF need a branch in usp_despachador_RevisarRECCBatch, and whether MFX rows in tb_cmm_solicitudesforex are always cancellations (DSP-FR-31).
+• Log-size unit. Confirm whether the configured TamanoMaximoArchivoLogKB values are kilobytes (as named) or megabytes (as Logging.Init treats them) (DSP-FR-25).
+• Hosting. Confirm the service account that should run the installer's service (LocalService is declared), the recovery options for exit code 1, and whether the installer project is built anywhere (DSP-FR-33).
+External Dependency Notes (belong to the MUFG_Library review, not counted here)
+• RepositorioMaestro.EjecutarStoredProcedureQuery converts an execution-time SqlException into Exito = false (with no mapped rows in the usual case) and no log entry (RepositorioMaestro.cs:385-390 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L390)); non-strict callers therefore see an empty result (LIB-FR-56, root of DSP-FR-15). ValidarResultadoStoredProcedure returns at once for non-strict calls and throws for strict calls unless Afecto is true (RepositorioMaestro.cs:668-690 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L668-L690)).
+• ActualizaEJecucion throws a new Exception when the update fails (RepositorioMaestro.cs:1170-1174 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1170-L1174)), which is what makes a database problem at start-up stop the service; ActualizaTerminacion rethrows OperationCanceledException and converts every other failure into Exito = false (RepositorioMaestro.cs:1193-1230 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1230)), so a call whose token is already cancelled cannot finalize the run state.
+• WindowsServiceHostBase.OnStop creates the 60-second wait token and the 30-second cleanup token at the same moment (WindowsServiceHostBase.cs:129-130 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L129-L130)) and runs the termination on a pool thread while OnStop blocks; EsperarTareaActivaAsync logs a WARN on timeout and returns (WindowsServiceHostBase.cs:195-205 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L195-L205)), which is the mechanism behind DSP-FR-23.
+• Logging.Init(string pathLog, string filePrefix, int maxMb) multiplies its argument by 1,024 (Logging.cs:40-51 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L40-L51)), while this host passes a setting named TamanoMaximoArchivoLogKB (DSP-FR-25).
+• For a non-strict call that returns no rows, the adapter writes a WARN|EjecutarStoredProcedureQuery|...|Afecto:False|...en modo no estricto line (RepositorioMaestro.cs:641-654 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L641-L654)); this dispatcher's read paths are non-strict, so an idle poll with nothing pending is expected to write such a WARN every 30 seconds (expected from the code; not observed).
+• ObtencionConfguracionGeneral defaults CantidadPaquete, LimitePaquetesPendientes, and LimiteConcurrencia to 0 when the attribute is absent (ObtencionConfguracionGeneral.cs:106-109 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Configuracion/ObtencionConfguracionGeneral.cs#L106-L109)) and builds ListaTipos with $"'{x.Trim()}", a quote that is never closed (ObtencionConfguracionGeneral.cs:119-122 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Configuracion/ObtencionConfguracionGeneral.cs#L119-L122)); the dispatcher does not use ListaTipos, but other services may.
+• Encriptacion.GenerarLlave() only reads LLAVE_ENCRIPTADODESPACHADOR from the general configuration (Encriptacion.cs:19-22 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Seguridad/Encriptacion.cs#L19-L22)), and Encrypt is AES-CBC with a random IV and no authentication tag (Encriptacion.cs:41-63 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Seguridad/Encriptacion.cs#L41-L63)); this is LIB-FR-39 and the root of DSP-FR-21.
+• The TCP receiver base binds to loopback by default and rejects frames larger than 1 MiB (WindowsTcpServiceHostBase.cs:26-27 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L26-L27), WindowsTcpServiceHostBase.cs:66-87 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L66-L87)); it decrypts the request and answers with plaintext System.Text.Json (WindowsTcpPaqueteServiceHostBase.cs:40-41 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpPaqueteServiceHostBase.cs#L40-L41), WindowsTcpPaqueteServiceHostBase.cs:70-72 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpPaqueteServiceHostBase.cs#L70-L72)).
+• ConstantesGenerales is an [Obsolete] compatibility shim (ConstantesGenerales.cs:6-7 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConstantesGenerales.cs#L6-L7)); the dispatcher still reads four constants from it (DSP-FR-14).
+3. What's Already Good
+• Constructor injection and a verified composition root. OperacionServicio.cs (../../General/Despachador/Aplicacion/OperacionServicio.cs#L53-L64) and DespachadorWorker.cs (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L49-L57) receive their collaborators through constructors (the orchestrator gets the alert writer, the run-state and parameter services, the control DAO, and the worker; the worker gets the SOAP client, the TCP client, and the repositories; everything except the worker and the configuration object is an interface), and ServiceHost.cs (../../General/Despachador/Despachador/ServiceHost.cs#L42-L79) registers them in SimpleInjector and calls Verify() (ServiceHost.cs:79 (../../General/Despachador/Despachador/ServiceHost.cs#L79)). Configuracion is registered as a scoped clone of the start-up configuration (ServiceHost.cs:68 (../../General/Despachador/Despachador/ServiceHost.cs#L68)), so the start-up scope owns one configuration object instead of a shared static.
+• Queue state is protected and the reservation is atomic. IntentarReservarPaquete re-checks the global, per-service, and per-type capacity and moves the package from pending to in-process inside one critical section (OperacionServicio.cs:609-646 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L609-L646)); the worker's finally releases the counters in one critical section once the worker has started (OperacionServicio.cs:483-523 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L483-L523)); WorkersDisponiblesGlobal takes the lock with a 2-second Monitor.TryEnter instead of blocking forever (OperacionServicio.cs:547-563 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L547-L563)); and the batch fetch uses a SemaphoreSlim that is released in a finally (OperacionServicio.cs:289-332 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L289-L332)). A real concurrency test exercises the reservation (OperacionServicioUT.cs:109-168 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L109-L168)).
+• A deliberate scheduling policy. A candidate must be enabled, have pending packages, and be under its type and service maximums; candidates are ordered by service priority, type priority, occupancy, and time since last run (OperacionServicio.cs:426-457 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L426-L457), ControlTipo.cs:23-24 (../../General/Despachador/Aplicacion/Modelo/ControlTipo.cs#L23-L24)), so equal-priority types are balanced by occupancy and idle time instead of one always going first (a heuristic, not a fairness guarantee).
+• Missed signals self-heal. A 30-second safety loop re-fetches and wakes the dispatcher (OperacionServicio.cs:90-120 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L90-L120)) and a finished worker wakes it again when pending packages remain and shutdown has not begun (OperacionServicio.cs:515-522 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L515-L522)), so a lost wake-up costs about one safety interval (30 seconds plus the refresh time) while the reading window is open.
+• Control data is refreshed without a restart and drains gracefully. Services that disappear from the control tables are disabled while they still have active workers, and types while they still have active workers or pending packages (OperacionServicio.cs:192-208 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L192-L208), OperacionServicio.cs:239-257 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L239-L257)); two tests pin that behavior (OperacionServicioUT.cs:24-106 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L24-L106)).
+• Database access is parameterized and fixed. Every parameter of the ten calls (two of them take none) is bound through CrearParametro or a structured table-valued parameter for folio lists (RecuperacionDatos.cs:35-51 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L35-L51), ParametrizacionControlDao.cs:56-59 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L56-L59)) against constant procedure names (ConstantesServicio.cs:20-29 (../../General/Despachador/Aplicacion/Enums/ConstantesServicio.cs#L20-L29)); no SQL is built from values in C#.
+• The procedures are transactional and report errors. The four write procedures run under XACT_ABORT in an explicit transaction, capture @@ROWCOUNT, and return FilasAfectadas/Afecto (SQL/usp_despachador_actualizaCuentaSinFondos.sql:36-58 (../../General/Despachador/SQL/usp_despachador_actualizaCuentaSinFondos.sql#L36-L58)); every one of the ten procedures catches, writes auditoria.errorlog, and rethrows (SQL/usp_despachador_obtenerOperacionesPendientes.sql:106-130 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L106-L130)); and the strict-validation contract on the writes (RecuperacionDatos.cs:101-152 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L101-L152)) turns an unaffected write into an exception, so a write can no longer be mistaken for a success (the drift against the SQL project is DSP-FR-30).
+• The TCP client has the basics right. The connect step has a real timeout (PeticionTCP.cs:38-46 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L38-L46)); the TcpClient, stream, and cancellation sources are in using blocks (PeticionTCP.cs:36-80 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L36-L80)); the payload is encrypted with a random IV per message (Encriptacion.cs:41-63 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Seguridad/Encriptacion.cs#L41-L63)); the request carries folios and operation types, never account numbers or amounts (DespachadorWorker.cs:99-107 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L99-L107)); and the server validates the length prefix (WindowsTcpServiceHostBase.cs:66-87 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L66-L87)). The design note documents the request protocol (ArquitecturaCifradoTCP.md:1-19 (../../General/Despachador/Docs/ArquitecturaCifradoTCP.md#L1-L19)).
+• Failures keep their identity. The worker rethrows with throw; after recording the error (DespachadorWorker.cs:155-159 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L155-L159)), treats cancellation separately (DespachadorWorker.cs:150-154 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L150-L154)), and the funds check rethrows OperationCanceledException instead of swallowing it (DespachadorWorker.cs:441-444 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L441-L444)); there is no .Result, .Wait(), async void, or throw ex; anywhere in the authored production code.
+• Typed money and dates. Amounts are decimal (DespachadorWorker.cs:432 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L432)), the balance is parsed with the invariant culture (wsT24.cs:86-90 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L86-L90), ConversionesComunes.cs:39-53 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Conversiones/ConversionesComunes.cs#L39-L53)), dispatch and idle-time stamps use DateTime.UtcNow (DespachadorWorker.cs:104 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L104), OperacionServicio.cs:637 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L637)), and the value date is compared as a yyyyMMdd integer, so time zones cannot shift it.
+• Traceable logs and masked secrets. Every log call in the worker class goes through the contextual logger, which prefixes a worker id and package id (DespachadorWorker.cs:456-470 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L456-L470) builds the id), and the web-service password is declared sensitive so the shared loader masks it in the parameter log (OperacionServicio.cs:664 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L664)).
+• Single instance and a loopback default. The runner takes a global mutex named after the service and exits with code 1 when a second copy starts (WindowsServiceProgramRunner.cs:30-52 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceProgramRunner.cs#L30-L52)), and the shared receiver base listens on loopback unless a service overrides it (WindowsTcpServiceHostBase.cs:26 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L26)), which together with the 127.0.0.1 column default (SQL/Estructura SQL.sql:7 (../../General/Despachador/SQL/Estructura%20SQL.sql#L7)) keeps the default dispatch traffic on the host.
+• A real test project with decision-table cases. The worker tests cover current-date dispatch, past date, future date with and without RECC, and the TMD cases at and away from T24_REGISTRO (retry denied, no funds, funds) (DespachadorWorkerUT.cs:263-370 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L263-L370), DespachadorWorkerUT.cs:713-828 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L713-L828), DespachadorWorkerUT.cs:834-960 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L834-L960), DespachadorWorkerUT.cs:966-1092 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L966-L1092)); the orchestrator tests cover control refresh, concurrent reservation, and counter cleanup (OperacionServicioUT.cs:24-236 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L24-L236)).
+• Documented procedures. Each of the ten procedures has a header with description, scope, parameters, and a change-log entry (SQL/usp_despachador_obtenerOperacionesPendientes.sql:1-27 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L1-L27)), and the combined script comments the control tables (SQL/Estructura SQL.sql:2-3 (../../General/Despachador/SQL/Estructura%20SQL.sql#L2-L3)).
+• Review fixes already landed. Commit b3ca997 removed duplicate DTOs and interfaces, introduced the Afecto write contract, added the design note, and dropped two NOLOCK hints; commit dad77cc aligned the pending-operations procedure constant with the SQL name.
+• Ruled out as defects (recorded to avoid re-investigation): EsDiaHabil, FechaSistema, and the HORA_OP_* values are all read by the worker (DespachadorWorker.cs:167 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L167), DespachadorWorker.cs:77 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L77), DespachadorWorker.cs:192-199 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L192-L199)); the Pid.Value reads are safe in the production flow because the PID is always assigned first (GEN-8, DSP-FR-12 is defensive only); the empty RespuestaPaqueteDto returned on a connect timeout has Resultado = 0, which is not OK = 1, so it is treated as an error and never as success (PeticionTCP.cs:44-45 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L44-L45), DespachadorWorker.cs:122-137 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L122-L137)); the four write DAOs return true or throw, never false, because strict validation throws first (RecuperacionDatos.cs:108-109 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L108-L109)); replacing a ControlServicio or ControlTipo object during a refresh is safe because workers look the state up by key when they finish (OperacionServicio.cs:176-188 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L176-L188), OperacionServicio.cs:496-509 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L496-L509)); the check-then-release race in Despertar can leave extra signals (the semaphore has no maximum), each causing at most one more pass through the loop, which the loop tolerates (OperacionServicio.cs:536-542 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L536-L542)); and unobserved task exceptions are not wholly silent, because the runner records them in the Event Log, when the Event Log source is available, once the faulted task is finalized (WindowsServiceProgramRunner.cs:113-123 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceProgramRunner.cs#L113-L123)).
+4. Findings by Project (low/no-dependency -> high dependency)
+4.1 Solution-wide and shared dependencies
+MustChange / Rewrite
+DSP-FR-1 - The service name is assigned inside the inherited OnStart, and the host never sets it earlier (GEN-14, Blocker)
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: the assignment at WindowsServiceHostBase.cs:95-108 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L95-L108) (line 99), the host that derives from the Despachador base and defines only the log name (ServiceHost.cs:25-31 (../../General/Despachador/Despachador/ServiceHost.cs#L25-L31)), the designer without InitializeComponent() or a name (ServiceHost.Designer.cs:1-24 (../../General/Despachador/Despachador/ServiceHost.Designer.cs#L1-L24)), the entry point that passes the name only for the single-instance mutex (Program.cs:14-21 (../../General/Despachador/Despachador/Program.cs#L14-L21)), the shared base that does not override OnStart (WindowsServiceDespachador.cs:12-30 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceDespachador.cs#L12-L30)), the runner that calls ServiceBase.Run (WindowsServiceProgramRunner.cs:54-63 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceProgramRunner.cs#L54-L63)), and the installed service name (Product.wxs:24-31 (../../General/Despachador/Setup/Product.wxs#L24-L31)); the same defect is CS-FR-1 in ControladorServicios_Recommendations.md (ControladorServicios_Recommendations.md) and portfolio entry GEN-14 in _ORCHESTRATION.md (_ORCHESTRATION.md)
+Code block (csharp)
+protected override void OnStart(string[] args)
 {
-    /// <summary>
-    /// Clase para levantar y detener servicios
-    /// </summary>
-    public class ControladorServicios : IControladorServicios
+    try
     {
-        private readonly ConfiguracionServicio _configuracion;
-        private readonly IRepositorioTomi _repositorioTomi;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        /// <param name="configuracion"></param>
-        /// <param name="repositorioTomi"></param>
-        public ControladorServicios(ConfiguracionServicio configuracion, IRepositorioTomi repositorioTomi)
-        {
-            _configuracion = configuracion;
-            _repositorioTomi = repositorioTomi;
-        }
-
-        /// <summary>
-        /// Inicia un servico de Windows.
-        /// </summary>
-        /// <param name="strNombreServicio"></param>
-        public async Task<bool> IniciaServicioAsync(string strNombreServicio)
-        {
-            try
-            {
-                using (ServiceController serviceController = new ServiceController(strNombreServicio, "."))
-                {
-
-                    serviceController.Refresh();
-
-                    if (serviceController.Status == ServiceControllerStatus.Running)
-                    {
-                        Config.EscribirLog($"INFO|IniciaServicio|El servicio {strNombreServicio} ya se encuentra iniciado.");
-                        return true;
-                    }
-
-                    Config.EscribirLog($"INFO|IniciaServicio|Inicialización del Servicio '{strNombreServicio}'.");
-
-                    await Task.Run(() =>
-                    {
-                        serviceController.Start();
-
-                        serviceController.WaitForStatus(
-                            ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
-                    });
-
-                    serviceController.Refresh();
-
-                    if (serviceController.Status == ServiceControllerStatus.Running)
-                    {
-                        Config.EscribirLog($"INFO|IniciaServicio|Servicio '{strNombreServicio}' iniciado correctamente.");
-                        return true;
-                    }
-                    else
-                    {
-                        string msj = $"No fue posible iniciar el servicio {strNombreServicio}.";
-                        Config.EscribirLog($"ERROR|IniciaServicio|{msj}");
-
-                        try
-                        {
-                            await _repositorioTomi.ProcesoInsertaAlerta(
-                            new AlertaDTO()
-                            {
-                                Folio = null,
-                                TipoOPeracion = null,
-                                Servicio = _configuracion.StrNombreServicio,
-                                ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
-                                Descipcion = msj,
-                                PId = (int)_configuracion.Pid,
-                                NombreProceso = _configuracion.NombreProceso,
-                                Exception = null
-                            });
-                        }
-                        catch (Exception exAlerta)
-                        {
-                            Config.EscribirLog($"INFO|IniciaServicio|No fue posible generar la alerta: {exAlerta}.");
-                        }
-                        return false;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|IniciaServicio|Excepcion: {ex}");
-
-                try
-                {
-                    await _repositorioTomi.ProcesoInsertaAlerta(
-                    new AlertaDTO()
-                    {
-                        Folio = null,
-                        TipoOPeracion = null,
-                        Servicio = _configuracion.StrNombreServicio,
-                        ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
-                        Descipcion = $"Error al tratar de levantar el servicio '{strNombreServicio}'",
-                        PId = (int)_configuracion.Pid,
-                        NombreProceso = _configuracion.NombreProceso,
-                        Exception = ex
-                    });
-                }
-                catch (Exception exAlerta)
-                {
-                    Config.EscribirLog($"INFO|IniciaServicio|No fue posible generar la alerta: {exAlerta}.");
-                }
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Detiene un servicio de Windows.
-        /// </summary>
-        /// <param name="strNombreServicio"></param>
-        public async Task<bool> DetieneServicioAsync(string strNombreServicio)
-        {
-            try
-            {
-                using (ServiceController serviceController = new ServiceController(strNombreServicio, "."))
-                {
-
-                    serviceController.Refresh();
-
-                    if (serviceController.Status == ServiceControllerStatus.Stopped)
-                    {
-                        Config.EscribirLog($"INFO|DetieneServicio|El servicio '{strNombreServicio}' del Servicio");
-                        return true;
-                    }
-
-                    Config.EscribirLog($"INFO|DetieneServicio|Finalización del servicio '{strNombreServicio}'");
-
-                    await Task.Run(() =>
-                    {
-                        serviceController.Stop();
-
-                        serviceController.WaitForStatus(
-                            ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
-                    });
-
-                    serviceController.Refresh();
-
-                    if (serviceController.Status == ServiceControllerStatus.Stopped)
-                    {
-                        Config.EscribirLog($"INFO|DetieneServicio|Finalización del Servicio");
-                        return true;
-                    }
-                    else
-                    {
-                        string msj = $"No fue posible detener el servicio {strNombreServicio}.";
-
-                        Config.EscribirLog($"ERROR|DetieneServicio|{msj}");
-
-                        try
-                        {
-                            await _repositorioTomi.ProcesoInsertaAlerta(
-                            new AlertaDTO()
-                            {
-                                Folio = null,
-                                TipoOPeracion = null,
-                                Servicio = _configuracion.StrNombreServicio,
-                                ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
-                                Descipcion = msj,
-                                PId = (int)_configuracion.Pid,
-                                NombreProceso = _configuracion.NombreProceso,
-                                Exception = null
-                            });
-                        }
-                        catch (Exception exAlert)
-                        {
-                            Config.EscribirLog($"INFO|DetieneServicio|No fue posible generar la alerta: {exAlert}.");
-                        }
-
-                        return false;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|DetieneServicio|Excepcion: {ex}");
-
-                try
-                {
-                    await _repositorioTomi.ProcesoInsertaAlerta(new AlertaDTO()
-                    {
-                        Folio = null,
-                        TipoOPeracion = null,
-                        Servicio = _configuracion.StrNombreServicio,
-                        ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
-                        Descipcion = $"Error al tratar de detener el servicio '{strNombreServicio}'",
-                        PId = (int)_configuracion.Pid,
-                        NombreProceso = _configuracion.NombreProceso,
-                        Exception = ex
-                    });
-                }
-                catch (Exception exAlerta)
-                {
-                    Config.EscribirLog($"INFO|DetieneServicio|No fue posible generar la alerta: {exAlerta}.");
-                }
-            }
-            return false;
-        }
+        ServiceName = NombreServicioLog;     // WindowsServiceHostBase.cs L99
+        ...
+Code block (csharp)
+protected override string NombreServicioLog => NombreServicio.Despachador.ToString();   // ServiceHost.cs L30
+In .NET Framework the ServiceBase.ServiceName setter throws InvalidOperationException once ServiceBase.Run has registered the service, even when the same value is assigned; the portfolio entry GEN-14 documents this from an IL inspection and an executed reflection reproduction. OnStart catches the exception, and HandleStartupFailure sets ExitCode = 1 and schedules Stop(). This host derives from WindowsServiceDespachador, which does not override OnStart, never calls InitializeComponent() (the designer has no components), and assigns no name earlier, so the equal value (Despachador is also the installer's service name) does not help. When it runs under the Service Control Manager, the service is therefore expected to stop right after it starts, before StartupAsync loads any configuration, marks the run, or starts a loop; a Debug console run goes through DebugRun, which calls OnStart without ServiceBase.Run, so the name is not yet frozen and the defect stays hidden during development. This has not been run under a real Service Control Manager; confirm with the Event Log check described in CS-FR-1 (an Error en OnStart entry that contains Cannot change service name when the service is running; the entry exists only if the Event Log source can be created, see DSP-FR-33) or with the Service Control Manager's own "service entered the stopped state" event right after each start, before treating it as an outage of the deployed service.
+Recommendation: fix it once in the shared library with no public signature change: apply NombreServicioLog in WindowsServiceProgramRunner.Run after the instance is created and before ServiceBase.Run or the debug runner, and delete the assignment from OnStart. Until a corrected library is released, do not ship a Release build of this host without a smoke test that starts the service, waits 60 seconds, and asserts that it is Running and has written its first log line.
+Code block (csharp)
+// WindowsServiceProgramRunner.Run (shared library), before ServiceBase.Run(...)
+var service = serviceFactory();
+(service as WindowsServiceHostBase)?.AplicarNombreServicio();   // internal: ServiceName = NombreServicioLog
+ServiceBase.Run(service);
+Benefit: the service starts under the Service Control Manager, and one library change fixes every host that inherits the base.
+DSP-FR-2 - All four projects reference D:\ServiceCMS\MUFG_T24.dll; no feed, build definition, or version pin exists (GEN-1, Blocker)
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: application (../../General/Despachador/Aplicacion/AplicacionDespachador.csproj#L36-L39), infrastructure (../../General/Despachador/Infraestructura/InfraestructuraDespachador.csproj#L36-L39), host (../../General/Despachador/Despachador/Despachador.csproj#L43-L46), and test (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj#L58-L61) project files; the test reference carries no PublicKeyToken (PruebasUnitarias.csproj:58 (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj#L58)); the repository holds no nuget.config, package source, or CI definition; the path is absent on the audit machine
+Code block (xml)
+<Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, PublicKeyToken=2eed977a6ac043c8, processorArchitecture=MSIL">
+  <SpecificVersion>False</SpecificVersion>
+  <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+</Reference>
+Every project resolves the shared library from a drive and folder that only a prepared build machine has; SpecificVersion=False and a fixed assembly version of 1.0.0.0 mean the build binds to whatever file is there, so a change to the shared DLL silently changes the next rebuild of this dispatcher, and nothing records which build of the library the dispatcher was last compiled and tested against. A clean checkout on a machine without that folder cannot build (the path is absent on the audit machine), and the test project's reference without a public-key token would accept an unsigned look-alike. This is portfolio finding GEN-1 and is rated Blocker in line with the other solutions' reports (for example CS-FR-2 and LIB-FR-1).
+Recommendation: publish MUFG_T24 as a versioned, strong-named package on an internal feed, add a root nuget.config, replace the four HintPath references with a pinned PackageReference (or a packages.config entry), remove SpecificVersion=False, and add a CI job that restores and builds the solution on a clean agent.
+Code block (xml)
+<PackageReference Include="MUFG.T24" Version="2.3.1" />      <!-- illustrative package id and version -->
+Benefit: reproducible builds, an auditable record of which library version was shipped, and no silent behavior change from a copied DLL.
+Nice to Rewrite if Time Permits
+DSP-FR-3 - No README or runbook, no CI, and the analyzer severity is globally silenced (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: .editorconfig (../../General/Despachador/.editorconfig#L3-L11), the tracked-file list (no README.md, no CI file), the design note that covers only the TCP request protocol (ArquitecturaCifradoTCP.md:1-19 (../../General/Despachador/Docs/ArquitecturaCifradoTCP.md#L1-L19)), the test packages pinned to MSTest 2.2.10 (PruebasUnitarias.csproj:46-57 (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj#L46-L57))
+Code block (ini)
+dotnet_diagnostic.CS4014.severity = silent   # tarea no esperada
+dotnet_diagnostic.CA2007.severity = silent   # ConfigureAwait
+dotnet_analyzer_diagnostic.severity = silent
+The repository explains neither how to configure the service (the parameter keys, the control tables, the encrypted configuration attributes CantidadPaquete, LimitePaquetesPendientes, LimiteConcurrencia), how to deploy it (the installer is not in the solution, DSP-FR-33), nor how to operate it (which log lines mean a stuck dispatcher). The editor configuration sets every analyzer to silent except one compiler warning, so analyzer diagnostics do not reach a developer; in particular nothing asks the library projects for ConfigureAwait(false), and the unawaited-task warning is off. There is no CI definition, and the test packages are old (MSTest 2.2.10).
+Recommendation: add a short README (purpose, configuration keys, tables and procedures, ports, service account, log location, restart and recovery steps), turn on a baseline analyzer set (at least CS4014 as a warning, and CA2007 for the two libraries), add a CI build-and-test job once DSP-FR-2 is solved, and move the test packages to a current MSTest 3.x.
+Benefit: a new team member can configure and operate the service without reading its source, and drift is caught at build time.
+4.2 AplicacionDespachador (Tier 0)
+MustChange / Rewrite
+DSP-FR-4 - The dispatch outcome is computed but discarded, so refusals and failures are invisible and a failed package is re-dispatched every safety cycle without back-off (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the discarded await (OperacionServicio.cs:466-482 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L466-L482)), the outcome mapping that is never logged (DespachadorWorker.cs:114-148 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L114-L148)), the result type whose fields are never read (WorkerResultadoDto.cs:1-14 (../../General/Despachador/Aplicacion/DTOs/WorkerResultadoDto.cs#L1-L14)), the refusals that only set fields (DespachadorWorker.cs:185-186 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L185-L186), DespachadorWorker.cs:216-217 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L216-L217)), the in-process bookkeeping that forgets the package (OperacionServicio.cs:483-494 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L483-L494)), the connect-timeout and error results of the TCP client (PeticionTCP.cs:38-46 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L38-L46), PeticionTCP.cs:82-93 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L82-L93)), and the dead statistics fields (ControlServicio.cs:16-17 (../../General/Despachador/Aplicacion/Modelo/ControlServicio.cs#L16-L17))
+Code block (csharp)
+await _despachadorWorker.DespacharPaqueteAsync(
+    paquete, servicioSnapshot.Ip, servicioSnapshot.Puerto, ct);          // OperacionServicio.cs L470-474: result dropped
+Code block (csharp)
+else
+{
+    resultado.Claimed = false;
+    resultado.ReturnedToPending = true;
+    resultado.Error = "Resultado ERROR en despacho";                       // DespachadorWorker.cs L132-137
+}
+DespacharPaqueteAsync returns a WorkerResultadoDto (Claimed, ReturnedToPending, Cancelled, Paused, Error) and builds an error string with the folio, code, and message of every rejected operation, but LanzarWorker awaits the call and drops the value. A search of the solution finds no read of Claimed, ReturnedToPending, Cancelled, or Error outside the worker itself, not even in the tests, and Paused is never set. Three consequences follow. (1) The dispatcher never logs what the downstream service answered: a PARCIAL or ERROR result, a null result, a connect timeout, the T24 business-day and window refusals, and the per-folio errors leave at most a scattered line (the connect timeout writes one WARN, a failed exchange one ERROR), and, after the first occurrence, nothing for a refusal that only sets resultado.Error (DespachadorWorker.cs:185-186 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L185-L186)), because the log line and the alert fire only on a state transition. (2) Nothing counts failures per service or type, so ControlServicio.ErroresRecientes and LatenciaPromedio (declared, never touched) cannot drive back-off, and no alert is raised when a downstream service answers ERROR for hours. (3) After any non-OK result the package's keys leave the in-process list in the finally block, the next safety fetch about 30 seconds later returns the operations that are still pending (after a refusal or a failed dispatch, normally all of them) and, while the service runs and the reading window is open, they are dispatched again; there is no attempt counter, growing delay, or circuit breaker, so a persistently failing downstream, a closed T24 window, or a refused package is retried indefinitely and fills the log. Whether a repeated dispatch is harmful depends on the downstream services' idempotency (confirmation item).
+Recommendation: make the outcome a first-class input of the orchestration: log one summary line per package (service, type, folio count, result, and error), count consecutive failures per service and per package key, skip keys that are in cool-down in FiltraTomadas, raise a transition-only alert after N consecutive failures of a service, and remove the unused fields or implement them. Add tests for OK, PARCIAL, ERROR, null, timeout, and cancellation.
+Code block (csharp)
+WorkerResultadoDto r = await _despachadorWorker.DespacharPaqueteAsync(paquete, ip, puerto, ct);
+if (r.Cancelled) return;
+if (r.Claimed) _salud.RegistrarExito(paquete.Servicio, paquete.Tipo);
+else
+{
+    _salud.RegistrarFallo(paquete, r.Error);   // attempt count and next-eligible time per key
+    Logging.Write($"WARN|Despachador|{paquete.Servicio}/{paquete.Tipo}: {r.Error}");
+}
+Benefit: operators can see why work is not flowing, and a failing downstream stops generating an unbounded retry stream.
+DSP-FR-5 - A failed, empty, or unparsable balance query is treated as "insufficient funds" and stamps the work-plan master row with a customer-facing reason (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the funds branch (DespachadorWorker.cs:275-308 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L275-L308)), RevisarFondosAsync (DespachadorWorker.cs:432-450 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L432-L450)), the balance client that returns null for every failure (wsT24.cs:65-107 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L65-L107)), the stamping path (DespachadorWorker.cs:398-427 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L398-L427)), the update that writes the status (SQL/usp_despachador_actualizaCuentaSinFondos.sql:43-50 (../../General/Despachador/SQL/usp_despachador_actualizaCuentaSinFondos.sql#L43-L50)), the response schema with its balance fields and status values (services.xsd:20-23 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/services.xsd#L20-L23), services.xsd:74-82 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/services.xsd#L74-L82)), and the downstream mapping in the CMS replica procedure (017 usp_ReplicasActualizaOperacionesPendientesCMS.sql:111 (../../StoredProcedures/MWD_DB/DBMDW/CMS/Replicas/Bot/Procedures/017%20usp_ReplicasActualizaOperacionesPendientesCMS.sql#L111), 017 usp_ReplicasActualizaOperacionesPendientesCMS.sql:146-155 (../../StoredProcedures/MWD_DB/DBMDW/CMS/Replicas/Bot/Procedures/017%20usp_ReplicasActualizaOperacionesPendientesCMS.sql#L146-L155))
+Code block (csharp)
+decimal importe = op.Importe ?? 0m;                                                  // DespachadorWorker.cs L301
+if (!await RevisarFondosAsync(op.Num_Cuenta, importe, ct, contextoDespacho))
+{
+    await ProcesarCuentaSinFondosAsync(TipoOperacion.TMD, folioTmd, ct, contextoDespacho);
+    analisis.OperacionesNegadas.Add(folioTmd);
+}
+Code block (csharp)
+decimal? saldo = await _wsT24.ObtenerSaldoAsync(numCuenta, ct, contextoDespacho);
+if (saldo is null) return false;          // T24 error status, no balance row, unparsable amount: all "no funds"
+if (saldo >= importe) return true;
+...
+return false;                              // any non-cancellation exception also ends here
+Code block (sql)
+UPDATE dbo.tb_srv_plan_trabajo_maestro
+SET flg_con_error = 0, num_estatus_especial = 2,
+    err_descripcion = 'La cuenta no tiene los fondos para cubrir la transacción.'   -- actualizaCuentaSinFondos.sql L43-50
+ObtenerSaldoAsync returns null when T24 answers with an error status (an unknown account, rejected credentials, or a T24-side fault), when the response contains no balance row, when WORKINGBAL cannot be parsed, and after any other exception. The schema's status enumeration has five values (Success, TWSError, T24Error, T24Override, and T24Offline), so even a T24 that reports itself offline ends as "no funds"; the response also carries LEDGERBAL, CLEAREDBAL, and LOCKAMT, and the code compares only WORKINGBAL, so confirm that this is the balance the business means by "funds available". RevisarFondosAsync maps null and every exception other than cancellation to false, and the caller then attempts to write the business state "no funds" on the work-plan master row (num_estatus_especial = 2 with a fixed description) and to create or refresh the SF throttle row (a failed write is logged and its false result is ignored), and denies the operation. In the CMS replica procedure num_estatus_especial = 2 becomes status RECC with the reason OPERACION SIN FONDOS for the TMD table, so, if that replica process runs for these rows, a balance-service outage, a wrong or rotated middleware credential, or a malformed response is presented to the customer as a funds problem; the only trace of the real cause is then in the log lines of the balance client and the funds helper (the response status, T24's messages, and the logged exception). A related gap: op.Importe ?? 0m lets a null amount pass the check for any non-negative balance. The downstream effect depends on the replica process and on how CMS presents the status (confirmation item).
+Recommendation: return a three-state result (Suficientes, Insuficientes, Desconocido); stamp the master row and the SF row only for Insuficientes; for Desconocido, deny the operation for this cycle without writing the business state, log the real cause once per cause and cool-down, and raise a transition-only alert after N consecutive unknown results; treat a null amount as invalid data (log and skip) instead of zero.
+Code block (csharp)
+internal enum ResultadoFondos { Suficientes, Insuficientes, Desconocido }
+ 
+var r = await RevisarFondosAsync(op.Num_Cuenta, op.Importe, ct, contextoDespacho);   // the helper takes decimal? and returns Desconocido for a null amount
+if (r == ResultadoFondos.Insuficientes)
+    await ProcesarCuentaSinFondosAsync(TipoOperacion.TMD, folioTmd, ct, contextoDespacho);
+if (r != ResultadoFondos.Suficientes)
+    analisis.OperacionesNegadas.Add(folioTmd);
+Benefit: an infrastructure fault no longer turns into a "no funds" status on a customer operation, and operators see the actual cause.
+DSP-FR-6 - Past-dated operations are denied and logged at ERROR on every poll but never marked; the shared marking procedure is unused here and defined nowhere in the workspace (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the date rules (DespachadorWorker.cs:243-268 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L243-L268)), the pending selector that keeps returning them (SQL/usp_despachador_obtenerOperacionesPendientes.sql:81-89 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L81-L89)), the shared marker (ControlServicio.cs:163-178 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L163-L178)) and its procedure constant (ConstantesProcedimientosMUFG.cs:23 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/ConstantesProcedimientosMUFG.cs#L23)), and the fact that no .sql file in the workspace defines it (see Section 2)
+Code block (csharp)
+else if (operacion.Fec_Valor.Value < fechaSistema)
+{
+    Logging.WriteConContexto(contextoDespacho, $"ERROR|procesa_operaciones_planTrabajo|Se desea procesar una operación al {operacion.Fec_Valor.Value}.");
+    analisis.OperacionesNegadas.Add(operacion.Folio);
+    continue;
+}
+For services other than Lectura and HotScan (except TMD operations at the T24 service, see below), an operation whose value date is before the system date is added to the denied set and logged at ERROR, and nothing records the decision. The pending selector keeps returning the operation (it excludes rows that carry an error flag unless their special status is 2), so each in-window poll builds a package that contains it, takes a worker when one is free, writes the same ERROR line, and drops it again. Lectura handles the same condition by calling the shared MarcarErrorFechaPasada, which a search of the workspace finds at 34 call sites in 20 files (33 in 19 Lectura files and one in HotScan), yet the dispatcher never calls it, and no SQL file in StoredProcedures/MWD_DB or in this repository defines usp_despachador_MarcarErrorFechaPasada (DSP-FR-30). The effects are log noise, wasted worker and TopN slots (DSP-FR-9), and an operation that is not processed automatically, unless someone changes its value date, and raises no alert. TMD operations at the T24 service bypass both the past-date and the future-date rules because they are classified first (DespachadorWorker.cs:243-256 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L243-L256)). Which behavior is intended (deny and leave pending, or mark an error) is a business decision (confirmation item).
+Recommendation: after confirming the rule, mark each past-dated operation once through the shared marker (after the procedure is defined and deployed), raise one transition-only alert per service and type, keep the operation out of the next selection (the error filter does this once it is marked), and add a test for the repeated denial; if marking is not wanted, add an in-memory cool-down set so a denied key is not rebuilt into a package every cycle.
+Code block (csharp)
+else if (operacion.Fec_Valor.Value < fechaSistema)
+{
+    if (!_pasadasMarcadas.ContainsKey(operacion.Folio)
+        && await _controlServicio.MarcarErrorFechaPasada(operacion.Folio, ct))   // returns false on failure, so a failed attempt is retried
+        _pasadasMarcadas[operacion.Folio] = true;                                 // a ConcurrentDictionary; the worker needs IControlServicio and this set as new dependencies
+    analisis.OperacionesNegadas.Add(operacion.Folio);
+    continue;
+}
+Benefit: denied operations stop recycling through the queue, the log stays readable, and the error is visible to operators.
+DSP-FR-7 - One invalid control row aborts the whole refresh, stops the service at start-up, and freezes control updates afterwards (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the model constructor that throws (ControlServicio.cs:27-41 (../../General/Despachador/Aplicacion/Modelo/ControlServicio.cs#L27-L41)), the refresh that constructs it for every row inside the lock (OperacionServicio.cs:170-189 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L170-L189)), the start-up path that turns an exception into false (OperacionServicio.cs:69-83 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L69-L83), OperacionServicio.cs:131-144 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L131-L144)), the safety loop that only logs it (OperacionServicio.cs:90-120 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L90-L120)), the selector whose LEFT JOIN is filtered like an inner join (SQL/usp_despachador_obtenerControlServicio.sql:34-45 (../../General/Despachador/SQL/usp_despachador_obtenerControlServicio.sql#L34-L45)), and the ip_servicio column definition (SQL/Estructura SQL.sql:4-16 (../../General/Despachador/SQL/Estructura%20SQL.sql#L4-L16))
+Code block (csharp)
+if (string.IsNullOrEmpty(Ip) || Puerto == 0)
+{
+    throw new Exception("No se encontro Ip o Puerto válidos");     // ControlServicio.cs L36-40
+}
+The model constructor validates IP and port and throws a bare Exception that does not name the service. RefrescarControlDespachadorAsync creates one model per control row inside the state lock with no per-row handling, so a single row with an empty ip_servicio (the column is NOT NULL with a default of 127.0.0.1, but an empty string is legal) or a zero port makes the whole refresh throw. At start-up the exception reaches the catch in IniciarDespachadorAsync, which alerts and returns false, so the host stops the service (through the slow path described in DSP-FR-23). Afterwards, in the 30-second safety loop, the same exception is logged as ERROR|SafetyLoop every 30 seconds, the rest of the refresh (removal of vanished services and types, the RemoveAll of invalid pending packages) is skipped, and rows processed before the bad one have already been replaced, so priorities, maximums, and enable flags stay frozen in a partially updated state until someone fixes the row.
+Recommendation: validate each row separately: log a WARN that names the service and the bad value, disable that service, continue with the other rows, raise a transition-only alert, and build the new dictionaries outside the lock before swapping them in, so a failed refresh leaves the previous state intact.
+Code block (csharp)
+foreach (var dto in serviciosControl)
+{
+    if (!ControlServicio.TryCrear(dto, out var nuevo, out var motivo))
+    {
+        Logging.Write($"WARN|Despachador|Control ignorado para '{dto.Servicio}': {motivo}");
+        continue;
+    }
+    nuevos[dto.Servicio] = nuevo;
+}
+Benefit: one data-entry error in a control table no longer stops the dispatcher or freezes its control state.
+DSP-FR-8 - The loops and workers are fire-and-forget: start-up returns success before the loops and workers are tracked, shutdown does not drain, termination can be written twice, and the start-up scope ends under the running loops (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the two detached loops and the immediate true (OperacionServicio.cs:85-125 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L85-L125)), the dispatch loop's unprotected tail (OperacionServicio.cs:381-421 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L381-L421)), the detached workers (OperacionServicio.cs:463-525 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L463-L525)), the host's start-up scope and termination (ServiceHost.cs:85-128 (../../General/Despachador/Despachador/ServiceHost.cs#L85-L128)), the shared stop sequence (WindowsServiceHostBase.cs:113-157 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L113-L157)), and the runner's unobserved-exception hook (WindowsServiceProgramRunner.cs:113-123 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceProgramRunner.cs#L113-L123))
+Code block (csharp)
+_ = Task.Run(async () => { while (!ct.IsCancellationRequested) { ... } }, ct);     // L90: safety loop
+_ = Task.Run(async () => await CicloDespachadorAsync(ct), ct);                      // L123: dispatch loop
+return true;                                                                         // L125
+Code block (csharp)
+//Marca el termino del servicio...
+await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio);        // OperacionServicio.cs L420, no token, result dropped
+IniciarDespachadorAsync starts both loops with _ = Task.Run(...) and returns true as soon as they are started; the tasks are never stored, so nothing can await or restart them (a fault would reach only the runner's global unobserved-task handler, once the task is finalized), and the dispatch loop's termination write sits outside its try/catch. TerminacionAsync ignores the runningTask parameter and awaits only startupTask, so it never waits for in-flight workers or for the loops to finish before it writes the terminal state; the same ActualizaTerminacion is issued by the host (ServiceHost.cs:126 (../../General/Despachador/Despachador/ServiceHost.cs#L126)) and by the dispatch loop's tail (OperacionServicio.cs:420 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L420)) within the same stop sequence, the latter without a token and both with the result dropped. On stop, OnStop cancels the service token first, so a worker in the middle of an exchange is abandoned: the downstream service may already have processed the package while the dispatcher never records the outcome, and after a restart the selector returns the same operations again (at-least-once delivery; whether the downstream services tolerate it is a confirmation item). The start-up using scope ends when IniciarDespachadorAsync returns, but both loops and every later worker keep using the scoped Configuracion and the services resolved inside it; nothing is disposed today, so this is latent, but a scoped disposable added later would be disposed under the running loops. Exceptions are caught broadly inside the loops, but code outside those blocks (the tail at line 420 and the bookkeeping in each worker's finally) can fault a task that nobody observes; the shared runner records an unobserved exception in the Event Log only when the faulted task is finalized, which can be long after the event (expected behavior; not measured).
+Recommendation: keep the loop tasks and the in-flight worker tasks in a collection, expose DetenerAsync(CancellationToken) on the orchestrator that stops launching, cancels, awaits the workers within the wait token, and writes the terminal state exactly once, and have the host await it in TerminacionAsync; give the dispatcher an owned lifetime (a scope that lives as long as the loops) and wrap each background body in a final catch that logs and, for the two loops, restarts with back-off.
+Code block (csharp)
+private readonly ConcurrentDictionary<Guid, Task> _workers = new ConcurrentDictionary<Guid, Task>();
+private Task _bucleSeguridad, _bucleDespacho;
+ 
+public async Task DetenerAsync(CancellationToken esperaCt)
+{
+    Task drenado = Task.WhenAll(_bucleSeguridad, _bucleDespacho, Task.WhenAll(_workers.Values));
+    if (await Task.WhenAny(drenado, Task.Delay(Timeout.Infinite, esperaCt)) != drenado)
+        Logging.Write("WARN|Despachador|Los workers no terminaron dentro del tiempo de espera.");
+    using (var limpieza = new CancellationTokenSource(TimeSpan.FromSeconds(15)))        // starts after the drain, unlike the base's two tokens that start together
+        await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, limpieza.Token);
+}
+Benefit: start-up and shutdown become deterministic, in-flight dispatches are accounted for, and the terminal state is written once.
+Rewrite Recommended
+DSP-FR-9 - The pending selector keeps returning operations that the worker refuses, so they can fill the TopN window and be re-packaged every cycle (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: the selector's eligibility filter and ordering (SQL/usp_despachador_obtenerOperacionesPendientes.sql:81-89 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L81-L89), SQL/usp_despachador_obtenerOperacionesPendientes.sql:91-104 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L91-L104)), the window size computed in the DAO (ParametrizacionControlDao.cs:53-61 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L53-L61)), the fetch and the in-memory filter (OperacionServicio.cs:289-332 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L289-L332), OperacionServicio.cs:579-590 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L579-L590)), the worker refusals that leave the operation eligible (DespachadorWorker.cs:257-268 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L257-L268), DespachadorWorker.cs:286-307 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L286-L307), DespachadorWorker.cs:316-329 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L316-L329), DespachadorWorker.cs:185-188 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L185-L188), DespachadorWorker.cs:216-219 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L216-L219)), and the bookkeeping that forgets a finished package (OperacionServicio.cs:483-494 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L483-L494))
+Code block (sql)
+SELECT TOP (@TopN) Servicio, Tipo_Operacion, Folio, Num_Cuenta, Importe, Fec_Valor, Orden_Ejecucion
+FROM elegibles
+ORDER BY PrioridadTipo, rnTipo, Fec_Valor, Fec_Inicio_Detalle;          -- obtenerOperacionesPendientes.sql L91-104
+Code block (csharp)
+cmd.Parameters.Add(basedatosConexion.CrearParametro("@TopN", _configuracion.CantidadPaquete * cantidadMaximaWorkers));   // ParametrizacionControlDao.cs L58
+The selector returns the first TopN eligible operations, where TopN is CantidadPaquete x LimiteConcurrencia (the multiplication happens in the DAO, and the parameter is named cantidadMaximaWorkers). It has no notion of "already refused": operations that the worker keeps denying (past-dated, future-dated and not RECC, waiting in the "sin fondos" throttle, or any T24 operation while the T24 window is closed or the day is not a business day) stay eligible and are returned on every poll. The in-memory filter removes only keys that are currently pending or in process, and a refused package leaves both lists when its worker finishes, so each safety cycle fetches the same operations, chunks them into packages, takes a worker for each package (which for TMD can add database reads and a SOAP call per folio), and refuses them again. Ordering is by type priority first and by rank within the type second, so if enough refused operations rank ahead of the rest they can fill the whole TopN window and keep later operations of the same priority group, or of lower-priority types, from being fetched at all (head-of-line blocking). A concrete case follows from the design: while the T24 window is closed, every pending T24 operation is refused as a whole package, yet all of them keep ranking ahead of any lower-priority work that the reading window still allows. Whether this happens depends on the production values of CantidadPaquete and LimiteConcurrencia and on the priorities in the control tables, none of which are visible here (confirmation item).
+Recommendation: make the selector aware of refusals: keep an in-memory cool-down (key to next-eligible time) fed by the worker outcome (DSP-FR-4), pass the active cool-down folios to the procedure as a table-valued parameter so that it can exclude them before TOP, mark past-dated operations (DSP-FR-6), and log a warning when a fetched window consists entirely of keys that are in memory or in cool-down ("window saturated").
+Code block (sql)
+-- usp_despachador_ObtenerOperacionesPendientes: new parameter, applied before TOP
+@Excluir dbo.tb_despachador_folioConcatenado READONLY
+...
+WHERE det_actual.rnPaso = 1
+  AND NOT EXISTS (SELECT 1 FROM @Excluir x WHERE x.Folio = det_actual.folio)
+Benefit: refused work stops consuming the fetch window and worker slots, so lower-priority work is not starved.
+DSP-FR-10 - The host derives from WindowsServiceDespachador but ignores its hooks, so the shared loop idles while the orchestrator re-implements the wake-up loops (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: the shared base with its semaphore loop, safety wake-up, and three hooks (WindowsServiceDespachador.cs:14-30 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceDespachador.cs#L14-L30), WindowsServiceDespachador.cs:51-124 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceDespachador.cs#L51-L124), WindowsServiceDespachador.cs:126-139 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceDespachador.cs#L126-L139)), the host that overrides none of them (ServiceHost.cs:25-31 (../../General/Despachador/Despachador/ServiceHost.cs#L25-L31)), and the orchestrator's own semaphore, safety loop, and wake-up (OperacionServicio.cs:34 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L34), OperacionServicio.cs:90-120 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L90-L120), OperacionServicio.cs:381-421 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L381-L421), OperacionServicio.cs:536-542 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L536-L542))
+The base class provides a managed long-running task with a semaphore-driven loop, a 30-second safety wake-up, orderly stop (the finally block awaits the safety task and calls AlFinalizarLoopDespachadorAsync), and the hooks AntesDeLoopDespachadorAsync, IteracionDespachadorAsync, and AlFinalizarLoopDespachadorAsync. ServiceHost overrides none of them, so at run time the base wakes every 30 seconds and executes an empty iteration, while OperacionServicio carries its own SemaphoreSlim, its own 30-second safety loop, and its own Despertar: two parallel wake-up mechanisms with duplicated semantics, and a long-running task that the host's termination ignores (the runningTask parameter is unused, DSP-FR-8). A text search finds no other class that derives from WindowsServiceDespachador, so the base has never been exercised by a second consumer.
+Recommendation: use the base as designed: move the initial refresh and fetch into AntesDeLoopDespachadorAsync, one dispatch pass into IteracionDespachadorAsync, and the single terminal write and the worker drain into AlFinalizarLoopDespachadorAsync, and let Despertar call DespertarDespachador(); keep one safety mechanism (the base's, with the data refresh invoked from the iteration) instead of two.
+Code block (csharp)
+protected override Task AntesDeLoopDespachadorAsync(CancellationToken ct) => _operacion.PrepararAsync(ct);          // extracted from IniciarDespachadorAsync
+protected override Task IteracionDespachadorAsync(CancellationToken ct) => _operacion.IteracionAsync(ct);           // extracted from CicloDespachadorAsync
+protected override async Task AlFinalizarLoopDespachadorAsync(CancellationToken ctCancelado)      // the base calls this when the loop exits; on an ordinary stop its token is already cancelled
+{
+    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        await _operacion.DetenerAsync(cts.Token);                                                  // the drain needs its own bounded token
+}
+Benefit: one loop, one wake-up path, and a stop sequence that the base already awaits.
+DSP-FR-11 - Shared mutable state is changed without synchronization, and logging happens under the state lock (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: the transition flags on the shared configuration object (DespachadorWorker.cs:167-221 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L167-L221), OperacionServicio.cs:676-706 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L676-L706)), the check-then-release wake-up (OperacionServicio.cs:536-542 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L536-L542)), the logging calls inside the lock (OperacionServicio.cs:342-370 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L342-L370)), the 2-second lock timeout that returns zero workers (OperacionServicio.cs:547-563 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L547-L563)), and the two semaphores that are never disposed (OperacionServicio.cs:34 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L34), OperacionServicio.cs:46 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L46))
+Code block (csharp)
+lock (_estadoLock)
+{
+    if (_paquetesPendientes.Count >= _configuracion.LimitePaquetesPendientes.Value)
+    {
+        Logging.Write("AVISO|Se están omitiendo paquetes por exceso en memoria. ...");   // log call under the lock, L346
+        return Task.CompletedTask;
+    }
+(1) The out-of-hours and non-business-day alerts rely on nullable flags (EnDiaHabil, EsHorarioOperacion, EsHorarioLectura) on the one Configuracion instance that every T24 worker, and both loops for the reading window, read and write without a lock, so two threads can see the old state and each insert the alert; the cost is a duplicate alert row at a transition. (2) Despertar checks CurrentCount == 0 and then releases without a lock, and the semaphore has no maximum count, so concurrent callers can leave extra signals, each causing one more pass through the loop; the shared base makes the same check under a lock. (3) AgregarNuevosPaquetes calls Logging.Write while holding _estadoLock (lines 346, 356, and 362), and every worker completion and every candidate selection needs the same lock; the shared logger normally just enqueues the line for a background writer and falls back to a synchronous file write only when its bounded queue is full, so the cost is formatting work under the lock and, in the full-queue case, file I/O under it; WorkersDisponiblesGlobal waits only 2 seconds for the same lock and then reports zero available workers, so a long hold can produce spurious contention. (4) The two SemaphoreSlim instances are never disposed; because the orchestrator lives as long as the process, the effect is nil today. (5) Despertar writes two DEBUG lines per call and WorkersDisponiblesGlobal one per call (twice per dispatch pass), which makes the log verbose.
+Recommendation: encapsulate each window state in a small class whose transition method uses Interlocked.Exchange and returns whether the state changed, so exactly one caller alerts; collect log messages inside the lock and write them after it; make the orchestrator IDisposable; and put the DEBUG chatter behind a level switch.
+Code block (csharp)
+private int _horarioLectura = -1;   // -1 unknown, 0 closed, 1 open
+private bool CambioHorario(bool abierto) => Interlocked.Exchange(ref _horarioLectura, abierto ? 1 : 0) != (abierto ? 1 : 0);
+Benefit: single alerts per transition, shorter lock hold times, and a quieter log.
+DSP-FR-12 - Pid.Value and the dispatcher limits are dereferenced as nullable values without a guard (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: the six Pid.Value reads (ServiceHost.cs:93 (../../General/Despachador/Despachador/ServiceHost.cs#L93), OperacionServicio.cs:140 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L140), OperacionServicio.cs:697 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L697), DespachadorWorker.cs:103 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L103), DespachadorWorker.cs:181 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L181), DespachadorWorker.cs:212 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L212)), the unguarded CantidadPaquete.Value and LimitePaquetesPendientes.Value (OperacionServicio.cs:316 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L316), OperacionServicio.cs:344 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L344)), the nullable arithmetic in the DAO (ParametrizacionControlDao.cs:58 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L58)), the shared assignment that makes the PID safe in production (Parametrizacion.cs:52-84 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L52-L84)), and the nullable declarations (Configuracion.cs:66-71 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Modelos/Configuracion/Configuracion.cs#L66-L71))
+The shared ObtenerProcesoActualAsync always assigns the PID before the first read, and the host copies non-nullable integers into the nullable limits, so none of these reads fails in the production flow (GEN-8 is "No, latent"). The hazard is how they fail if the contract is ever broken: the reads at OperacionServicio.cs:140 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L140), OperacionServicio.cs:697 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L697), DespachadorWorker.cs:181 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L181), and DespachadorWorker.cs:212 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L212) are inside paths that report a problem, so a missing PID would raise InvalidOperationException from inside the error handler and hide the original failure; a null CantidadPaquete would become a null @TopN, which TOP is expected to reject (not run), and the adapter would turn that failure into an empty result (DSP-FR-15).
+Recommendation: resolve the settings once into an immutable, validated options object (DSP-FR-25) and use GetValueOrDefault() for the PID in alert paths.
+Code block (csharp)
+await _alertas.InsertarAlerta(null, null, _configuracion.NombreServicio, ConstantesClaveAviso.Critico, null,
+    _configuracion.Pid.GetValueOrDefault(), _configuracion.NombreProceso, ex);
+Benefit: error handling cannot throw a second, misleading exception.
+Nice to Rewrite if Time Permits
+DSP-FR-13 - FiltraTomadas is quadratic with string allocations under the lock, and the dictionaries use inconsistent key comparers (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: the filter and key builder (OperacionServicio.cs:579-604 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L579-L604)), the call per fetched operation (OperacionServicio.cs:304-306 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L304-L306)), the case-insensitive set against case-sensitive dictionaries (OperacionServicio.cs:40-43 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L40-L43), OperacionServicio.cs:166-168 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L166-L168), OperacionServicio.cs:172 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L172))
+Code block (csharp)
+return _paquetesPendientes.Any(p => p.Operaciones.Any(o => GetKey(o) == key))
+    || _paquetesEnProceso.Any(p => p.Operaciones.Any(o => GetKey(o) == key));     // GetKey allocates a string per comparison
+For each of the N operations returned by the selector, FiltraTomadas takes the state lock and builds a key string for each operation of each in-memory package it scans (all of them when the operation is new), so one fetch performs up to about N x M string allocations while holding the lock that the workers need. The refresh builds serviciosVigentes with OrdinalIgnoreCase, but estadoPorServicio and estadoPorTipo use the default ordinal comparer, so a control row that differs from the operation data only in case (t24 against T24) is found by one lookup and missed by another.
+Recommendation: build one HashSet<string> of the in-memory keys under a single lock acquisition, filter the fetched list against it outside the lock, and use one comparer (OrdinalIgnoreCase, or normalize at the boundary) for every service and type key.
+Code block (csharp)
+HashSet<string> enMemoria;
+lock (_estadoLock)
+    enMemoria = new HashSet<string>(_paquetesPendientes.Concat(_paquetesEnProceso)
+        .SelectMany(p => p.Operaciones).Select(GetKey), StringComparer.Ordinal);
+var nuevas = pendientes.Where(o => !enMemoria.Contains(GetKey(o))).ToList();
+Benefit: linear work, a short lock hold, and one key-comparison rule.
+DSP-FR-14 - Hygiene: obsolete constants, alert text that carries the log prefix, generic exceptions, magic numbers, dead members, and a duplicate type name (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: the obsolete constants (OperacionServicio.cs:679-684 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L679-L684) against DespachadorWorker.cs:195-199 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L195-L199) and ConstantesGenerales.cs:6-7 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConstantesGenerales.cs#L6-L7)), the alert message with a log prefix (DespachadorWorker.cs:211 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L211)), the seven new Exception( sites (ControlServicio.cs:39 (../../General/Despachador/Aplicacion/Modelo/ControlServicio.cs#L39), wsT24.cs:76 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L76), wsT24.cs:112 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L112), wsT24.cs:117 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L117), DespachadorWorker.cs:183 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L183), DespachadorWorker.cs:214 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L214), OperacionServicio.cs:699 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L699)), the magic numbers (OperacionServicio.cs:61-63 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L61-L63), OperacionServicio.cs:96 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L96), OperacionServicio.cs:517 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L517), DespachadorWorker.cs:111 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L111), OperacionServicio.cs:550 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L550), PeticionTCP.cs:123-129 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L123-L129)), the dead code (DespachadorWorker.cs:200-201 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L200-L201), ServiceHost.cs:59 (../../General/Despachador/Despachador/ServiceHost.cs#L59), ControlServicio.cs:16-17 (../../General/Despachador/Aplicacion/Modelo/ControlServicio.cs#L16-L17), WorkerResultadoDto.cs:13 (../../General/Despachador/Aplicacion/DTOs/WorkerResultadoDto.cs#L13), ServiceHost.cs:69 (../../General/Despachador/Despachador/ServiceHost.cs#L69)), the duplicate type name (OperacionServicio.cs:40-41 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L40-L41), OperacionServicio.cs:176 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L176), OperacionServicio.cs:463 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L463), OperacionServicio.cs:609 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L609)), the log lines without a module (OperacionServicio.cs:346 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L346), OperacionServicio.cs:465 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L465)), and the window parse (OperacionServicio.cs:685-686 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L685-L686), DespachadorWorker.cs:200-201 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L200-L201), ConversionesComunes.cs:39-53 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Conversiones/ConversionesComunes.cs#L39-L53))
+• Obsolete constants. The reading-window check reads HoraLecInicio and HoraLecFin from the [Obsolete] ConstantesGenerales (two constants, four references), while the rest of the solution uses ConstantesParametrosSistema; the values are the same, but each reference compiles with a CS0618 obsolescence warning.
+• Alert text with the log prefix. The out-of-window alert is stored with the message ERROR|Envia_Folios|El servicio ... está fuera de horario, which duplicates the severity and module inside the stored text; the neighboring alerts use plain text.
+• Generic exceptions. Seven new Exception(...) sites lose the exception type; the alert writer needs an exception only as a payload, so InvalidOperationException or a small domain exception would do, and the model constructor's message should name the service (DSP-FR-7).
+• Magic numbers. The 30-second safety interval, the default of 10 workers, the 300 ms delay, the 30,000 ms timeout, the 2-second lock wait, and the 30-second connect fallback are literals scattered over three files; they belong in one options object (DSP-FR-25).
+• Dead members. The || !esDiaHabil term in the window condition is unreachable because the method returns earlier when the day is not a business day; ForzaEjecucionServicios is copied by the host and never read; ErroresRecientes, LatenciaPromedio, and Paused are never used; and the host registers the shared EstadoHorarioOperacion as a singleton that nothing in the solution consumes.
+• Duplicate type name. The solution defines Aplicacion.Modelo.ControlServicio while the shared library also has a ControlServicio (the class behind IControlServicio), which invites confusion: the orchestrator already qualifies its local type in several places, and the host's Register<IControlServicio, ControlServicio> resolves to the shared one; rename the local type (for example ControlServicioDespacho).
+• Log format. The "paquetes omitidos" line is AVISO|Se están omitiendo... without the module segment that most other lines have, and the worker-launch line has neither level nor module, so a LEVEL|Module|Message parser misreads both.
+• Schedule parsing. The window values are parsed with the shared TimeSpan.TryParse helper, so a value written 0600 is read as 600 days and an overnight window (inicio later than fin) is not supported; the tests use HH:mm, and the production format is a confirmation item (CS-FR-5; GEN-12 is "No, latent"). An out-of-window state raises an ERROR-level alert each time the reading window closes, although it is a normal condition.
+Recommendation: replace the obsolete constants, rename the duplicate type, delete the dead members, centralize the literals in an options object, and parse windows with an explicit HH:mm format that also supports overnight ranges.
+Benefit: fewer warnings and surprises, and a smaller surface for the real defects above.
+4.3 InfraestructuraDespachador (Tier 1)
+MustChange / Rewrite
+DSP-FR-15 - All six read paths ignore Exito, so a failed read looks like "no data": the control refresh empties the queue, the TMD funds check is skipped, and the retry throttle is bypassed (GEN-11, Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the three reads in ParametrizacionControlDao.cs (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L33-L61) and the three reads in RecuperacionDatos.cs (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L31-L96), the four strict writes (RecuperacionDatos.cs:101-152 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L101-L152)), the callers (OperacionServicio.cs:152-158 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L152-L158), OperacionServicio.cs:295-297 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L295-L297), DespachadorWorker.cs:283-284 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L283-L284), DespachadorWorker.cs:316-317 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L316-L317), DespachadorWorker.cs:340-345 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L340-L345), DespachadorWorker.cs:362-367 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L362-L367)), and the shared adapter (RepositorioMaestro.cs:385-390 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L390), RepositorioMaestro.cs:641-654 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L641-L654), RepositorioMaestro.cs:668-690 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L668-L690)); root cause LIB-FR-56 in MUFG_Library_Recommendations.md (MUFG_Library_Recommendations.md)
+Code block (csharp)
+var resultado = await EjecutarStoredProcedureQuery<ControlServicioDto>(ConstantesServicio.UspObtenerControlServicio, null, ct);
+return resultado.Data;                                                       // ParametrizacionControlDao.cs L36-37: Exito never read
+Code block (csharp)
+return new HashSet<long>(resultado.Data.Select(x => x.Folio));              // RecuperacionDatos.cs L53: a failed read is an empty set
+The shared adapter turns an execution-time SqlException into Exito = false (with no mapped rows in the usual case) and writes no log entry; the six read DAOs return resultado.Data, or a value derived from it, without reading Exito (the repositories contain no .Exito reference at all). A deadlock victim, a timeout, a permission error, or a procedure that does not exist in the target database is therefore indistinguishable from "nothing found", and the procedures' own CATCH blocks log to auditoria.errorlog only for errors raised inside the procedure body, not for failures that occur before it runs. The consequences depend on the caller. The control refresh reads an empty result as "no service or type is configured", so it disables or removes every service and type and drops every pending package (OperacionServicio.cs:192-208 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L192-L208), OperacionServicio.cs:259-272 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L259-L272)) until the next successful refresh, with no log line that names the cause. The pending fetch reads it as "0 pending operations" (a DEBUG line), so the service looks idle and healthy. ObtenerUltimoAliasProcesoAsync returns an empty set, so no TMD operation is treated as being at T24_REGISTRO, the funds check is skipped, and the operations are dispatched unchecked: this is the one place where a database fault bypasses a business control (fail-open). VerificarSinFondosAsync returns "no history", so the retry throttle is bypassed and the balance service is called again. RevisarRECCAsync returns "none is RECC", which fails closed (future-dated cancellations are denied for that cycle). The four write DAOs are strict (validarAfectacion: true), so they return true or throw, and the false branches in their callers, such as the failed-delete check at DespachadorWorker.cs:363-367 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L363-L367), cannot be reached.
+Recommendation: read Exito in every read DAO and throw a descriptive exception that names the procedure, so the callers' existing catch blocks treat it as a failure; let each caller state its fail-open or fail-closed choice explicitly (the TMD funds check must fail closed, that is, skip the package for this cycle); and fix the root in the shared adapter so that a SqlException is logged with the procedure name (LIB-FR-56).
+Code block (csharp)
+var resultado = await EjecutarStoredProcedureQuery<ControlServicioDto>(ConstantesServicio.UspObtenerControlServicio, null, ct);
+if (!resultado.Exito)
+    throw new InvalidOperationException($"{ConstantesServicio.UspObtenerControlServicio} falló: {resultado.MensajeError}", resultado.Exception);
+return resultado.Data;
+Benefit: a database fault is visible, no longer empties the queue, and cannot silently skip a funds check.
+DSP-FR-16 - The T24 balance call is plain HTTP with the middleware user name and password in the SOAP body, and the code cannot use HTTPS (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the client construction and the credentials in the request (wsT24.cs:31-47 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L31-L47)), the parameter keys and the sensitive flag (ConstantesServicio.cs:11-16 (../../General/Despachador/Aplicacion/Enums/ConstantesServicio.cs#L11-L16), OperacionServicio.cs:662-665 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L662-L665)), the design-time metadata and addresses (Reference.svcmap:21-27 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/Reference.svcmap#L21-L27), T24WebServicesImplService.wsdl:35-39 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/T24WebServicesImplService.wsdl#L35-L39), configuration91.svcinfo:72-77 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/configuration91.svcinfo#L72-L77), configuration91.svcinfo:114-119 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/configuration91.svcinfo#L114-L119)), the schema that requires password and userName in the body (services.xsd:40-46 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/services.xsd#L40-L46)), and the executed probe in Section 2; precedent LEC-FR-35 in Lectura_Recommendations.md (Lectura_Recommendations.md)
+Code block (csharp)
+var client = new T24WebServicesImplClient(
+    new BasicHttpBinding(),                                   // Security.Mode = None
+    new EndpointAddress(endpointWebService));
+...
+company  = _configuracion.ParametrosSistema[ConstantesServicio.ParametroWsT24MwCompany],
+userName = _configuracion.ParametrosSistema[ConstantesServicio.ParametroWsT24MwUsername],
+password = _configuracion.ParametrosSistema[ConstantesServicio.ParametroWsT24MwPassword]     // L44-46, sent in the SOAP body
+ObtenerSaldoAsync builds the client with a default BasicHttpBinding, whose security mode is None (plain HTTP; executed probe), and sends the middleware company, user name, and password as fields of the SOAP request body; the schema requires the password and user name, and the generated proxy, the WSDL, and the .svcinfo all carry an http:// address (the design-time metadata also records an internal IP address and port). Anyone who can observe traffic between the dispatcher host and the middleware therefore sees the credentials and the account number of every balance query. Moving to TLS is not a configuration change: the endpoint comes from the parameter ACCT_BALANCE_API_ENDPOINT, but a default BasicHttpBinding rejects an https:// address with ArgumentException: The provided URI scheme 'https' is invalid; expected 'http' (executed probe), so the code must change first. The production endpoint value and whether the middleware offers HTTPS or token-based authentication are not visible here (confirmation item); the finding is rated Major in line with the same pattern in the Lectura report.
+Recommendation: select the security mode from the endpoint scheme (transport security for https), require HTTPS in non-development environments, set explicit timeouts (DSP-FR-17), prefer a service-side token or a WS-Security header over body credentials if the middleware supports it, keep the password in a protected store, and rotate the middleware credentials if cleartext exposure is plausible.
+Code block (csharp)
+var uri = new Uri(endpointWebService);
+if (uri.Scheme != Uri.UriSchemeHttps && !_opciones.PermitirHttpEnDesarrollo)     // hypothetical development-only switch
+    throw new InvalidOperationException("El endpoint de saldos debe usar HTTPS.");
+var binding = new BasicHttpBinding(uri.Scheme == Uri.UriSchemeHttps ? BasicHttpSecurityMode.Transport : BasicHttpSecurityMode.None)
+{
+    SendTimeout = TimeSpan.FromSeconds(15), ReceiveTimeout = TimeSpan.FromSeconds(15),
+    OpenTimeout = TimeSpan.FromSeconds(5), CloseTimeout = TimeSpan.FromSeconds(5)
+};
+Benefit: credentials and account numbers are no longer readable on the wire, and the endpoint can be moved to HTTPS by configuration.
+DSP-FR-17 - A new WCF client is created for every balance query and is never closed or disposed, and the default timeouts apply (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the per-call client (wsT24.cs:31-36 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L31-L36)), the only cleanup, an Abort registered for cancellation (wsT24.cs:59-63 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L59-L63)), the catch blocks without a finally (wsT24.cs:97-106 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L97-L106)), the generated client type (Reference.cs:605-607 (../../General/Despachador/Infraestructura/Connected%20Services/wsT24/Reference.cs#L605-L607)), the sequential per-folio loop that calls it (DespachadorWorker.cs:286-307 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L286-L307)), and the default timeouts reported by the executed probe (Section 2)
+Code block (csharp)
+using (ct.Register(() => client.Abort()))
+{
+    response = await client.CONSULTASALDOCUENTAAsync(request);            // WsT24.cs L60-63
+}
+// no Close(), Dispose(), or Abort() on the success or the failure path
+Each call creates a T24WebServicesImplClient, which owns its own channel factory and channel, and the only cleanup is an Abort that runs when the dispatcher token is cancelled; on success and on failure the client is simply dropped. The channel and its factory are therefore expected to stay allocated until garbage collection, in proportion to the number of queries (not measured). The binding is new BasicHttpBinding() with no timeouts set, so the executed probe's defaults apply: a send timeout of one minute and a receive timeout of ten minutes, and nothing applies the dispatcher's 30-second limit to this call. ProcesarOperacionesTmdAsync awaits the queries one folio at a time, so with a stalled middleware a package of TMD operations can hold its worker for up to a minute per folio.
+Recommendation: keep one long-lived ChannelFactory (or one client) and create a channel per call, or at least close on success and abort on failure in a finally; set explicit send and receive timeouts shorter than the dispatcher's own; and bound the per-package funds-check time (or run the folio queries with a small degree of parallelism).
+Code block (csharp)
+var client = new T24WebServicesImplClient(binding, address);
+try
+{
+    response = await client.CONSULTASALDOCUENTAAsync(request);
+    client.Close();
+}
+catch
+{
+    client.Abort();
+    throw;
+}
+Benefit: no leaked channels, and a stalled middleware cannot block a worker for minutes.
+DSP-FR-18 - Account numbers and balances are written to the log at INFO level (GEN-5, Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the funds-check log line (DespachadorWorker.cs:436 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L436)), the balance log line (wsT24.cs:94 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L94)), the unused masking overloads in the shared logger (Logging.cs:194-199 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L194-L199)) and its key-based masking that does not match these lines (FileLogger.cs:145-178 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/FileLogger.cs#L145-L178)), and the request that carries no account or amount (DespachadorWorker.cs:99-107 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L99-L107)); precedents LEC-FR-16, SAL-FR-21, LIB-FR-37, and ETL-FR-12
+Code block (csharp)
+Logging.WriteConContexto(contextoDespacho, $"INFO|FondosSuficientes|Consultando saldo de la cuenta {numCuenta}. Valida importe mínimo de {importe}");   // W L436
+Logging.WriteConContexto(contextoDespacho, $"INFO|FondosSuficientes|Consulta de saldo cuenta {numCuenta}: {workingBal}");                           // WS L94
+Every funds check writes the full account number and the amount to validate, and every response with a parseable balance writes the account number and the current working balance, at the normal INFO level, to the file log under the configured log path. The shared file logger's automatic masking recognizes only KEY=VALUE and Parámetro 'KEY' = 'VALUE' text whose key is a listed sensitive name or contains a delimited sensitive token (such as CUENTA or ACCOUNT); these free-text lines match neither form, and the call sites use no explicit masking overload. Balances and account numbers are sensitive data that the baseline expects to be masked or omitted in logs. The shared logger already offers masking overloads (Write(string, bool) and Write(string, string)), which this code does not use, and the contextual variant WriteConContexto has no masked overload. The folio is already in the correlation context, so the line does not need the account to be traceable. The TCP request, by contrast, carries no account number or amount.
+Recommendation: log the folio and a masked account (last four digits) plus the outcome (suficientes or insuficientes), never the balance; add a masked overload for the contextual logger; and review the retention and access of the existing log files.
+Code block (csharp)
+private static string Mascara(string cuenta) =>
+    string.IsNullOrEmpty(cuenta) || cuenta.Length <= 4 ? "****" : new string('*', cuenta.Length - 4) + cuenta.Substring(cuenta.Length - 4);
+ 
+bool suficiente = saldo.HasValue && saldo >= importe;     // inside RevisarFondosAsync, once the balance is known
+Logging.WriteConContexto(contextoDespacho, $"INFO|FondosSuficientes|Consulta de saldo, cuenta {Mascara(numCuenta)}: {(suficiente ? "suficiente" : "insuficiente")}");
+Benefit: the log no longer exposes customer account data or balances.
+DSP-FR-19 - The response read ignores the timeout and cancellation on .NET Framework, so a silent downstream service holds a worker forever (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the timeout and linked token (PeticionTCP.cs:64-72 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L64-L72)), the read loop (PeticionTCP.cs:99-118 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L99-L118)), the cancellation catch (PeticionTCP.cs:82-85 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L82-L85)), the connect step (PeticionTCP.cs:38-46 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L38-L46)), the configured timeout (DespachadorWorker.cs:111-112 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L111-L112)), the counters that a stuck worker never releases (OperacionServicio.cs:483-523 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L483-L523)), and the executed probe in Section 2
+Code block (csharp)
+using (var timeoutCts = new CancellationTokenSource(timeout))
+using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token))
+{
+    byte[] respLengthBuffer = await ReadExactAsync(stream, 4, linkedCts.Token);      // L64-68
+Code block (csharp)
+int read = await stream.ReadAsync(buffer, offset, length - offset, ct);              // L108-109
+The dispatcher intends TimeoutDespachadoMs (30 seconds by default) to bound the exchange. The connect step honors it (Task.WhenAny with a delay), but the response read relies on NetworkStream.ReadAsync(buffer, offset, count, token), and on .NET Framework that overload checks the token only before the read starts: in the executed probe, a token cancelled after 1,500 ms left the read pending after 6,039 ms, and it completed only when the socket was closed. If a downstream service accepts the connection and never answers (busy, deadlocked, or a stale process listening on the port), the worker waits indefinitely: the global, per-service, and per-type counters are not decremented while the read stays pending, so after as many hangs as a service's maximum (7 workers per service in the seed data) that service stops receiving packages, and after as many as the global limit (10 when LimiteConcurrencia is not configured) the dispatcher stops dispatching altogether, without any timeout or error log line (the send is logged, nothing after it); a stop request cannot cancel the pending read either, so the abandoned worker and its socket live until the process exits. The same method has three smaller defects: in the response read, a timeout (once it is observed) and a service stop both end as OperationCanceledException, so the caller cannot tell them apart (the client rethrows, the worker records Cancelled, and nothing reads that flag, DSP-FR-4); the write has no timeout; and Task.Delay(timeout, ct) in the connect step is not cancelled when the connection completes first, so each call keeps a timer alive for up to the full timeout.
+Recommendation: enforce the deadline by closing the socket, which is what aborts a pending read on .NET Framework: register linkedCts.Token.Register(() => client.Close()) for the whole exchange, translate a timeout into a TimeoutException that is distinct from cancellation, apply the same deadline to the write, and cancel the connect-step delay.
+Code block (csharp)
+using (var timeoutCts = new CancellationTokenSource(timeout))
+using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token))
+using (linkedCts.Token.Register(() => client.Close()))     // closing the socket aborts a pending read on .NET Framework
+{
+    try { /* write, then ReadExactAsync(stream, 4, ...), ReadExactAsync(stream, length, ...) */ }
+    catch (Exception) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+    {
+        throw new TimeoutException($"Sin respuesta de {destino}:{puerto} en {timeout.TotalSeconds} s.");
     }
 }
-
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using Aplicacion.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Threading.Tasks;
-
-namespace Aplicacion
+Benefit: a hung downstream service costs one worker for one timeout instead of a worker slot forever, and a timeout is distinguishable from a shutdown.
+DSP-FR-20 - The response length prefix is used for allocation without validation (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the unchecked length (PeticionTCP.cs:68-72 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L68-L72)), the allocation (PeticionTCP.cs:99-104 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L99-L104)), the server-side limits that the client lacks (WindowsTcpServiceHostBase.cs:27 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L27), WindowsTcpServiceHostBase.cs:66-87 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L66-L87)), and the 32-bit host (Despachador.csproj:21 (../../General/Despachador/Despachador/Despachador.csproj#L21))
+Code block (csharp)
+int respLength = BitConverter.ToInt32(respLengthBuffer, 0);
+byte[] respBuffer = await ReadExactAsync(stream, respLength, linkedCts.Token);      // L69-71: new byte[length] from a peer-supplied value
+The four bytes read from the peer go straight into new byte[length]. A negative value raises OverflowException; a very large value raises OutOfMemoryException or forces a multi-hundred-megabyte allocation in a process that is built for x86 (a 32-bit process has 2 GB of address space unless the executable is large-address-aware, shared with every other worker). The receiver base used by the downstream services enforces length > 0 and length <= MaxFrameSizeBytes (1 MiB by default, and overridable) on requests; the client applies neither check to the response. The IP address and port come from a database table and the response is neither encrypted nor authenticated (DSP-FR-21), so any process that answers on that port, or a faulty service, controls this allocation. The generic catch turns the exceptions into an ERROR result, but memory exhaustion in a 32-bit process would affect every worker, not only this one.
+Recommendation: validate 0 < length <= MaxRespuestaBytes before allocating (a limit agreed as part of the protocol; the receivers' default frame limit is 1 MiB, so confirm that valid responses fit), raise InvalidDataException for anything else, and log the peer address and the rejected length.
+Code block (csharp)
+const int MaxRespuestaBytes = 1024 * 1024;
+if (respLength <= 0 || respLength > MaxRespuestaBytes)
+    throw new InvalidDataException($"Longitud de respuesta inválida: {respLength}.");
+Benefit: a faulty or hostile responder can no longer drive the dispatcher's memory use.
+Rewrite Recommended
+DSP-FR-21 - The dispatch channel is unauthenticated AES-CBC with one static shared key, and the response is plaintext and unauthenticated (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: the client encryption (PeticionTCP.cs:52-60 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L52-L60)), the key source and the cipher (Encriptacion.cs:19-22 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Seguridad/Encriptacion.cs#L19-L22), Encriptacion.cs:41-63 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Seguridad/Encriptacion.cs#L41-L63)), the plaintext response (PeticionTCP.cs:74-77 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L74-L77), WindowsTcpPaqueteServiceHostBase.cs:40-41 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpPaqueteServiceHostBase.cs#L40-L41)), the receiver's decryption (WindowsTcpPaqueteServiceHostBase.cs:70-72 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpPaqueteServiceHostBase.cs#L70-L72)), the request-only design note (ArquitecturaCifradoTCP.md:1-19 (../../General/Despachador/Docs/ArquitecturaCifradoTCP.md#L1-L19)), and the loopback default (WindowsTcpServiceHostBase.cs:26 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L26)); root LIB-FR-39
+The request is AES-CBC with a random IV and PKCS7 padding and no authentication tag, using the single configuration value LLAVE_ENCRIPTADODESPACHADOR, which the dispatcher and the receivers read through the same call (despite its name, GenerarLlave() generates nothing: it returns that configured value); the code carries no in-band key identifier and no automated rotation, and the design note describes a coordinated manual rotation. Unauthenticated CBC provides confidentiality only: the ciphertext is malleable, there is no replay protection (the request carries EnviadoEn, but this review found no check of it in the shared receiver base), and there is no peer authentication. The response, which is the only signal that tells the dispatcher a package was accepted, is plaintext JSON with no integrity protection. Today the dispatcher discards the result (DSP-FR-4), so the missing integrity cannot change any state; once that finding is fixed, a forged Resultado = 1 from a rogue listener would be believed. The default topology limits the exposure: the receiver base listens on loopback and the control table defaults to 127.0.0.1, so only local processes can connect. Whether any downstream service runs on another host (a non-loopback ip_servicio) is not visible here (confirmation item).
+Recommendation: add integrity with encrypt-then-MAC (HMAC-SHA256 under a second key, verified with a hand-written fixed-time comparison before decrypting; .NET Framework 4.8 has neither AesGcm nor CryptographicOperations.FixedTimeEquals), protect the response with the same scheme, add a key identifier and a nonce that the receiver tracks (a timestamp window alone only bounds the age of a replay), keep the receivers on loopback unless mutual TLS is introduced, and keep the key out of logs and plain configuration files.
+Code block (csharp)
+// sender: iv | ciphertext | HMAC(macKey, iv | ciphertext)
+// receiver: verify the MAC (constant-time compare) before decrypting; reject EnviadoEn outside +/- 2 minutes
+Benefit: tampering and forged responses are detected, and the channel's guarantees match what the design note implies.
+Nice to Rewrite if Time Permits
+DSP-FR-22 - Build hygiene: leftover configuration, apparently redundant packages, a duplicate Private element, and no ConfigureAwait(false) in the libraries (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: the application project's leftover WCF section (app.config:1-7 (../../General/Despachador/Aplicacion/app.config#L1-L7)), the empty infrastructure configuration (app.config:1-3 (../../General/Despachador/Infraestructura/app.config#L1-L3)), the duplicate element and the extra serialization package (AplicacionDespachador.csproj:47-51 (../../General/Despachador/Aplicacion/AplicacionDespachador.csproj#L47-L51)), the WCF packages next to the in-box reference (InfraestructuraDespachador.csproj:47-59 (../../General/Despachador/Infraestructura/InfraestructuraDespachador.csproj#L47-L59)), and the editor configuration that silences CA2007 (.editorconfig:8 (../../General/Despachador/.editorconfig#L8))
+Code block (xml)
+<Reference Include="System.Runtime.Serialization.Primitives, Version=4.1.2.0, ...>
+  <HintPath>..\packages\System.Runtime.Serialization.Primitives.4.3.0\lib\net46\System.Runtime.Serialization.Primitives.dll</HintPath>
+  <Private>True</Private>
+  <Private>True</Private>
+</Reference>
+The application project, which contains no WCF code, ships an app.config with an empty system.serviceModel section; the infrastructure project has an empty app.config; the application project lists <Private>True</Private> twice for one reference and pulls in System.Runtime.Serialization.Primitives 4.3.0 although the in-box serialization assembly is referenced; and the infrastructure project references the NuGet WCF client assemblies (version 10.0.652802) next to the in-box System.ServiceModel, which on .NET Framework 4.8 is expected to make the packages redundant (the net462 assets should forward to the in-box assembly; confirm before removing). Neither library uses ConfigureAwait(false) (the host uses it three times), and the analyzer that would ask for it is silenced; a Windows service has no synchronization context, so this is a convention gap, not a defect.
+Recommendation: delete the empty and leftover configuration, remove the duplicate element, test the removal of the apparently redundant packages, and add ConfigureAwait(false) to the two libraries together with the analyzer change in DSP-FR-3.
+Benefit: a smaller, clearer dependency surface.
+4.4 Despachador - Windows Service host (Tier 2)
+MustChange / Rewrite
+DSP-FR-23 - When the initial refresh fails, the host stops itself from inside the start-up task, so OnStop waits for that same task, the cleanup token expires first, and the run state is left "running" (GEN-7, Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the host's start-up and its self-stop (ServiceHost.cs:85-105 (../../General/Despachador/Despachador/ServiceHost.cs#L85-L105)), the orchestrator that returns false for any non-cancellation failure (OperacionServicio.cs:69-83 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L69-L83), OperacionServicio.cs:131-144 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L131-L144)), DetenerServicio (Parametrizacion.cs:518-525 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L518-L525)), the shared stop sequence (WindowsServiceHostBase.cs:113-157 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L113-L157), WindowsServiceHostBase.cs:159-190 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L159-L190), WindowsServiceHostBase.cs:195-205 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L195-L205)), the shared failure handler that stops from a different task (WindowsServiceHostBase.cs:392-402 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L392-L402)), the host's termination (ServiceHost.cs:110-128 (../../General/Despachador/Despachador/ServiceHost.cs#L110-L128)), ActualizaTerminacion with a cancelled token (RepositorioMaestro.cs:1193-1230 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1230)), and the executed IL listing in Section 2 (Stop calls DeferredStop, which calls OnStop synchronously)
+Code block (csharp)
+bool resultado = await operacionServicio.IniciarDespachadorAsync(ct);
+if (!resultado)
 {
-    /// <summary>
-    /// Ejecuta el proceso para levantar y detener servicios
-    /// </summary>
-    public class OperacionServicio : IOperacionServicio
-    {
-        private readonly IRepositorioTomi _repositorioTomi;
-        private readonly IControladorServicios _controlador;
-        private readonly ConfiguracionServicio _configuracion;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        /// <param name="repositorioTomi"></param>
-        /// <param name="configuracion"></param>
-        /// <param name="controlador"></param>
-        public OperacionServicio(IRepositorioTomi repositorioTomi,
-            ConfiguracionServicio configuracion, IControladorServicios controlador)
-        {
-            _configuracion = configuracion;
-            _repositorioTomi = repositorioTomi;
-            _controlador = controlador;
-        }
-
-
-        /// <summary>
-        /// Parametros sistema, hora, url
-        /// </summary>
-        private async Task ObtenerParametrosSistema()
-        {
-            try
-            {
-                Dictionary<string, string> ltsParametrosSistema = await _repositorioTomi.ObtenerParametrosSistema();
-                foreach (KeyValuePair<string, string> paramSistema in ltsParametrosSistema)
-                {
-                    if (!Enum.TryParse(paramSistema.Key, out Enums.ParametrosSistema parametro)) continue;
-                    switch (parametro)
-                    {
-                        case Enums.ParametrosSistema.HORA_OP_INICIO:
-                            _configuracion.HORA_OP_INICIO = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_INICIO.ToString());
-                            Config.EscribirLog("INFO|ObtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_INICIO + "'.",
-                                _configuracion.StrNombreServicio);
-                            break;
-
-                        case Enums.ParametrosSistema.HORA_OP_FIN:
-                            _configuracion.HORA_OP_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_FIN.ToString());
-                            Config.EscribirLog("INFO|ObtenerParametrosSistema|Hora de cancelacion SPEI '" + _configuracion.HORA_OP_FIN + "'.",
-                                _configuracion.StrNombreServicio);
-                            break;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ObtenerParametrosSistema|Se presenta exception: " + ex.Message, _configuracion.StrNombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Obtiene los parametros del sistema necesario para la operacion del servicio
-        /// </summary>
-        private async Task ObtenerParametros()
-        {
-            try
-            {
-
-                await _repositorioTomi.ProcesoActualizaEjecucion(
-                   _configuracion.StrNombreServicio, (int)_configuracion.Pid, _configuracion.NombreProceso);
-
-                // Valida si es dia habil
-                _configuracion.BoEsDiaHabil = await _repositorioTomi.ValidaSiEsDiaHabil();
-
-                await ObtenerParametrosSistema();
-
-                // Obtencion de la fecha del sistema.
-                var horaActual = DateTime.Now;
-                _configuracion.StrFechaSistemaServicio = new TimeSpan(horaActual.Hour, horaActual.Minute, 0);
-
-                if (string.IsNullOrEmpty(_configuracion.HORA_OP_INICIO.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_FIN.ToString()))
-                {
-                    Config.EscribirLog($"ERROR|No se especifica la hora de inicio/fin de operaciones", _configuracion.StrNombreServicio);
-                    throw new Exception($"Error de especificación de hora inicio/fin");
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ObtenerParametros|Se presenta exception: " + ex, _configuracion.StrNombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Ejecuta procedimeinto
-        /// </summary>
-        /// <returns></returns>
-        public async Task EjecutaProcedimiento()
-        {
-            Exception excepcionPrincipal = null;
-
-            try
-            {
-                await ObtenerParametros();
-
-                _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_INICIO && 
-                    _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_FIN);
-
-                Config.EscribirLog($"INFO|EjecutaProcedimiento|{(_configuracion.EnHorarioOperaciones ? "Inicio" : "Termina")} " +
-                    $"horario de operaciones, HoraSistema='{_configuracion.StrFechaSistemaServicio:hh\\:mm}'.", NombreServicio.Swf_IN_ControladorServicios.ToString());
-
-                bool bolPuedeIniciar = _configuracion.BoEsDiaHabil && _configuracion.EnHorarioOperaciones;
-
-                Task<bool>[] tareas = new[]
-                {
-                        bolPuedeIniciar
-                        ? _controlador.IniciaServicioAsync(EnumComunes.Swf_IN_ETL)
-                        : _controlador.DetieneServicioAsync(EnumComunes.Swf_IN_ETL),
-
-                        bolPuedeIniciar
-                        ? _controlador.IniciaServicioAsync(EnumComunes.Swf_IN_FT)
-                        : _controlador.DetieneServicioAsync(EnumComunes.Swf_IN_FT),
-                };
-
-                var result = await Task.WhenAll(tareas);
-
-                if (result.Any(r => r == false))
-                {
-                    Config.EscribirLog($"ERROR|Uno o mas servicios no alcanzaron el estado deseado: " +
-                        $"{_configuracion.StrNombreServicio}");
-                }
-                else
-                {
-                    Config.EscribirLog($"INFO|Todos los servicios alcanzaron el estado deseado: " +
-                        $"{_configuracion.StrNombreServicio}");
-                }
-            }
-            catch (Exception ex)
-            {
-                excepcionPrincipal = ex;
-                Config.EscribirLog("ERROR|EjecutaProcedimiento|Se presenta exception: " + ex,
-                    _configuracion.StrNombreServicio);
-
-                throw;
-            }
-            finally
-            {
-                try
-                {
-                    await _repositorioTomi.ProcesoActualizaTerminacion(
-                        _configuracion.StrNombreServicio, (int)_configuracion.Pid, _configuracion.NombreProceso);
-                }
-                catch (Exception exFinally)
-                {
-                    Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|No fue posible marcar el servicio en finalización: {exFinally}");
-
-                    if (excepcionPrincipal == null)
-                    {
-                        throw;
-                    }
-                }
-            }
-        }
-    }
+    _parametrizacion.DetenerServicio(this);            // ServiceHost.cs L100-103: ExitCode = 1; Stop(); on the start-up task's own thread
 }
-
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Interfaces
+Code block (csharp)
+//Espera a que la tarea de inicio se complete...
+await _controlServicio.EsperarTareaActivaAsync(startupTask, "parametrización inicial", waitCt).ConfigureAwait(false);   // ServiceHost.cs L120
+IniciarDespachadorAsync returns false for a non-cancellation failure in its initial steps (a database error in ActualizaEJecucion, a missing required parameter, an invalid control row, DSP-FR-7), after attempting to insert a critical alert (a false result is ignored; if the alert insert itself throws, the exception propagates instead and the base's failure path described below is taken). ParametrizacionesAsync then calls DetenerServicio(this), which sets ExitCode = 1 and calls Stop() synchronously on the start-up task's own thread. Stop() runs OnStop on that thread, which creates the 60-second wait token and the 30-second cleanup token at the same moment and starts the termination on a pool thread. TerminacionAsync first awaits startupTask, which is the task that is blocked inside OnStop, so it cannot complete: EsperarTareaActivaAsync returns only when the 60-second wait token fires, after a WARN. By then the 30-second cleanup token has expired, so MarcarPuertoEnUsoAsync(null, ...) and ActualizaTerminacion(...) run with a cancelled token and cannot reach the database (ActualizaTerminacion rethrows the cancellation, which the shared handler swallows as a normal stop). When the failure happens after those start-up writes have succeeded (the usual case for a parameter or control-row problem), the run state and the port-in-use record therefore stay "running", although the process stops, and OnStop ends by logging a successful termination. This is the sequence expected from static reading and the executed IL listing; it was not run under the Service Control Manager. The shared failure handler avoids it because it stops from a separate task while the start-up task finishes by rethrowing (WindowsServiceHostBase.cs:401 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L401)); the host bypasses that path. A one-time start-up failure, such as a database blip, also leaves the service stopped until the Service Control Manager's recovery options (unknown) restart it.
+Recommendation: do not call Stop() from inside the start-up task: throw from ParametrizacionesAsync (or return a failure that the base turns into a throw) so that the base's HandleStartupFailure stops the service from a separate task while the start-up task finishes by rethrowing, which lets the termination's wait on that task end at once; retry the initial refresh a few times with back-off before giving up; and write the terminal state exactly once (DSP-FR-8).
+Code block (csharp)
+bool resultado = await operacionServicio.IniciarDespachadorAsync(ct);
+if (!resultado)
+    throw new InvalidOperationException("El Despachador no pudo inicializarse; consulte el log para ver la causa.");   // the base logs it, sets ExitCode = 1, and stops from another task
+Benefit: a failed start ends cleanly in a few seconds with the terminal state written, instead of after 60 seconds with a stale "running" record.
+DSP-FR-24 - Start-up and shutdown discard the Boolean and StoredProcedureResult results of the run-state updates, and the alert writer's result is ignored as well (GEN-9, Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the discarded start-up results (OperacionServicio.cs:74 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L74), ServiceHost.cs:93 (../../General/Despachador/Despachador/ServiceHost.cs#L93)), the discarded shutdown results (ServiceHost.cs:123 (../../General/Despachador/Despachador/ServiceHost.cs#L123), ServiceHost.cs:126 (../../General/Despachador/Despachador/ServiceHost.cs#L126), OperacionServicio.cs:420 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L420)), the four ignored alert results (OperacionServicio.cs:134-142 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L134-L142), OperacionServicio.cs:691-699 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L691-L699), DespachadorWorker.cs:175-183 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L175-L183), DespachadorWorker.cs:206-214 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L206-L214)), the interface contracts (IControlServicio.cs:17-25 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Parametrizacion/IControlServicio.cs#L17-L25), IAlertas.cs:13-15 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Alertas/IAlertas.cs#L13-L15)), and the shared implementations (ControlServicio.cs:50-65 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L50-L65), RepositorioMaestro.cs:1158-1177 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1158-L1177), RepositorioMaestro.cs:1193-1230 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1230))
+Code block (csharp)
+await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, ...);        // L93: returns bool
+...
+await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt)....;        // L123: returns bool
+await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt)....;                             // L126: returns StoredProcedureResult
+MarcarPuertoEnUsoAsync returns false, rather than throwing, when the update is cancelled or reports no success (other failures still throw); ActualizaTerminacion returns Exito = false for every failure except cancellation; and InsertarAlerta returns a Boolean. The host and the orchestrator await all of them and use none of the results. ActualizaEJecucion at OperacionServicio.cs:74 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L74) throws when its update fails, so its discarded value is harmless; the others are not. The effects: a start-up that failed to register the port still runs as if registered; a failed terminal write is noticed only through a line that the shared library logs itself; OnStop reports a successful termination whatever happened (DSP-FR-23 shows a case where nothing could be written); and an alert whose stored procedure reports failure makes the writer return false, which all four call sites ignore, so a critical start-up alert can be lost with no trace beyond the shared writer's own log line. This is portfolio finding GEN-9, rated Major in the other reports (for example CS-FR-6).
+Recommendation: check the results: treat a failed port registration at start-up as a start failure (or at least a WARN plus an alert), log a WARN when a terminal write fails and stop claiming success, and log the discarded alert Boolean; combine this with the single terminal write of DSP-FR-8.
+Code block (csharp)
+if (!await _controlServicio.MarcarPuertoEnUsoAsync(pid, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct))
+    throw new InvalidOperationException("No fue posible registrar el puerto en uso del Despachador.");
+Benefit: a failed run-state write becomes visible and actionable instead of silent.
+DSP-FR-25 - Only seven of the nine dispatcher settings are copied, none is validated at start-up, one is unused, and the log-size unit differs from the shared logger's (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the host's settings copy and logger initialization (ServiceHost.cs:54-64 (../../General/Despachador/Despachador/ServiceHost.cs#L54-L64)), the shared loader and its defaults (ObtencionConfguracionGeneral.cs:103-117 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Configuracion/ObtencionConfguracionGeneral.cs#L103-L117)), the runtime model and its defaults (Configuracion.cs:66-74 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Modelos/Configuracion/Configuracion.cs#L66-L74)), the settings type (ServicioConfiguracionSettings.cs:19-39 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Modelos/Configuracion/ServicioConfiguracionSettings.cs#L19-L39)), the only two readers of the unapplied settings (DespachadorWorker.cs:111 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L111), OperacionServicio.cs:517 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L517)), the unguarded consumers (OperacionServicio.cs:61-63 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L61-L63), OperacionServicio.cs:316 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L316), OperacionServicio.cs:344 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L344), ParametrizacionControlDao.cs:58 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L58)), the chunk helper's guard (IEnumerableExtensions.cs:11-16 (../../General/Despachador/Aplicacion/Interfaces/IEnumerableExtensions.cs#L11-L16)), and the logger's unit conversion (Logging.cs:40-51 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L40-L51))
+Code block (csharp)
+_configuracionBase.CantidadPaquete = servicioMainConfiguracion.CantidadPaquete;
+_configuracionBase.LimitePaquetesPendientes = servicioMainConfiguracion.LimitePaquetesPendientes;
+_configuracionBase.LimiteConcurrencia = servicioMainConfiguracion.LimiteConcurrencia;        // L60-62
+...
+Logging.Init(_configuracionBase.PathLog, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);   // L64 -> parameter is "maxMb"
+(1) The shared loader reads nine dispatcher-related values, but the host copies only seven into the runtime configuration: TimeoutDespachadoMs and DelayEntreDespachoMs are never assigned (the code that reads them is at DespachadorWorker.cs:111 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L111) and OperacionServicio.cs:517 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L517); no production file assigns either value, and only the orchestrator test sets one of them, OperacionServicioUT.cs:265 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L265)), so the worker and the orchestrator always use the model's defaults of 30,000 ms and 300 ms. An operator who sets TimeoutDespachadoMs in the service configuration gets no change. (2) There is no start-up validation of the limits. The shared loader defaults CantidadPaquete, LimitePaquetesPendientes, and LimiteConcurrencia to 0 when an attribute is missing; the orchestrator falls back to 10 workers when LimiteConcurrencia is not positive, but CantidadPaquete = 0 makes the selector return TOP (0) (ChunkBy itself would reject a size of 0), and LimitePaquetesPendientes = 0 makes every fetched package be dropped by the "paquetes omitidos" check. In both cases the service passes Verify(), starts, and dispatches nothing, without an ERROR line (only start-up INFO lines and the DEBUG, AVISO, and adapter WARN lines appear while it runs). (3) ForzaEjecucionServicios is copied and never read by this solution. (4) The host passes TamanoMaximoArchivoLogKB to a parameter that Logging.Init names maxMb and multiplies by 1,024: if the configured numbers are kilobytes, as the name says, the effective limit is 1,024 times larger than intended; if they are megabytes, the setting's name is wrong (confirmation item).
+Recommendation: build one immutable options object in Inicializacion that copies every value, validates the ranges (at least 1 for CantidadPaquete and LimitePaquetesPendientes, at least 1 for LimiteConcurrencia or an explicit, documented fallback in place of today's silent 10, a timeout of at least one second, a non-negative delay), and fails start-up with a descriptive exception and alert when a value is invalid; inject it into the orchestrator and the worker instead of the shared mutable model; replace the scattered defaults (DSP-FR-14); and settle the log-size unit.
+Code block (csharp)
+_configuracionBase.TimeoutDespachadoMs = servicio.TimeoutDespachadoMs;
+_configuracionBase.DelayEntreDespachoMs = servicio.DelayEntreDespachoMs;
+if (servicio.CantidadPaquete < 1 || servicio.LimitePaquetesPendientes < 1 || servicio.LimiteConcurrencia < 1)
+    throw new InvalidOperationException("Configuración del Despachador inválida: CantidadPaquete, LimitePaquetesPendientes y LimiteConcurrencia deben ser mayores que cero.");
+Benefit: configured values take effect, a misconfigured service fails loudly instead of idling, and the log-size limit is what the operator expects.
+4.5 PruebasUnitarias (Tier 2)
+MustChange / Rewrite
+DSP-FR-26 - The T24 middleware company, user name, and password are literals in nine tests (Blocker)
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: the three keys in each worker test (DespachadorWorkerUT.cs:44-46 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L44-L46), DespachadorWorkerUT.cs:171-173 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L171-L173), DespachadorWorkerUT.cs:280-282 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L280-L282), DespachadorWorkerUT.cs:389-391 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L389-L391), DespachadorWorkerUT.cs:502-504 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L502-L504), DespachadorWorkerUT.cs:616-618 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L616-L618), DespachadorWorkerUT.cs:730-732 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L730-L732), DespachadorWorkerUT.cs:851-853 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L851-L853), DespachadorWorkerUT.cs:983-985 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L983-L985)), the orchestrator test's placeholders (OperacionServicioUT.cs:246-248 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L246-L248)), and the checklist rule on secrets in source and test data (code_review.md (../BaseLine_Docs/code_review.md)); the values are deliberately not reproduced here
+Code block (csharp)
+["WST24_MW_COMPANY"]  = "<9-character company code>",
+["WST24_MW_USERNAME"] = "<7-letter user name>",
+["WST24_MW_PASSWORD"] = "<8-character alphanumeric password>"      // nine worker tests, one distinct value each (not shown)
+All nine worker tests assign the same three values to the system-parameter dictionary that stands in for the database. By their shape (a 9-character company code of letters and digits, a 7-letter user name, and an 8-character alphanumeric password, identical in all nine tests) they look like genuine middleware credentials, not placeholders, whereas the orchestrator test uses obvious 4-letter placeholders. Whether they are valid is not known from the repository. Being committed, they are also present in the repository history (the history was not inspected). The nine tests also hard-code the log path C:/LogsCMS/CMS/Despachador/ (DespachadorWorkerUT.cs:398 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L398)) and assign the static, obsolete Config.Rutas (DespachadorWorkerUT.cs:409-414 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L409-L414)).
+Recommendation: replace the three values with obvious placeholders (as the orchestrator test already does) through one shared fixture; if the values are, or ever were, valid middleware credentials, rotate them and purge them from history according to the secret-handling procedure; add a secret scan to CI (DSP-FR-3); and use a temporary directory for the log path.
+Code block (csharp)
+private static Dictionary<string, string> ParametrosBase() => new Dictionary<string, string>
 {
-    /// <summary>
-    /// Interface IControladorServicios, tiene la lista de los metodos que se van a utilizar para iniciar o detener los servicios.
-    /// </summary>
-    public interface IControladorServicios
-    {
-        /// <summary>
-        /// Proceso para levantar servicio
-        /// </summary>
-        /// <param name="strNombreServicio"></param>
-        /// <returns>true/false</returns>
-        Task<bool> IniciaServicioAsync(string strNombreServicio);
-
-        /// <summary>
-        /// Proceso para bajar servicio
-        /// </summary>
-        /// <param name="strNombreServicio"></param>
-        /// <returns>true/false</returns>
-        Task<bool> DetieneServicioAsync(string strNombreServicio);
-    }
-}
-
-using Aplicacion.Modelos;
-using MUFG_T24.Modelos;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Interfaces
+    ["WST24_MW_COMPANY"] = "TEST_COMPANY", ["WST24_MW_USERNAME"] = "TEST_USER", ["WST24_MW_PASSWORD"] = "TEST_PASSWORD",
+    ["HORA_OP_INICIO"] = "06:10", ["HORA_OP_FIN"] = "23:59", ["SINFONDOS_HORA_VALIDA"] = "16:30", ["SINFONDOS_TIEMPO_ESPERA"] = "5"
+};
+Benefit: no credential-shaped data in source or history, and one place to maintain the test parameters.
+DSP-FR-27 - Two "future-date" tests use the fixed value date 20260530 against DateTime.Now, so by static reading both have failed since 2026-05-31 (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the two tests (DespachadorWorkerUT.cs:372-479 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L372-L479), DespachadorWorkerUT.cs:485-593 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L485-L593)), their fixed dates (DespachadorWorkerUT.cs:378 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L378), DespachadorWorkerUT.cs:491 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L491)), the system date taken from the clock (DespachadorWorkerUT.cs:401 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L401)), the verifications that cannot hold (DespachadorWorkerUT.cs:457-477 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L457-L477), DespachadorWorkerUT.cs:586-591 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L586-L591)), the worker's past-date branch (DespachadorWorker.cs:257-262 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L257-L262)), and the stable past-date test for comparison (DespachadorWorkerUT.cs:159 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L159))
+Code block (csharp)
+int fechaOperacion = 20260530;                                   // T24FechaFuturaRECCSiDespacha (L378) and T24FechaFuturaNoRECCNoDespacha (L491)
+...
+FechaSistema = DateTime.Now.ToString("yyyyMMdd")                 // L401
+T24FechaFuturaRECCSiDespacha and T24FechaFuturaNoRECCNoDespacha build an operation dated 2026-05-30 and set the system date from DateTime.Now. They were written as "future date" cases, but from 2026-05-31 the operation date is in the past, so the worker takes the past-date branch: the operation is denied without any RECC lookup. By static reading, the first test's Times.Once verifications of the dispatch and of RevisarRECCAsync, and the second test's Times.Once verification of RevisarRECCAsync, can no longer hold (this review's date is 2026-10-13); the tests were not run because no test runner is installed. The past-date test uses 20260320, which stays in the past, and the data-row test derives its date from DateTime.Now, so neither is affected. A suite with two permanent failures trains the team to ignore red results.
+Recommendation: derive every date from one clock in the test (and, better, inject an IReloj into the worker instead of reading DateTime.Now in production, which also fixes the throttle's use of local time, DSP-FR-14).
+Code block (csharp)
+var hoy = DateTime.Today;
+int fechaSistema = int.Parse(hoy.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+int fechaOperacion = int.Parse(hoy.AddDays(1).ToString("yyyyMMdd", CultureInfo.InvariantCulture));   // always in the future
+Benefit: the suite means what it says on any day, and a real regression is no longer hidden among permanent failures.
+DSP-FR-28 - The tests exercise one decision method and three private methods; the dispatch loop, response handling, failures, repositories, clients, and host are untested (GEN-2, Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the test project's only reference (PruebasUnitarias.csproj:80-85 (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj#L80-L85)), the compiled files (PruebasUnitarias.csproj:72-76 (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj#L72-L76)), the worker tests that assert only a missing exception and mock interactions (DespachadorWorkerUT.cs:96-147 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L96-L147), DespachadorWorkerUT.cs:457-478 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L457-L478)), the orchestrator tests that reach private members by reflection (OperacionServicioUT.cs:24-236 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L24-L236), OperacionServicioUT.cs:315-345 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L315-L345)), and the untested code (OperacionServicio.cs:69-145 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L69-L145), OperacionServicio.cs:289-332 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L289-L332), OperacionServicio.cs:381-457 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L381-L457), OperacionServicio.cs:651-706 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L651-L706), DespachadorWorker.cs:162-223 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L162-L223), DespachadorWorker.cs:335-427 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L335-L427), PeticionTCP.cs:28-94 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L28-L94), wsT24.cs:31-107 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L31-L107), RecuperacionDatos.cs:31-152 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L31-L152), ServiceHost.cs:37-128 (../../General/Despachador/Despachador/ServiceHost.cs#L37-L128))
+The 13 test methods (15 cases) cover the T24 pre-dispatch decisions of DespacharPaqueteAsync (date rules, RECC, and the TMD funds cases) and three private methods of the orchestrator (control refresh, reservation, and worker clean-up). They contain 29 Assert. calls and 30 Verify calls: the worker tests assert that no exception escaped and verify which collaborators were called, and none inspects the returned outcome (which no production code reads either, DSP-FR-4). Not covered: the start-up and failure paths of IniciarDespachadorAsync; ObtenerPendientesAsync (filtering, chunking, the pending limit); the dispatch loop and the candidate-selection policy; the reading-window validation; the T24 business-day and window refusals; the handling of OK, PARCIAL, ERROR, null, timeout, and cancellation results; the retry-throttle time rules; the insert-versus-update branch of the "sin fondos" record; the funds-check failure contract (DSP-FR-5); both DAOs; the SOAP client; the TCP client (framing, timeout, length); and the host. The test project references only the application assembly, so this project cannot exercise anything in the infrastructure project, and the four orchestrator tests depend on private field and method names.
+Recommendation: first repair the suite (DSP-FR-26, DSP-FR-27); then add, in order of risk: the three-state funds check and its stamping rule (DSP-FR-5), response handling and cool-down (DSP-FR-4), the start-up failure and stop sequence (DSP-FR-23), ObtenerPendientesAsync and the selection policy, the window and business-day refusals, the TCP client against a loopback fake (framing, bad length, silent peer, DSP-FR-19 and DSP-FR-20), and the DAOs against a fake adapter (Exito = false, DSP-FR-15); reference the infrastructure project from the tests and make the orchestrator's state observable through an internal snapshot instead of reflection.
+Code block (csharp)
+[TestMethod]
+public async Task Fondos_ServicioT24Caido_NoMarcaSinFondos()
 {
-    /// <summary>
-    /// Interfaz que implementa consultas y no consultas a bd InterfacesT24
-    /// </summary>
-    public interface IRepositorioTomi
-    {
-        /// <summary>
-        /// Marca puerto libre
-        /// </summary>
-        /// <param name="intpId"></param>
-        /// <param name="strNombreProceso"></param>
-        /// <param name="strNombreServicio"></param>
-        /// <param name="strServicio"></param>
-        /// <returns></returns>
-        Task ActualizaPuertoLibre(string strServicio);
-
-        /// <summary>
-        /// Marca puerto en uso
-        /// </summary>
-        /// <param name="intpId"></param>
-        /// <param name="strNombreProceso"></param>
-        /// <param name="strNombreServicio"></param>
-        /// <param name="strServicio"></param>
-        /// <returns></returns>
-        Task ActualizaPuertoEnUso(int intpId, string strNombreProceso, string strNombreServicio, string strServicio);
-
-        /// <summary>
-        /// Obtiene las fechas del sistema
-        /// </summary>
-        /// <returns>Parametros</returns>
-        Task<string> ObtenerFechaSistema();
-
-        /// <summary>
-        /// Inserta alertas
-        /// </summary>
-        /// <param name="alerta"></param>
-        /// <returns></returns>
-        Task ProcesoInsertaAlerta(AlertaDTO alerta);
-
-        /// <summary>
-        /// Valida si puede operar el servicio
-        /// </summary>
-        /// <returns>true/false</returns>
-        Task<bool> ValidaSiEsDiaHabil();
-
-        /// <summary>
-        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
-        /// </summary>
-        /// <returns>Dictionary<string, string></returns>
-        Task<Dictionary<string, string>> ObtenerParametrosSistema();
-
-        /// <summary>
-        /// Actualiza ejecucion del servicio INICIO
-        /// </summary>
-        /// <param name="strFolio"></param>
-        /// <returns></returns>
-        Task ProcesoActualizaEjecucion(string strNombreServicio, int intgpId, string strNombreProceso);
-
-        /// <summary>
-        /// Actualiza terminacion del proceso
-        /// </summary>
-        /// <param name="strNombreServicio"></param>
-        /// <param name="intgpId"></param>
-        /// <param name="strNombreProceso"></param>
-        /// <returns></returns>
-        Task ProcesoActualizaTerminacion(string strNombreServicio, int intgpId, string strNombreProceso);
-    }
+    _wsT24.Setup(x => x.ObtenerSaldoAsync(It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>())).ReturnsAsync((decimal?)null);
+    await _worker.DespacharPaqueteAsync(paqueteTmd, "127.0.0.1", 1, CancellationToken.None);
+    _sondeoDao.Verify(x => x.ActualizaCuentaSinFondosAsync(It.IsAny<long>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
 }
-
-using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace Aplicacion.Enums
+Benefit: the behaviors that move customer operations are protected against regressions.
+Rewrite Recommended
+DSP-FR-29 - Test hygiene: reflection on privates, nine duplicated arrangements, matcher values used as arguments, static shared state, a dead branch, and polling (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: the repeated arrangement (DespachadorWorkerUT.cs:36-60 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L36-L60), DespachadorWorkerUT.cs:163-175 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L163-L175)), the It.IsAny values passed to the method under test (DespachadorWorkerUT.cs:98 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L98), DespachadorWorkerUT.cs:226 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L226), DespachadorWorkerUT.cs:335 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L335), DespachadorWorkerUT.cs:448 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L448), DespachadorWorkerUT.cs:562 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L562), DespachadorWorkerUT.cs:676 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L676), DespachadorWorkerUT.cs:797 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L797), DespachadorWorkerUT.cs:923 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L923), DespachadorWorkerUT.cs:1055 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L1055)), the static Config.Rutas assignment (DespachadorWorkerUT.cs:409-414 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L409-L414)), the dead else branch (DespachadorWorkerUT.cs:134-146 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L134-L146) with the data rows at DespachadorWorkerUT.cs:25-27 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L25-L27)), the polling loop (OperacionServicioUT.cs:217-229 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L217-L229)), and the reflection helpers (OperacionServicioUT.cs:315-345 (../../General/Despachador/PruebasUnitarias/OperacionServicioUT.cs#L315-L345))
+Code block (csharp)
+await _worker.DespacharPaqueteAsync(paquete, It.IsAny<string>(), It.IsAny<int>(), CancellationToken.None);   // Moq matchers used as real arguments: ip = null, port = 0
+The same 9-key parameter dictionary and configuration block are pasted nine times in the worker tests, and the orchestrator test builds a similar 8-key fixture of its own; nine tests call the method under test with It.IsAny<string>() and It.IsAny<int>() as real arguments, which are Moq matchers that return null and 0 outside a setup, so the address and port under test are null and 0; each worker test assigns the static, obsolete Config.Rutas, which is process-wide state; the else branch of the data-row test can never run because all three rows pass true; the orchestrator's worker test polls with Task.Delay(50) for up to five seconds instead of awaiting the worker task; and four tests reach private fields and methods by name through reflection, so a rename breaks them silently at run time.
+Recommendation: extract an arrangement builder (one ParametrosBase() and one CrearWorker()), pass real values ("127.0.0.1", 1234), set the logger once in [AssemblyInitialize], remove or complete the dead branch, expose the orchestrator's counters through an internal read-only snapshot, and await the worker task through a test hook.
+Benefit: shorter, sturdier tests that survive refactoring.
+4.6 SQL scripts and installer (repository artifacts outside the solution)
+MustChange / Rewrite
+DSP-FR-30 - The repository's SQL and the SQL project's copies disagree, and two shared procedures that the library calls are defined nowhere in the workspace (GEN-13, Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: the repository's write procedure with the Afecto result (SQL/usp_despachador_actualizaCuentaSinFondos.sql:38-58 (../../General/Despachador/SQL/usp_despachador_actualizaCuentaSinFondos.sql#L38-L58), SQL/usp_despachador_InsertarFechaProcesadoSinFondos.sql:41-67 (../../General/Despachador/SQL/usp_despachador_InsertarFechaProcesadoSinFondos.sql#L41-L67)) against the SQL project's copy without it (MWD_DB/usp_despachador_eliminarSinFondos.sql:35-50 (../../StoredProcedures/MWD_DB/DBMDW/General/Despachador/Procedures/usp_despachador_eliminarSinFondos.sql#L35-L50)), the strict C# validation (RecuperacionDatos.cs:101-152 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L101-L152)) and the shared logic that derives Afecto (RepositorioMaestro.cs:659-663 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L659-L663), RepositorioMaestro.cs:679-689 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L679-L689)), the NOLOCK differences (SQL/usp_despachador_ObtenerT24RegistroOperaciones.sql:51 (../../General/Despachador/SQL/usp_despachador_ObtenerT24RegistroOperaciones.sql#L51) against MWD_DB/usp_despachador_ObtenerT24RegistroOperaciones.sql:52 (../../StoredProcedures/MWD_DB/DBMDW/General/Despachador/Procedures/usp_despachador_ObtenerT24RegistroOperaciones.sql#L52), and SQL/usp_despachador_RevisarRECCBatch.sql:124 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L124) against MWD_DB/usp_despachador_RevisarRECCBatch.sql:125 (../../StoredProcedures/MWD_DB/DBMDW/General/Despachador/Procedures/usp_despachador_RevisarRECCBatch.sql#L125)), the seed difference (SQL/Estructura SQL.sql:17-22 (../../General/Despachador/SQL/Estructura%20SQL.sql#L17-L22) against MWD_DB/tb_srv_controlServicio.sql:25-30 (../../StoredProcedures/MWD_DB/DBMDW/General/Despachador/Tables/tb_srv_controlServicio.sql#L25-L30)), the shared procedure constants that no SQL file defines (ConstantesProcedimientosMUFG.cs:11 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/ConstantesProcedimientosMUFG.cs#L11), ConstantesProcedimientosMUFG.cs:23 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/ConstantesProcedimientosMUFG.cs#L23), ControlServicio.cs:90-98 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L90-L98), ControlServicio.cs:197-198 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L197-L198)), and the procedure names the dispatcher executes (ConstantesServicio.cs:20-29 (../../General/Despachador/Aplicacion/Enums/ConstantesServicio.cs#L20-L29)); related: LIB-FR-70 in MUFG_Library_Recommendations.md (MUFG_Library_Recommendations.md)
+Code block (sql)
+-- repository (b3ca997): actualizaCuentaSinFondos.sql                       -- SQL project (develop f64ecf2): eliminarSinFondos.sql
+DECLARE @FilasAfectadas INT = 0;                                              -- (absent)
+...  UPDATE ... ;                                                             DELETE ... ;
+SET @FilasAfectadas = @@ROWCOUNT;                                             -- (absent)
+COMMIT TRANSACTION;                                                           COMMIT TRANSACTION;
+SELECT @FilasAfectadas AS FilasAfectadas, CAST(CASE WHEN @FilasAfectadas > 0 THEN 1 ELSE 0 END AS BIT) AS Afecto;   -- (absent)
+Commit b3ca997 (2026-09-09) changed the four write procedures in this repository so that each ends with SELECT FilasAfectadas, Afecto, and the C# DAOs validate that contract strictly (validarAfectacion: true). The SQL project's copies of the same four procedures (develop, commit f64ecf2; its General/Despachador folder was last changed on 2026-07-09) have neither the variable, nor the @@ROWCOUNT capture, nor the result set. After normalizing line breaks, six of the ten procedures differ in behavior (those four, plus NOLOCK hints that the same commit removed from ObtenerT24RegistroOperaciones and from the FXT_Local branch of RevisarRECCBatch); the other four differ only in how header comments are wrapped. If the SQL project's definitions are what is deployed, the shared adapter finds no result set, derives Afecto = false, and throws "El SP ... se ejecutó correctamente, pero no afectó filas ni devolvió resultados" after the transaction has already committed: the "sin fondos" stamp is written but reported as an error, the SF throttle row is never created (the first write throws before it), and so every poll re-queries T24 for the same TMD operations. The seed also differs: the repository gives Lectura service priority 2 and the SQL project priority 1, which would change which service the dispatcher serves first (OperacionServicio.cs:442 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L442)) if the seed script is what populated the live table. Separately, usp_despachador_MarcarErrorFechaPasada (used by the shared past-date marker, DSP-FR-6) and usp_Comun_ActualizarEnUso (used by the host's port registration, whose false result is discarded, DSP-FR-24) are defined by no .sql file in the workspace; if a deployed database lacks them, the port registration silently does not happen and the DSP-FR-6 fix cannot work. Seven of the ten dispatcher constants also differ from the CREATE PROCEDURE names in letter case only (for example usp_despachador_ObtenerControlServicio against usp_despachador_obtenerControlServicio), which works under a case-insensitive collation and fails under a case-sensitive one. Which copy is deployed to InterfacesT24, and its collation, are confirmation items.
+Recommendation: make the SQL project the single source of truth: port the repository's current procedures into it (and delete or generate the repository copies), add the two missing shared procedures or correct the library constants (LIB-FR-70), align the constants with the exact CREATE names, add a build check that every procedure constant has a case-exact CREATE PROCEDURE and that every procedure the DAOs call with validarAfectacion: true returns Afecto, and compare the deployed definitions (sys.sql_modules) with the project before the next release.
+Code block (csharp)
+[TestMethod]
+public void Cada_constante_de_procedimiento_tiene_un_CREATE_con_el_mismo_nombre()
 {
-    /// <summary>
-    /// Enum para datos generales
-    /// </summary>
-    public static class EnumComunes
-    {
-        public const string ALERTA_ESTATUS_ERROR = "ERROR";
-
-        public const string Swf_IN_ETL = "CMS-Swf_IN_ETL";
-        public const string Swf_IN_FT = "CMS-Swf_IN_FT";
-    }
-
-    /// <summary>
-    /// Enum para Procedimientos Almacenados
-    /// </summary>
-    public static class EnumProcedimientosAlmacenados
-    {       
-        public const string usp_ConsultaFechaSistema = "usp_ObtenerFechaSistema";
-        public const string usp_EsDiaHabil = "usp_EsDiaHabil";
-        public const string usp_ParametrosSistema = "usp_ConsultaParametrosSistema_SwfInCtrlSrv";
-        public const string usp_MarcaPuertoEnEso = "usp_ActualizaServicioEnUso_SwfInCtrlSrv";
-        public const string usp_MarcaPuertoLibre = "usp_ActualizaServicioLibre_SwfInCtrlSrv";
-    }
-
-    /// <summary>
-    /// Enum para parametros del sistema
-    /// </summary>
-    public enum ParametrosSistema
-    {       
-        HORA_OP_INICIO,
-        HORA_OP_FIN
-    }
+    string sql = string.Join("\n", Directory.GetFiles(CarpetaSql, "*.sql").Select(LeerSqlDecodificado));   // handles UTF-16 and Windows-1252
+    foreach (string nombre in new[] { ConstantesServicio.UspObtenerControlServicio, ConstantesServicio.UspEliminarSinFondos /* ... all ten */ })
+        StringAssert.Contains(sql, "PROCEDURE dbo." + nombre);    // case-sensitive
 }
+Benefit: the database that is deployed behaves like the code that was tested, and the shared procedures the host depends on exist.
+Rewrite Recommended
+DSP-FR-31 - usp_despachador_RevisarRECCBatch is a 30-branch copy-paste chain with a missing status filter, missing types, and inconsistent hints (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: the branch pattern (SQL/usp_despachador_RevisarRECCBatch.sql:39-47 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L39-L47)), the branch without NOLOCK (SQL/usp_despachador_RevisarRECCBatch.sql:120-128 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L120-L128)), the branch without a status predicate (SQL/usp_despachador_RevisarRECCBatch.sql:138-145 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L138-L145)), the differently spelled type (SQL/usp_despachador_RevisarRECCBatch.sql:182-190 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L182-L190) against TipoOperacion.cs:48 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/TipoOperacion.cs#L48)), the types that have no branch (TipoOperacion.cs:43 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/TipoOperacion.cs#L43), TipoOperacion.cs:59 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/TipoOperacion.cs#L59)), the fallthrough (SQL/usp_despachador_RevisarRECCBatch.sql:308-314 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L308-L314)), and the caller (DespachadorWorker.cs:310-330 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L310-L330))
+Code block (sql)
+ELSE IF @TipoOperacion = 'MFX'
+BEGIN
+    SELECT tablaCorrespondiente.id_autorizacion AS Folio
+    FROM dbo.tb_cmm_solicitudesforex tablaCorrespondiente WITH (NOLOCK)
+    INNER JOIN @Folios folios ON folios.Folio = tablaCorrespondiente.id_autorizacion;      -- no status predicate (L138-145)
+END
+The procedure decides which future-dated operations are cancellations (RECC) and may therefore be dispatched early. It is one IF/ELSE IF chain with 30 near-identical branches, one per operation type and table, maintained by copy-paste (30 distinct tables, 29 nf_estatus = 'RECC' predicates, and 29 WITH (NOLOCK) hints). The inconsistencies: (1) the MFX branch has no status predicate, so every MFX operation whose authorization id exists in tb_cmm_solicitudesforex is returned as RECC, and a future-dated MFX operation would be dispatched early unless that table holds only cancellations (confirmation item); (2) the FXT_Local branch is the one branch without NOLOCK (the SQL project's copy has it); (3) the shared TipoOperacion list has TEF_Local and NOM_TEF, which have no branch although the equivalent _Local types for FXD, FXI, FXT, and SPID do, so their future-dated cancellations return zero rows and are denied whenever such an operation reaches the future-date check (fail-closed; whether those types reach this service is a confirmation item); (4) 'Pap_TEF' differs in case from the shared constant PaP_TEF, which matters only under a case-sensitive collation; and (5) every new type needs a code change in SQL.
+Recommendation: generate the chain from one reviewed mapping (type, table, folio column, status column, cancellation status) that lives next to the procedure, so that every branch comes from the same template; give MFX an explicit status rule; decide the locking hint once; add the missing types after the owner confirms them; and add a test that every type in tb_srv_controlTipo has a mapping.
+Code block (sql)
+-- mapping that a generator turns into the branches (sketch)
+('FXD', 'tb_tombin_nf_fxd',        'nf_folio',        'nf_estatus', 'RECC'),
+('MFX', 'tb_cmm_solicitudesforex', 'id_autorizacion', NULL,         NULL)     -- an explicit rule is required here
+Benefit: one reviewed definition of "cancellation" per type, and no silent gaps when a type is added.
+DSP-FR-32 - The pending selector hard-codes the service list and defines the current step only among those services (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: the filter applied before the ranking (SQL/usp_despachador_obtenerOperacionesPendientes.sql:38-55 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L38-L55)), the eligibility rules (SQL/usp_despachador_obtenerOperacionesPendientes.sql:56-90 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L56-L90)), the header that documents @@TopN (SQL/usp_despachador_obtenerOperacionesPendientes.sql:22-23 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L22-L23)), and the other selector that defines the current step over all unfinished steps (SQL/usp_despachador_ObtenerT24RegistroOperaciones.sql:41-63 (../../General/Despachador/SQL/usp_despachador_ObtenerT24RegistroOperaciones.sql#L41-L63))
+Code block (sql)
+WHERE detalle.flg_terminado = 0
+  AND detalle.servicio IN ('Lectura', 'T24', 'ActualizaEstatus', 'HotScan')        -- L53-54: before ROW_NUMBER, so "current step" = first unfinished step among these four
+The procedure lists the four dispatchable services as literals, although tb_srv_controlServicio is the table that defines which services the dispatcher serves; adding a service therefore needs a change in two tables and in SQL. Because the filter runs before ROW_NUMBER() ... rnPaso, "the current step" means the first unfinished step among the listed services: if an operation's next unfinished step belonged to a service outside the list, the procedure would skip it and offer a later step, out of order (whether work plans contain such steps is not visible here). usp_despachador_ObtenerT24RegistroOperaciones defines the current step over all unfinished steps, so the two procedures use different definitions. The header documents the parameter as @@TopN, and a @TopN of 0 returns nothing without an error, while a NULL or negative value is expected to raise an error (not run) that the adapter turns into an empty result (DSP-FR-15, DSP-FR-25).
+Recommendation: rank all unfinished steps, then require that the first one belongs to an active service in tb_srv_controlServicio; correct the header; and add a test with a plan whose next step belongs to a non-listed service.
+Code block (sql)
+det_actual AS (SELECT ..., rnPaso = ROW_NUMBER() OVER (PARTITION BY detalle.folio, detalle.tipo_operacion ORDER BY detalle.orden_ejecucion)
+               FROM dbo.tb_srv_plan_trabajo_detalle detalle WHERE detalle.flg_terminado = 0)
+...
+INNER JOIN dbo.tb_srv_controlServicio cs ON cs.servicio = det_actual.servicio AND cs.activo = 1
+WHERE det_actual.rnPaso = 1
+Benefit: one definition of the current step, and services are added by data, not by editing SQL.
+DSP-FR-33 - The installer is not in the solution, packages files the build never produces, omits the run-time dependencies, and declares no recovery or event source (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: the solution's four projects (Despachador.sln:6-13 (../../General/Despachador/Despachador.sln#L6-L13)), the installer project (Despachador.wixproj:1-12 (../../General/Despachador/Setup/Despachador.wixproj#L1-L12)), the package definition (Product.wxs:1-20 (../../General/Despachador/Setup/Product.wxs#L1-L20), Product.wxs:22-38 (../../General/Despachador/Setup/Product.wxs#L22-L38)), the files it lists (Product.wxs:47-53 (../../General/Despachador/Setup/Product.wxs#L47-L53), Product.wxs:55-69 (../../General/Despachador/Setup/Product.wxs#L55-L69)), the real assembly names (AplicacionDespachador.csproj:10-11 (../../General/Despachador/Aplicacion/AplicacionDespachador.csproj#L10-L11), InfraestructuraDespachador.csproj:10-11 (../../General/Despachador/Infraestructura/InfraestructuraDespachador.csproj#L10-L11)), the host's platform (Despachador.csproj:21 (../../General/Despachador/Despachador/Despachador.csproj#L21)), the host's App.config (App.config:1-30 (../../General/Despachador/Despachador/App.config#L1-L30)), and the shared failure handler that writes to the Event Log only when it can create the source (WindowsServiceHostBase.cs:404-421 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L404-L421))
+Code block (xml)
+<File Source="$(var.Despachador.TargetDir)appsettings.json" KeyPath="yes"/>          <!-- L51: no such file is built or tracked -->
+<File Source="$(var.Despachador.TargetDir)Aplicacion.dll" KeyPath="yes"/>             <!-- L59: the assembly is AplicacionDespachador.dll -->
+<File Source="$(var.Despachador.TargetDir)Infraestructura.dll" KeyPath="yes"/>         <!-- L67: the assembly is InfraestructuraDespachador.dll -->
+The Setup WiX project is not listed in Despachador.sln, so a solution build never builds it. Read as written, it cannot produce a working package: it packages an appsettings.json that the solution neither produces nor tracks (the host is configured through App.config and the encrypted configuration), it names Aplicacion.dll and Infraestructura.dll while the assemblies are AplicacionDespachador.dll and InfraestructuraDespachador.dll, and it lists only five files, omitting MUFG_T24.dll, SimpleInjector.dll, Newtonsoft.Json.dll, and the WCF client libraries that the service needs at run time (whether the build copies them to the target directory was not verified). It declares an x64 package, ProgramFiles64Folder, and Bitness="always64" for an executable that all four projects build for x86; it runs the service as NT AUTHORITY\LocalService without any evidence that this account can reach SQL Server, the T24 web service, and the log folder (the connection settings are in encrypted configuration and not visible); the version is fixed at 1.0.0.0; no recovery actions are declared, which matters because a failed start ends with exit code 1 (DSP-FR-23); and no Event Log source is registered, so the start-up failure and unobserved-exception entries written by the shared base and runner are lost unless the source already exists or the account can create it.
+Recommendation: add the installer to the solution (or to a release pipeline that is built in CI), harvest the host's output directory instead of listing files by hand, align the platform with the build, take the version from the assembly, declare restart-on-failure actions and an Event Log source, make the service account a parameter that the operations team confirms, and add an install-start-stop smoke test (which also covers DSP-FR-1).
+Code block (xml)
+<ServiceInstall Name="Despachador" DisplayName="Despachador" Type="ownProcess" Start="auto" ErrorControl="normal" Account="[SERVICEACCOUNT]">
+  <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart" ThirdFailureActionType="none" RestartServiceDelayInSeconds="30" ResetPeriodInDays="1" />
+</ServiceInstall>
+Benefit: a repeatable installation that has everything the service needs and restarts after a failed start.
+Nice to Rewrite if Time Permits
+DSP-FR-34 - SQL hygiene: mixed encodings, a non-idempotent script, a disguised inner join, an unordered single-row read, and inconsistent parameter types (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: the combined script (SQL/Estructura SQL.sql:2-22 (../../General/Despachador/SQL/Estructura%20SQL.sql#L2-L22)), the disguised join (SQL/usp_despachador_obtenerControlServicio.sql:34-45 (../../General/Despachador/SQL/usp_despachador_obtenerControlServicio.sql#L34-L45)), the unordered read and its consumer (SQL/usp_despachador_VerificarSinFondos.sql:39-45 (../../General/Despachador/SQL/usp_despachador_VerificarSinFondos.sql#L39-L45), RecuperacionDatos.cs:87-96 (../../General/Despachador/Infraestructura/Repositorio/RecuperacionDatos.cs#L87-L96)), the parameter types (SQL/usp_despachador_RevisarRECCBatch.sql:28-32 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L28-L32), SQL/usp_despachador_VerificarSinFondos.sql:28-32 (../../General/Despachador/SQL/usp_despachador_VerificarSinFondos.sql#L28-L32)), the server clock in the throttle row (SQL/usp_despachador_InsertarFechaProcesadoSinFondos.sql:57 (../../General/Despachador/SQL/usp_despachador_InsertarFechaProcesadoSinFondos.sql#L57)), the placeholder header in the SQL project (MWD_DB/tb_srv_controlTipo.sql:8 (../../StoredProcedures/MWD_DB/DBMDW/General/Despachador/Tables/tb_srv_controlTipo.sql#L8)), and .gitattributes (* text=auto)
+• Mixed encodings. Seven scripts are UTF-16LE with a BOM, one is UTF-8 with a BOM, and three are Windows-1252; Git treats the UTF-16 files as binary, so a change to them appears only as a byte-count change (for example "3446 -> 3444 bytes" in the review-fix commit) and cannot be reviewed line by line, and the Windows-1252 files show accented text as ? in tools that assume UTF-8.
+• Non-idempotent DDL. Estructura SQL.sql creates tables and a table type and inserts the seed rows without existence checks, so a second run fails on the primary key; the table tb_srv_t24_mw_admon_folios that the throttle depends on is not defined in the repository at all.
+• Disguised inner join. obtenerControlServicio uses LEFT JOIN ... WHERE servicio.operando = 1, which is an inner join; write it as one so that its intent (only operating services) is clear.
+• Unordered single-row read. VerificarSinFondos returns every matching row without TOP 1 or an order, and the DAO reads Data[0]; if the table can hold more than one SF row for a folio, an arbitrary one is used (its definition is not in the repository, so uniqueness cannot be checked).
+• Parameter types. @Folio NUMERIC(18,0) is passed a long, @TipoOperacion is VARCHAR(20) in two procedures, VARCHAR(50) in others, and the column is VARCHAR(10).
+• Two clocks. The SF row is stamped with the database server's GETDATE(), while the throttle compares it with the application server's DateTime.Now (DespachadorWorker.cs:356 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L356)); this assumes both clocks agree.
+• Placeholder text. The SQL project's tb_srv_controlTipo.sql header says "bla para el control de estado por tipo de operacion".
+Recommendation: standardize on UTF-8 (with a BOM for SSMS) and mark *.sql accordingly in .gitattributes, make the DDL idempotent (IF OBJECT_ID(...) IS NULL, MERGE for the seed), add the missing table script, write the inner join as one, add TOP 1 ... ORDER BY fec_process DESC (or a unique constraint), align the parameter types, and read the time once from the database.
+Benefit: reviewable diffs, repeatable deployments, and fewer latent surprises in the data layer.
+5. Architecture-Fit Note
+The workload is a database-polling work dispatcher: a long-running Windows Service that, every 30 seconds and on demand, reads the first TopN eligible work-plan steps from SQL Server, keeps pending and in-process packages in memory, and pushes each package over an encrypted TCP socket to one of four sibling Windows Services (loopback by default), with a T24 SOAP balance call for TMD operations. In pattern terms it is a hand-written work-queue scheduler that retries until done (at-least-once dispatch, so downstream idempotency is a design requirement), in which the database is the queue and the memory is a cache that is rebuilt after a restart, which is the right instinct. The lowest-risk path is to modernize in place after correcting the findings, which fits the sequencing in _ORCHESTRATION.md section 6 (real defects first, then duplication, DI, and tests, then hosting): first make the service start, stop, and read its settings correctly and make the build reproducible (DSP-FR-1, DSP-FR-23, DSP-FR-8, DSP-FR-24, DSP-FR-25, DSP-FR-2); then make the dispatch outcome, database failures, and transport failures visible and bounded (DSP-FR-4, DSP-FR-9, DSP-FR-15, DSP-FR-19, DSP-FR-20) and stop customer-facing mis-statuses (DSP-FR-5, DSP-FR-6); then secure the T24 call and the channel and the logs (DSP-FR-16, DSP-FR-18, DSP-FR-21), repair the tests and the SQL contract (DSP-FR-26, DSP-FR-27, DSP-FR-28, DSP-FR-30, DSP-FR-31); and only then evaluate hosting. Two larger options follow naturally from the findings but depend on facts that this audit does not have. A claim-based dispatch (the dispatcher atomically claims a step in the database, for example with UPDATE ... OUTPUT and READPAST, before it sends) would remove the in-memory de-duplication and the head-of-line churn of DSP-FR-9 and would allow more than one dispatcher instance; a message queue between the dispatcher and the services (the portfolio already uses MQ elsewhere) would add durability, back-pressure, and visibility, at the price of message-contract versioning and dead-letter handling. Both need the production volumes and peak rates, the downstream services' idempotency, the latency expectation, whether any downstream runs on another host, the constraints of the 32-bit shared library and the D:\ServiceCMS deployment, and a budget. Because this dispatcher is the only consumer of WindowsServiceDespachador and its TCP contract and encryption key are shared with four services, any change to the channel (DSP-FR-21) must be rolled out across all of them together. A microservices rewrite is not justified by a code-quality review.
+6. JIRA-Ready Backlog
+Use the finding ID as the JIRA key suffix (DSP-FR-#); priority equals the finding severity.
+ID	Title	Category	Project	File(s)	Priority
+DSP-FR-1	Apply the service name once in the shared runner and remove the OnStart assignment (GEN-14)	MustChange/rewrite	MUFG_T24 / Despachador host	WindowsServiceHostBase.cs:95-108 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L95-L108)	Blocker
+DSP-FR-2	Replace the absolute D:\ServiceCMS references with a versioned package (GEN-1)	MustChange/rewrite	All four projects	AplicacionDespachador.csproj:36-39 (../../General/Despachador/Aplicacion/AplicacionDespachador.csproj#L36-L39) (+3 project files)	Blocker
+DSP-FR-3	Add a README, a CI build, and a baseline analyzer set	NiceToRewrite_ifTimePermits	Solution	.editorconfig:3-11 (../../General/Despachador/.editorconfig#L3-L11)	Minor
+DSP-FR-4	Consume the dispatch outcome: log it, count failures, add a cool-down and an alert	MustChange/rewrite	AplicacionDespachador	OperacionServicio.cs:466-482 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L466-L482)	Major
+DSP-FR-5	Make the funds check three-state and stamp "sin fondos" only on a confirmed shortfall	MustChange/rewrite	AplicacionDespachador / InfraestructuraDespachador	DespachadorWorker.cs:275-308 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L275-L308)	Major
+DSP-FR-6	Mark past-dated operations once through the shared marker and alert	MustChange/rewrite	AplicacionDespachador / SQL	DespachadorWorker.cs:243-268 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L243-L268)	Major
+DSP-FR-7	Validate control rows individually and refresh the control state atomically	MustChange/rewrite	AplicacionDespachador	ControlServicio.cs:27-41 (../../General/Despachador/Aplicacion/Modelo/ControlServicio.cs#L27-L41)	Major
+DSP-FR-8	Own the loops and workers: drain on stop and write the terminal state once	MustChange/rewrite	AplicacionDespachador / Despachador host	OperacionServicio.cs:85-125 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L85-L125)	Major
+DSP-FR-9	Keep refused operations out of the selector window with a cool-down set	rewrite_recommended	AplicacionDespachador / SQL	SQL/usp_despachador_obtenerOperacionesPendientes.sql:91-104 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L91-L104)	Major
+DSP-FR-10	Use the shared Despachador base hooks instead of a second wake-up loop	rewrite_recommended	Despachador host / AplicacionDespachador	ServiceHost.cs:25-31 (../../General/Despachador/Despachador/ServiceHost.cs#L25-L31)	Minor
+DSP-FR-11	Synchronize the transition flags, log outside the lock, and dispose the semaphores	rewrite_recommended	AplicacionDespachador	OperacionServicio.cs:342-370 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L342-L370)	Minor
+DSP-FR-12	Replace nullable .Value reads with validated options and GetValueOrDefault	rewrite_recommended	AplicacionDespachador / Despachador host	OperacionServicio.cs:140 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L140)	Minor
+DSP-FR-13	Filter pending operations with one key set and one key comparer	NiceToRewrite_ifTimePermits	AplicacionDespachador	OperacionServicio.cs:579-604 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L579-L604)	Minor
+DSP-FR-14	Remove obsolete constants, dead members, magic numbers, and the duplicate type name	NiceToRewrite_ifTimePermits	AplicacionDespachador	OperacionServicio.cs:679-684 (../../General/Despachador/Aplicacion/OperacionServicio.cs#L679-L684)	Minor
+DSP-FR-15	Read Exito in every read DAO and make each caller's fail-open or fail-closed choice explicit (GEN-11)	MustChange/rewrite	InfraestructuraDespachador / MUFG_T24	ParametrizacionControlDao.cs:33-61 (../../General/Despachador/Infraestructura/Repositorio/ParametrizacionControlDao.cs#L33-L61)	Major
+DSP-FR-16	Use HTTPS for the T24 balance call and stop sending credentials in clear text	MustChange/rewrite	InfraestructuraDespachador	wsT24.cs:31-47 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L31-L47)	Major
+DSP-FR-17	Close or abort the WCF client on every path and set explicit timeouts	MustChange/rewrite	InfraestructuraDespachador	wsT24.cs:31-36 (../../General/Despachador/Infraestructura/SOAP/wsT24.cs#L31-L36)	Major
+DSP-FR-18	Mask account numbers and stop logging balances (GEN-5)	MustChange/rewrite	AplicacionDespachador / InfraestructuraDespachador	DespachadorWorker.cs:436 (../../General/Despachador/Aplicacion/Servicios/DespachadorWorker.cs#L436)	Major
+DSP-FR-19	Enforce the TCP response deadline by closing the socket and separate timeout from cancellation	MustChange/rewrite	InfraestructuraDespachador	PeticionTCP.cs:64-72 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L64-L72)	Major
+DSP-FR-20	Validate the response length before allocating	MustChange/rewrite	InfraestructuraDespachador	PeticionTCP.cs:68-72 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L68-L72)	Major
+DSP-FR-21	Authenticate the dispatch channel (encrypt-then-MAC, key id, nonce) and protect the response	rewrite_recommended	InfraestructuraDespachador / MUFG_T24	PeticionTCP.cs:52-60 (../../General/Despachador/Infraestructura/TCP/PeticionTCP.cs#L52-L60)	Major
+DSP-FR-22	Remove leftover configuration and redundant packages; add ConfigureAwait(false)	NiceToRewrite_ifTimePermits	AplicacionDespachador / InfraestructuraDespachador	AplicacionDespachador.csproj:47-51 (../../General/Despachador/Aplicacion/AplicacionDespachador.csproj#L47-L51)	Minor
+DSP-FR-23	Stop through the base failure path and write the terminal state when start-up fails (GEN-7)	MustChange/rewrite	Despachador host	ServiceHost.cs:85-105 (../../General/Despachador/Despachador/ServiceHost.cs#L85-L105)	Major
+DSP-FR-24	Inspect the run-state and alert results at start-up and shutdown (GEN-9)	MustChange/rewrite	Despachador host / AplicacionDespachador	ServiceHost.cs:93 (../../General/Despachador/Despachador/ServiceHost.cs#L93)	Major
+DSP-FR-25	Copy and validate all dispatcher settings in one options object and settle the log-size unit	MustChange/rewrite	Despachador host	ServiceHost.cs:54-64 (../../General/Despachador/Despachador/ServiceHost.cs#L54-L64)	Major
+DSP-FR-26	Replace the credential-shaped test literals with placeholders and rotate them if valid	MustChange/rewrite	PruebasUnitarias	DespachadorWorkerUT.cs:44-46 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L44-L46) (+8 more tests)	Blocker
+DSP-FR-27	Derive the future-date test dates from the clock	MustChange/rewrite	PruebasUnitarias	DespachadorWorkerUT.cs:378 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L378)	Major
+DSP-FR-28	Add tests for the dispatch loop, response handling, failures, DAOs, clients, and host (GEN-2)	MustChange/rewrite	PruebasUnitarias	PruebasUnitarias.csproj:80-85 (../../General/Despachador/PruebasUnitarias/PruebasUnitarias.csproj#L80-L85)	Major
+DSP-FR-29	Extract a shared arrangement, pass real arguments, and remove reflection and polling	rewrite_recommended	PruebasUnitarias	DespachadorWorkerUT.cs:36-60 (../../General/Despachador/PruebasUnitarias/DespachadorWorkerUT.cs#L36-L60)	Minor
+DSP-FR-30	Make the SQL project the source of truth and add a contract check (GEN-13)	MustChange/rewrite	SQL / MUFG_T24	SQL/usp_despachador_actualizaCuentaSinFondos.sql:38-58 (../../General/Despachador/SQL/usp_despachador_actualizaCuentaSinFondos.sql#L38-L58)	Major
+DSP-FR-31	Generate RevisarRECCBatch from one mapping and settle MFX and the missing types	rewrite_recommended	SQL	SQL/usp_despachador_RevisarRECCBatch.sql:138-145 (../../General/Despachador/SQL/usp_despachador_RevisarRECCBatch.sql#L138-L145)	Major
+DSP-FR-32	Derive the dispatchable services from the control table and unify the current-step definition	rewrite_recommended	SQL	SQL/usp_despachador_obtenerOperacionesPendientes.sql:38-55 (../../General/Despachador/SQL/usp_despachador_obtenerOperacionesPendientes.sql#L38-L55)	Minor
+DSP-FR-33	Fix, build, and test the installer (files, dependencies, recovery, event source)	rewrite_recommended	Setup	Product.wxs:47-69 (../../General/Despachador/Setup/Product.wxs#L47-L69)	Major
+DSP-FR-34	Standardize SQL encodings and make the DDL idempotent	NiceToRewrite_ifTimePermits	SQL	SQL/Estructura SQL.sql:2-22 (../../General/Despachador/SQL/Estructura%20SQL.sql#L2-L22)	Minor
 
-﻿using MUFG_T24.Configuracion_utilidades;
-using System;
-
-
-namespace Aplicacion.Modelos
-{
-    /// <summary>
-    /// Propiedades generales del servicio
-    /// </summary>
-    public class ConfiguracionServicio : Configuracion
-    {
-        public string StrFechaSistemaTomi { get; set; } = null;
-        public TimeSpan? StrFechaSistemaServicio { get; set; } = null;
-        public TimeSpan? StrHoraOperacionesInicio { get; set; } = null;
-        public TimeSpan? StrHoraOperacionesFin { get; set; } = null;
-        public TimeSpan? HORA_OP_INICIO {  get; set; } = null;
-        public TimeSpan? HORA_OP_FIN { get; set; } = null;
-        public bool EnHorarioOperaciones { get; set; } = false;
-        public string StrNombreServicio { get; set; } = null;
-        public bool BoEsDiaHabil { get; set; } = false;
-
-        // Logs y rutas archivo config
-        public string RutaArchivoConfiguracionOriginal { get; set; }
-        public string RutaArchivoConfiguracionFinal { get; set; }
-        public string RutaArchivoLogs { get; set; }
-    }
-}
-
-using Aplicacion.Enums;
-using Aplicacion.Interfaces;
-using Aplicacion.Modelos;
-using Aplicacion.Modelos.Tomi;
-using MUFG_T24.Comunes;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Threading.Tasks;
-
-
-namespace Infraestructura.Servicio
-{
-    /// <summary>
-    /// Clase para conectarse a BD InterfacesT24 
-    /// </summary>
-    public class RepositorioTomi : RepositorioMaestro, IRepositorioTomi
-    {
-        private readonly Alertas _alertas;
-        private readonly ConfiguracionServicio _configuracionServicio;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        /// <param name="proveedor"></param>
-        /// <param name="nombreBasedatos"></param>
-        /// <param name="proveedorVistasT24"></param>
-        /// <param name="nombreBasedatosVistasT24"></param>
-        public RepositorioTomi(Alertas alertas, ConfiguracionServicio configuracionServicio) : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
-        {
-            _alertas = alertas;
-            _configuracionServicio = configuracionServicio;
-        }
-
-        /// <summary>
-        /// Marca puerto libre
-        /// </summary>
-        /// <param name="intpId"></param>
-        /// <param name="strNombreProceso"></param>
-        /// <param name="strNombreServicio"></param>
-        /// <param name="strServicio"></param>
-        /// <returns></returns>
-        /// <exception cref="Exception"></exception>
-        public async Task ActualizaPuertoLibre(string strServicio)
-        {
-            try
-            {
-                StoredProcedureResult resultadoSP = await EjecutarStoredProceduredNonQuery(
-              EnumProcedimientosAlmacenados.usp_MarcaPuertoLibre, cmd =>
-              {
-                  cmd.Parameters.Add(basedatosConexion.CrearParametro("@Servicio", strServicio));
-              });
-
-                if (!resultadoSP.Exito)
-                {
-                    string strMsjError = $"Error|ActualizaPuertoLibre|No se completo actualizacion del puerto {resultadoSP.MensajeError}";
-                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
-                    throw new Exception(strMsjError);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ActualizaPuertoLibre: " + ex, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Marca puerto en uso
-        /// </summary>
-        /// <param name="intpId"></param>
-        /// <param name="strNombreProceso"></param>
-        /// <param name="strNombreServicio"></param>
-        /// <param name="strServicio"></param>
-        /// <returns></returns>
-        /// <exception cref="Exception"></exception>
-        public async Task ActualizaPuertoEnUso(int intpId, string strNombreProceso, string strNombreServicio, string strServicio)
-        {
-            try
-            {
-                StoredProcedureResult resultadoSP = await EjecutarStoredProceduredNonQuery(
-               EnumProcedimientosAlmacenados.usp_MarcaPuertoEnEso, cmd =>
-               {
-                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@PId", intpId));
-                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@NombreProceso", strNombreProceso, 50));
-                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@NombreServicio", strNombreServicio, 50));
-                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@Servicio", strServicio, 50));
-               });
-
-                if (!resultadoSP.Exito)
-                {
-                    string strMsjError = $"ERROR|ActualizaPuertoEnUso|No se completo actualizacion del puerto: {resultadoSP.MensajeError}";
-                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
-                    throw new Exception(strMsjError);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ActualizaPuertoEnUso: " + ex, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Obtiene las fechas del sistema.
-        /// </summary>
-        /// <returns>string</returns>
-        public async Task<string> ObtenerFechaSistema()
-        {
-            try
-            {
-                StoredProcedureResult<MapearCamposGenerales> strFecha =
-                await EjecutarStoredProcedureQuery<MapearCamposGenerales>(EnumProcedimientosAlmacenados
-                .usp_ConsultaFechaSistema);
-
-                if (strFecha.Data.Count == 0 || strFecha.MensajeError != null)
-                {
-                    string strMsjError = $"ERROR|ObtenerFechaSistema: {strFecha.MensajeError}";
-                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
-                    throw new Exception(strMsjError);
-                }
-
-                string strFechaFormateada = strFecha.Data.FirstOrDefault().Fecha.ToString(EnumParametrosGenerales.FECHA_BD);
-                return strFechaFormateada;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ObtenerFechaSistema: " + ex, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Inserta alertas
-        /// </summary>
-        /// <param name="alerta"></param>
-        /// <returns></returns>
-        public async Task ProcesoInsertaAlerta(AlertaDTO alerta)
-        {
-            try
-            {
-                bool boAlertaInsertada = await _alertas.InsertarAlerta(alerta);
-                if (!boAlertaInsertada)
-                {
-                    string strMsjError = "ERROR|ProcesoInsertaAlerta|No se completo la insercion de la Alerta";
-                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
-                    throw new Exception(strMsjError);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ProcesoInsertaAlerta: " + ex, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
-        /// </summary>
-        /// <returns>Dictionary<string, string></returns>
-        public async Task<bool> ValidaSiEsDiaHabil()
-        {
-            try
-            {
-                return await EsDiaHabil();
-            }
-            catch (Exception ex)
-            {
-                string strMsjError = $"ERROR|ValidaSiEsDiaHabil|No se pudo recuperar dia habil. Excepcion: {ex}";
-                Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
-        /// </summary>
-        /// <returns>Dictionary<string, string></returns>
-        public async Task<Dictionary<string, string>> ObtenerParametrosSistema()
-        {
-            try
-            {
-                StoredProcedureResult<MapearCamposGenerales> resultadoSp =
-                await EjecutarStoredProcedureQuery<MapearCamposGenerales>(
-                EnumProcedimientosAlmacenados.usp_ParametrosSistema);
-
-                if (resultadoSp.Data.Count == 0 || resultadoSp.MensajeError != null)
-                {
-                    string strMsjError = "ERROR|ObtenerParametrosSistema|" + resultadoSp.MensajeError;
-                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
-                    throw new Exception(strMsjError);
-                }
-
-                Dictionary<string, string> diccParametros = new Dictionary<string, string>();
-                foreach (MapearCamposGenerales parametro in resultadoSp.Data)
-                {
-                    diccParametros.Add(parametro.Id_parametro, parametro.Valor);
-                }
-                return diccParametros;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ObtenerParametrosSistema: " + ex, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Actualiza ejecucion del servicio INICIO
-        /// </summary>
-        /// <param name="strFolio"></param>
-        /// <returns></returns>
-        /// <exception cref="Exception"></exception>
-        public async Task ProcesoActualizaEjecucion(string strNombreServicio, int intgpId, string strNombreProceso)
-        {
-            try
-            {
-                StoredProcedureResult resultActualizaEjec = await ActualizaEJecucion(strNombreServicio);
-                if (resultActualizaEjec.MensajeError != null &&
-                    resultActualizaEjec.Exception != null &&
-                    !resultActualizaEjec.Exito)
-                {
-                    string strMsjErro = $"ERROR|ProcesoActualizaEjecucion| " +
-                        $"Error al ejecutar consulta. gpId:{intgpId}, proceso:{strNombreProceso}, Ex: {resultActualizaEjec.Exception}, Mensaje: {resultActualizaEjec.MensajeError}";
-
-                    Config.EscribirLog(strMsjErro, _configuracionServicio.NombreServicio);
-                    throw new Exception(strMsjErro);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ProcesoActualizaEjecucion: " + ex, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Actualiza terminacion del proceso
-        /// </summary>
-        /// <param name="strNombreServicio"></param>
-        /// <param name="intgpId"></param>
-        /// <param name="strNombreProceso"></param>
-        /// <returns></returns>
-        /// <exception cref="Exception"></exception>
-        public async Task ProcesoActualizaTerminacion(string strNombreServicio, int intgpId, string strNombreProceso)
-        {
-            try
-            {
-                StoredProcedureResult resultActualizaTerm = await ActualizaTerminacion(strNombreServicio);
-                if (resultActualizaTerm.MensajeError != null && resultActualizaTerm.Exception != null && !resultActualizaTerm.Exito)
-                {
-                    string strMsjErro = $"ERROR|ProcesoActualizaTerminacion| " +
-                        $"Error al ejecutar consulta. gpId:{intgpId}, proceso:{strNombreProceso}, Ex: {resultActualizaTerm.Exception}, Mensaje: {resultActualizaTerm.MensajeError}";
-
-                    Config.EscribirLog(strMsjErro, _configuracionServicio.NombreServicio);
-                    throw new Exception(strMsjErro);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog("ERROR|ProcesoActualizaTerminacion " + ex, _configuracionServicio.NombreServicio);
-                throw;
-            }
-        }
-    }
-}
-
-using Aplicacion;
-using Aplicacion.Interfaces;
-using Aplicacion.Modelos;
-using Infraestructura.Servicio;
-using MUFG_T24.Comunes;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.ControladorServicios_Utilidades;
-using MUFG_T24.Enums_utilidades;
-using MUFG_T24.Inicializacion_utilidades;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Logeo_utilidades;
-using MUFG_T24.Modelos;
-using SimpleInjector;
-using SimpleInjector.Lifestyles;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Swf_IN_ControladorServicios
-{
-    /// <summary>
-    /// Clase principal serviceHost
-    /// </summary>
-    public partial class ServiceHost : WindowsServiceHostBase
-    {
-        private Container _containerDI;
-        private ConfiguracionServicio _configuracionBase;
-
-        protected override string NombreServicioLog => NombreServicio.Swf_IN_ControladorServicios.ToString();
-        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
-        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public ServiceHost() { }
-
-        /// <summary>
-        /// Realiza la inyección y establece un timer
-        /// que ejecutará su delegado por tick del intervalo.
-        /// </summary>
-        protected override void Inicializacion(string[] args, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            //Realiza la configuracion del contenedor DI...
-            _containerDI = new SimpleInjector.Container();
-            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
-            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
-            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
-            _containerDI.Register<IControlServicio, ControlServicio>();
-            _containerDI.Register<IParametrizacion, Parametrizacion>();
-
-            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
-
-            _configuracionBase = new ConfiguracionServicio();
-
-            //Inicializa la obtención de la configuración general y el logging...
-            {
-                MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.Inicializar();
-                ServicioConfiguracionSettings servicioMainConfiguracion = MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.ObtenerServicio(NombreServicio.Swf_IN_ControladorServicios.ToString());
-                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
-                _configuracionBase.StrNombreServicio = servicioMainConfiguracion.NombreServicio;
-                _configuracionBase.RutaArchivoConfiguracion = $@"{EnumRutasGenerales.Path_Log_CMS}{NombreServicio.Swf_IN_ControladorServicios.ToString()}\";
-                _configuracionBase.PathLog = servicioMainConfiguracion.Log + servicioMainConfiguracion.NombreServicio;
-                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
-                _configuracionBase.configuracion = servicioMainConfiguracion.configuracion;
-                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
-                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
-
-                RutasConfiguracion rutas = new RutasConfiguracion()
-                {
-                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
-                };
-                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
-                Logging.Write("INFO|OnStart|Leyendo archivo de configuración.");
-            }
-
-            //Registra la configuracion...
-            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
-            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
-
-            _containerDI.Register<ConfiguracionServicio>(() => (ConfiguracionServicio)_configuracionBase.Clone(), Lifestyle.Scoped);
-            _containerDI.Register<IRepositorioTomi, RepositorioTomi>(Lifestyle.Scoped);
-            _containerDI.Register<Aplicacion.Interfaces.IControladorServicios, Aplicacion.Service.ControladorServicios>(Lifestyle.Scoped);
-            _containerDI.Register<Aplicacion.Interfaces.IOperacionServicio, OperacionServicio>(Lifestyle.Scoped);
-
-            _containerDI.Verify();
-
-        }
-
-        /// <summary>
-        /// Realiza la obtención inicial de parámetros (una sola vez).
-        /// </summary>
-        protected override async Task ParametrizacionesAsync(CancellationToken ct)
-        {
-            try
-            {
-                //Obtiene el proceso actual...
-                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
-
-                Configuracion configMufgT24 = new Configuracion();
-                Configuracion nuevaConfig = await _parametrizacion.ObtenerProcesoActualAsync(configMufgT24);
-                _configuracionBase.Pid = nuevaConfig.Pid;
-                _configuracionBase.NombreProceso = nuevaConfig.NombreProceso;
-                _configuracionBase.NombreDisplay = nuevaConfig.NombreDisplay;
-
-                //Marca el servicio en uso...
-                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
-                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|ParametrizacionesAsync|{ex}");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Ejecuta el funcionamiento principal del servicio en cada tick.
-        /// </summary>   
-        protected override async Task OnTimerAsync(CancellationToken ct)
-        {
-
-            try
-            {
-                //Ejecuta el procedimiento principal del servicio...
-                using (AsyncScopedLifestyle.BeginScope(_containerDI))
-                {
-                    var operacionServicio = _containerDI.GetInstance<Aplicacion.Interfaces.IOperacionServicio>();
-                    await operacionServicio.EjecutaProcedimiento().ConfigureAwait(false);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
-            }
-        }
-
-        /// <summary>
-        /// Realiza ciertas operaciones antes de finalizar el servicio.
-        /// </summary>
-        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
-        {
-            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
-
-            try
-            {
-                if (_containerDI == null || _configuracionBase == null)
-                {
-                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
-                    return;
-                }
-
-                using (AsyncScopedLifestyle.BeginScope(_containerDI))
-                {
-                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
-
-                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
-                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
-
-                    //Marca el servicio en uso...
-                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
-
-                    //Marca el termino del servicio...
-                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
-
-                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                //Apagado normal
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
-            }
-            finally
-            {
-                _containerDI?.Dispose();
-            }
-        }
-
-    }
-}
-
-﻿using MUFG_T24.Comunes;
-using MUFG_T24.ControladorServicios_Utilidades;
-using System.ServiceProcess;
-
-namespace Swf_IN_ControladorServicios
-{
-
-    /// <summary>
-    /// Clase de entrada.
-    /// </summary>
-    internal static class Program
-    {
-        /// <summary>
-        /// Punto de entrada Main.
-        /// </summary>
-        static void Main(string[] args)
-        {
-            WindowsServiceProgramRunner.Run(
-                NombreServicio.Swf_IN_ControladorServicios.ToString(),
-                () => new ServiceHost(),
-                args,
-                (service, startupArgs) => ((ServiceHost)service).DebugRun(startupArgs));
-        }
-
-    }
-
-}
-
-App.config
-﻿<?xml version="1.0" encoding="utf-8" ?>
-<configuration>
-    <startup> 
-        <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" />
-    </startup>
-</configuration>
-
-Aplicacion.csproj
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
-  <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{D2BA13B9-2941-402C-910E-CF902AB9F5DC}</ProjectGuid>
-    <OutputType>Library</OutputType>
-    <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Aplicacion</RootNamespace>
-    <AssemblyName>AplicacionSWF_IN_CONTROLADORSERVICIOS</AssemblyName>
-    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
-    <Deterministic>true</Deterministic>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-    <PlatformTarget>x86</PlatformTarget>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-    <PlatformTarget>x86</PlatformTarget>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
-    <DebugSymbols>true</DebugSymbols>
-    <OutputPath>bin\x86\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <DebugType>full</DebugType>
-    <PlatformTarget>x86</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
-    <ErrorReport>prompt</ErrorReport>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
-    <OutputPath>bin\x86\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <Optimize>true</Optimize>
-    <DebugType>pdbonly</DebugType>
-    <PlatformTarget>x86</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
-    <ErrorReport>prompt</ErrorReport>
-  </PropertyGroup>
-  <ItemGroup>
-    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, processorArchitecture=x86">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-    </Reference>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.ServiceProcess" />
-    <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
-    <Reference Include="System.Net.Http" />
-    <Reference Include="System.Xml" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Include="Enums\EnumComunes.cs" />
-    <Compile Include="Interfaces\IControladorServicios.cs" />
-    <Compile Include="Interfaces\IOperacionServicio.cs" />
-    <Compile Include="Interfaces\IRepositorioTomi.cs" />
-    <Compile Include="Modelos\ConfiguracionServicio.cs" />
-    <Compile Include="Modelos\Tomi\MapearCamposGenerales.cs" />
-    <Compile Include="OperacionServicio.cs" />
-    <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="Service\ControladorServicios.cs" />
-  </ItemGroup>
-  <ItemGroup />
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-</Project>
-
-
-Infraestructura.csproj
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
-  <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}</ProjectGuid>
-    <OutputType>Library</OutputType>
-    <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Infraestructura</RootNamespace>
-    <AssemblyName>InfraestructuraSWF_IN_CONTROLADORSERVICIOS</AssemblyName>
-    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
-    <Deterministic>true</Deterministic>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-    <PlatformTarget>x86</PlatformTarget>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-    <PlatformTarget>x86</PlatformTarget>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
-    <DebugSymbols>true</DebugSymbols>
-    <OutputPath>bin\x86\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <DebugType>full</DebugType>
-    <PlatformTarget>x86</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
-    <ErrorReport>prompt</ErrorReport>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
-    <OutputPath>bin\x86\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <Optimize>true</Optimize>
-    <DebugType>pdbonly</DebugType>
-    <PlatformTarget>x86</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
-    <ErrorReport>prompt</ErrorReport>
-  </PropertyGroup>
-  <ItemGroup>
-    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, processorArchitecture=x86">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-    </Reference>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
-    <Reference Include="System.Net.Http" />
-    <Reference Include="System.Xml" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="Servicio\RepositorioTomi.cs" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj">
-      <Project>{D2BA13B9-2941-402C-910E-CF902AB9F5DC}</Project>
-      <Name>Aplicacion</Name>
-    </ProjectReference>
-  </ItemGroup>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-</Project>
-
-
-Swf_IN_ControladorServicios.csproj
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
-  <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{D033944C-F2CA-433D-8C6E-2D12ACABD822}</ProjectGuid>
-    <OutputType>Exe</OutputType>
-    <RootNamespace>Swf_IN_ControladorServicios</RootNamespace>
-    <AssemblyName>Swf_IN_ControladorServicios</AssemblyName>
-    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
-    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
-    <Deterministic>true</Deterministic>
-    <NuGetPackageImportStamp>
-    </NuGetPackageImportStamp>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <PlatformTarget>x86</PlatformTarget>
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <PlatformTarget>x86</PlatformTarget>
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup>
-    <StartupObject />
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
-    <DebugSymbols>true</DebugSymbols>
-    <OutputPath>bin\x86\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <DebugType>full</DebugType>
-    <PlatformTarget>x86</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
-    <ErrorReport>prompt</ErrorReport>
-    <Prefer32Bit>true</Prefer32Bit>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
-    <OutputPath>bin\x86\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <Optimize>true</Optimize>
-    <DebugType>pdbonly</DebugType>
-    <PlatformTarget>x86</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
-    <ErrorReport>prompt</ErrorReport>
-    <Prefer32Bit>true</Prefer32Bit>
-  </PropertyGroup>
-  <ItemGroup>
-    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Bcl.AsyncInterfaces.10.0.3\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Configuration, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.Configuration.10.0.3\lib\net462\Microsoft.Extensions.Configuration.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Configuration.Abstractions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.Configuration.Abstractions.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Abstractions.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Configuration.Binder, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.Configuration.Binder.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Binder.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Configuration.FileExtensions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.Configuration.FileExtensions.10.0.3\lib\net462\Microsoft.Extensions.Configuration.FileExtensions.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Configuration.Json, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.Configuration.Json.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Json.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.FileProviders.Abstractions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.FileProviders.Abstractions.10.0.3\lib\net462\Microsoft.Extensions.FileProviders.Abstractions.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.FileProviders.Physical, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.FileProviders.Physical.10.0.3\lib\net462\Microsoft.Extensions.FileProviders.Physical.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.FileSystemGlobbing, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.FileSystemGlobbing.10.0.3\lib\net462\Microsoft.Extensions.FileSystemGlobbing.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Primitives, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Extensions.Primitives.10.0.3\lib\net462\Microsoft.Extensions.Primitives.dll</HintPath>
-    </Reference>
-    <Reference Include="MUFG_T24">
-      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-    </Reference>
-    <Reference Include="SimpleInjector, Version=5.0.0.0, Culture=neutral, PublicKeyToken=984cb50dea722e99, processorArchitecture=MSIL">
-      <HintPath>packages\SimpleInjector.5.5.0\lib\net461\SimpleInjector.dll</HintPath>
-    </Reference>
-    <Reference Include="System" />
-    <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Configuration" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.IO.Pipelines, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.IO.Pipelines.10.0.3\lib\net462\System.IO.Pipelines.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Memory, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Memory.4.6.3\lib\net462\System.Memory.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Numerics" />
-    <Reference Include="System.Numerics.Vectors, Version=4.1.6.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Runtime.CompilerServices.Unsafe, Version=6.0.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Text.Encodings.Web, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Text.Encodings.Web.10.0.3\lib\net462\System.Text.Encodings.Web.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Text.Json, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Text.Json.10.0.3\lib\net462\System.Text.Json.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll</HintPath>
-    </Reference>
-    <Reference Include="System.ValueTuple" />
-    <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
-    <Reference Include="System.Net.Http" />
-    <Reference Include="System.ServiceProcess" />
-    <Reference Include="System.Xml" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Include="ServiceHost.cs">
-      <SubType>Component</SubType>
-    </Compile>
-    <Compile Include="ServiceHost.Designer.cs">
-      <DependentUpon>ServiceHost.cs</DependentUpon>
-    </Compile>
-    <Compile Include="Program.cs" />
-    <Compile Include="Properties\AssemblyInfo.cs" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="App.config" />
-    <None Include="packages.config" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj">
-      <Project>{D2BA13B9-2941-402C-910E-CF902AB9F5DC}</Project>
-      <Name>Aplicacion</Name>
-    </ProjectReference>
-    <ProjectReference Include="..\Infraestructura\Infraestructura.csproj">
-      <Project>{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}</Project>
-      <Name>Infraestructura</Name>
-    </ProjectReference>
-  </ItemGroup>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-  <Import Project="packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
-  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
-    <PropertyGroup>
-      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
-    </PropertyGroup>
-    <Error Condition="!Exists('packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets'))" />
-  </Target>
-</Project>
-
-
-Swf_IN_ControladorServicios.sln
-
-Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 18
-VisualStudioVersion = 18.5.11723.231 stable
-MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Swf_IN_ControladorServicios", "Swf_IN_ControladorServicios.csproj", "{D033944C-F2CA-433D-8C6E-2D12ACABD822}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Aplicacion", "..\Aplicacion\Aplicacion.csproj", "{D2BA13B9-2941-402C-910E-CF902AB9F5DC}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Infraestructura", "..\Infraestructura\Infraestructura.csproj", "{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PruebasUnitarias_Swf_IN_ControladorServicios", "..\PruebasUnitarias_Swf_IN_ControladorServicios\PruebasUnitarias_Swf_IN_ControladorServicios.csproj", "{029DB447-0C86-4178-A56C-4F6C756BC678}"
-EndProject
-Global
-	GlobalSection(SolutionConfigurationPlatforms) = preSolution
-		Debug|Any CPU = Debug|Any CPU
-		Debug|x86 = Debug|x86
-		Release|Any CPU = Release|Any CPU
-		Release|x86 = Release|x86
-	EndGlobalSection
-	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|x86.ActiveCfg = Debug|x86
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|x86.Build.0 = Debug|x86
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|Any CPU.Build.0 = Release|Any CPU
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|x86.ActiveCfg = Release|x86
-		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|x86.Build.0 = Release|x86
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|x86.ActiveCfg = Debug|x86
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|x86.Build.0 = Debug|x86
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|Any CPU.Build.0 = Release|Any CPU
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|x86.ActiveCfg = Release|x86
-		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|x86.Build.0 = Release|x86
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|x86.ActiveCfg = Debug|x86
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|x86.Build.0 = Debug|x86
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|Any CPU.Build.0 = Release|Any CPU
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|x86.ActiveCfg = Release|x86
-		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|x86.Build.0 = Release|x86
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|x86.ActiveCfg = Debug|x86
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|x86.Build.0 = Debug|x86
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|Any CPU.Build.0 = Release|Any CPU
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|x86.ActiveCfg = Release|x86
-		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|x86.Build.0 = Release|x86
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
-	EndGlobalSection
-	GlobalSection(ExtensibilityGlobals) = postSolution
-		SolutionGuid = {9DDF43B9-1825-489F-81A6-D97678A16CA8}
-	EndGlobalSection
-EndGlobal
-
-
-packages.config
-﻿<?xml version="1.0" encoding="utf-8"?>
-<packages>
-  <package id="Microsoft.Bcl.AsyncInterfaces" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.Configuration" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.Configuration.Abstractions" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.Configuration.Binder" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.Configuration.FileExtensions" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.Configuration.Json" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.FileProviders.Abstractions" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.FileProviders.Physical" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.FileSystemGlobbing" version="10.0.3" targetFramework="net48" />
-  <package id="Microsoft.Extensions.Primitives" version="10.0.3" targetFramework="net48" />
-  <package id="SimpleInjector" version="5.5.0" targetFramework="net48" />
-  <package id="System.Buffers" version="4.6.1" targetFramework="net48" />
-  <package id="System.IO.Pipelines" version="10.0.3" targetFramework="net48" />
-  <package id="System.Memory" version="4.6.3" targetFramework="net48" />
-  <package id="System.Numerics.Vectors" version="4.6.1" targetFramework="net48" />
-  <package id="System.Runtime.CompilerServices.Unsafe" version="6.1.2" targetFramework="net48" />
-  <package id="System.Text.Encodings.Web" version="10.0.3" targetFramework="net48" />
-  <package id="System.Text.Json" version="10.0.3" targetFramework="net48" />
-  <package id="System.Threading.Tasks.Extensions" version="4.6.3" targetFramework="net48" />
-  <package id="System.ValueTuple" version="4.6.2" targetFramework="net48" />
-</packages>
-
-
-.gitignore
-## Ignore Visual Studio temporary files, build results, and
-## files generated by popular Visual Studio add-ons.
-##
-## Get latest from `dotnet new gitignore`
-
-# dotenv files
-.env
-/setup
-
-# User-specific files
-*.rsuser
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-
-# User-specific files (MonoDevelop/Xamarin Studio)
-*.userprefs
-
-# Mono auto generated files
-mono_crash.*
-
-# Build results
-[Dd]ebug/
-[Dd]ebugPublic/
-[Rr]elease/
-[Rr]eleases/
-x64/
-x86/
-[Ww][Ii][Nn]32/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Bb]in/
-[Oo]bj/
-[Ll]og/
-[Ll]ogs/
-
-# Visual Studio 2015/2017 cache/options directory
-.vs/
-# Uncomment if you have tasks that create the project's static files in wwwroot
-#wwwroot/
-
-# Visual Studio 2017 auto generated files
-Generated\ Files/
-
-# MSTest test Results
-[Tt]est[Rr]esult*/
-[Bb]uild[Ll]og.*
-
-# NUnit
-*.VisualState.xml
-TestResult.xml
-nunit-*.xml
-
-# Build Results of an ATL Project
-[Dd]ebugPS/
-[Rr]eleasePS/
-dlldata.c
-
-# Benchmark Results
-BenchmarkDotNet.Artifacts/
-
-# .NET
-project.lock.json
-project.fragment.lock.json
-artifacts/
-
-# Tye
-.tye/
-
-# ASP.NET Scaffolding
-ScaffoldingReadMe.txt
-
-# StyleCop
-StyleCopReport.xml
-
-# Files built by Visual Studio
-*_i.c
-*_p.c
-*_h.h
-*.ilk
-*.meta
-*.obj
-*.iobj
-*.pch
-*.pdb
-*.ipdb
-*.pgc
-*.pgd
-*.rsp
-*.sbr
-*.tlb
-*.tli
-*.tlh
-*.tmp
-*.tmp_proj
-*_wpftmp.csproj
-*.log
-*.tlog
-*.vspscc
-*.vssscc
-.builds
-*.pidb
-*.svclog
-*.scc
-
-# Chutzpah Test files
-_Chutzpah*
-
-# Visual C++ cache files
-ipch/
-*.aps
-*.ncb
-*.opendb
-*.opensdf
-*.sdf
-*.cachefile
-*.VC.db
-*.VC.VC.opendb
-
-# Visual Studio profiler
-*.psess
-*.vsp
-*.vspx
-*.sap
-
-# Visual Studio Trace Files
-*.e2e
-
-# TFS 2012 Local Workspace
-$tf/
-
-# Guidance Automation Toolkit
-*.gpState
-
-# ReSharper is a .NET coding add-in
-_ReSharper*/
-*.[Rr]e[Ss]harper
-*.DotSettings.user
-
-# TeamCity is a build add-in
-_TeamCity*
-
-# DotCover is a Code Coverage Tool
-*.dotCover
-
-# AxoCover is a Code Coverage Tool
-.axoCover/*
-!.axoCover/settings.json
-
-# Coverlet is a free, cross platform Code Coverage Tool
-coverage*.json
-coverage*.xml
-coverage*.info
-
-# Visual Studio code coverage results
-*.coverage
-*.coveragexml
-
-# NCrunch
-_NCrunch_*
-.*crunch*.local.xml
-nCrunchTemp_*
-
-# MightyMoose
-*.mm.*
-AutoTest.Net/
-
-# Web workbench (sass)
-.sass-cache/
-
-# Installshield output folder
-[Ee]xpress/
-
-# DocProject is a documentation generator add-in
-DocProject/buildhelp/
-DocProject/Help/*.HxT
-DocProject/Help/*.HxC
-DocProject/Help/*.hhc
-DocProject/Help/*.hhk
-DocProject/Help/*.hhp
-DocProject/Help/Html2
-DocProject/Help/html
-
-# Click-Once directory
-publish/
-
-# Publish Web Output
-*.[Pp]ublish.xml
-*.azurePubxml
-# Note: Comment the next line if you want to checkin your web deploy settings,
-# but database connection strings (with potential passwords) will be unencrypted
-*.pubxml
-*.publishproj
-
-# Microsoft Azure Web App publish settings. Comment the next line if you want to
-# checkin your Azure Web App publish settings, but sensitive information contained
-# in these scripts will be unencrypted
-PublishScripts/
-
-# NuGet Packages
-*.nupkg
-# NuGet Symbol Packages
-*.snupkg
-# The packages folder can be ignored because of Package Restore
-**/[Pp]ackages/*
-# except build/, which is used as an MSBuild target.
-!**/[Pp]ackages/build/
-# Uncomment if necessary however generally it will be regenerated when needed
-#!**/[Pp]ackages/repositories.config
-# NuGet v3's project.json files produces more ignorable files
-*.nuget.props
-*.nuget.targets
-
-# Microsoft Azure Build Output
-csx/
-*.build.csdef
-
-# Microsoft Azure Emulator
-ecf/
-rcf/
-
-# Windows Store app package directories and files
-AppPackages/
-BundleArtifacts/
-Package.StoreAssociation.xml
-_pkginfo.txt
-*.appx
-*.appxbundle
-*.appxupload
-
-# Visual Studio cache files
-# files ending in .cache can be ignored
-*.[Cc]ache
-# but keep track of directories ending in .cache
-!?*.[Cc]ache/
-
-# Others
-ClientBin/
-~$*
-*~
-*.dbmdl
-*.dbproj.schemaview
-*.jfm
-*.pfx
-*.publishsettings
-orleans.codegen.cs
-
-# Including strong name files can present a security risk
-# (https://github.com/github/gitignore/pull/2483#issue-259490424)
-#*.snk
-
-# Since there are multiple workflows, uncomment next line to ignore bower_components
-# (https://github.com/github/gitignore/pull/1529#issuecomment-104372622)
-#bower_components/
-
-# RIA/Silverlight projects
-Generated_Code/
-
-# Backup & report files from converting an old project file
-# to a newer Visual Studio version. Backup files are not needed,
-# because we have git ;-)
-_UpgradeReport_Files/
-Backup*/
-UpgradeLog*.XML
-UpgradeLog*.htm
-ServiceFabricBackup/
-*.rptproj.bak
-
-# SQL Server files
-*.mdf
-*.ldf
-*.ndf
-
-# Business Intelligence projects
-*.rdl.data
-*.bim.layout
-*.bim_*.settings
-*.rptproj.rsuser
-*- [Bb]ackup.rdl
-*- [Bb]ackup ([0-9]).rdl
-*- [Bb]ackup ([0-9][0-9]).rdl
-
-# Microsoft Fakes
-FakesAssemblies/
-
-# GhostDoc plugin setting file
-*.GhostDoc.xml
-
-# Node.js Tools for Visual Studio
-.ntvs_analysis.dat
-node_modules/
-
-# Visual Studio 6 build log
-*.plg
-
-# Visual Studio 6 workspace options file
-*.opt
-
-# Visual Studio 6 auto-generated workspace file (contains which files were open etc.)
-*.vbw
-
-# Visual Studio 6 auto-generated project file (contains which files were open etc.)
-*.vbp
-
-# Visual Studio 6 workspace and project file (working project files containing files to include in project)
-*.dsw
-*.dsp
-
-# Visual Studio 6 technical files
-*.ncb
-*.aps
-
-# Visual Studio LightSwitch build output
-**/*.HTMLClient/GeneratedArtifacts
-**/*.DesktopClient/GeneratedArtifacts
-**/*.DesktopClient/ModelManifest.xml
-**/*.Server/GeneratedArtifacts
-**/*.Server/ModelManifest.xml
-_Pvt_Extensions
-
-# Paket dependency manager
-.paket/paket.exe
-paket-files/
-
-# FAKE - F# Make
-.fake/
-
-# CodeRush personal settings
-.cr/personal
-
-# Python Tools for Visual Studio (PTVS)
-__pycache__/
-*.pyc
-
-# Cake - Uncomment if you are using it
-# tools/**
-# !tools/packages.config
-
-# Tabs Studio
-*.tss
-
-# Telerik's JustMock configuration file
-*.jmconfig
-
-# BizTalk build output
-*.btp.cs
-*.btm.cs
-*.odx.cs
-*.xsd.cs
-
-# OpenCover UI analysis results
-OpenCover/
-
-# Azure Stream Analytics local run output
-ASALocalRun/
-
-# MSBuild Binary and Structured Log
-*.binlog
-
-# NVidia Nsight GPU debugger configuration file
-*.nvuser
-
-# MFractors (Xamarin productivity tool) working folder
-.mfractor/
-
-# Local History for Visual Studio
-.localhistory/
-
-# Visual Studio History (VSHistory) files
-.vshistory/
-
-# BeatPulse healthcheck temp database
-healthchecksdb
-
-# Backup folder for Package Reference Convert tool in Visual Studio 2017
-MigrationBackup/
-
-# Ionide (cross platform F# VS Code tools) working folder
-.ionide/
-
-# Fody - auto-generated XML schema
-FodyWeavers.xsd
-
-# VS Code files for those working on multiple tools
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-*.code-workspace
-
-# Local History for Visual Studio Code
-.history/
-
-# Windows Installer files from build outputs
-*.cab
-*.msi
-*.msix
-*.msm
-*.msp
-
-# JetBrains Rider
-*.sln.iml
-.idea/
-
-##
-## Visual studio for Mac
-##
-
-
-# globs
-Makefile.in
-*.userprefs
-*.usertasks
-config.make
-config.status
-aclocal.m4
-install-sh
-autom4te.cache/
-*.tar.gz
-tarballs/
-test-results/
-
-# Mac bundle stuff
-*.dmg
-*.app
-
-# content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
-# General
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Icon must end with two \r
-Icon
-
-
-# Thumbnails
-._*
-
-# Files that might appear in the root of a volume
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
-
-# Directories potentially created on remote AFP share
-.AppleDB
-.AppleDesktop
-Network Trash Folder
-Temporary Items
-.apdisk
-
-# content below from: https://github.com/github/gitignore/blob/main/Global/Windows.gitignore
-# Windows thumbnail cache files
-Thumbs.db
-ehthumbs.db
-ehthumbs_vista.db
-
-# Dump file
-*.stackdump
-
-# Folder config file
-[Dd]esktop.ini
-
-# Recycle Bin used on file shares
-$RECYCLE.BIN/
-
-# Windows Installer files
-*.cab
-*.msi
-*.msix
-*.msm
-*.msp
-
-# Windows shortcuts
-*.lnk
-
-# Vim temporary swap files
-*.swp
-
-
-README.md
-  # SWF_IN_ControladorServicios
-
-
-
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin http://gitlab.mufg.mx/mufg-it/mufg-sda/middleware-nttdata/SWIFT/incoming/SWF_IN_ControladorServicios.git
-git branch -M main
-git push -uf origin main
-```
-
-## Integrate with your tools
-
-- [ ] [Set up project integrations](http://gitlab.mufg.mx/mufg-it/mufg-sda/middleware-nttdata/SWIFT/incoming/SWF_IN_ControladorServicios/-/settings/integrations)
-
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
