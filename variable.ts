@@ -1,287 +1,2063 @@
-Swf IN ControladorServicios Recommendations
-Swf_IN_ControladorServicios – Architecture & Code Quality Recommendations
-Solution: Swf_IN_ControladorServicios.sln (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/Swf_IN_ControladorServicios.sln). Reviewed: 2026-10-15, branch CodeReview, commit 93404d5d35872d6d0c5a4d0195a2346847cef1f9 (UT CodeReview). Compared against: LoansApp coding-practices baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md). See also: _ORCHESTRATION.md (./_ORCHESTRATION.md) (methodology, template, standing findings GEN-#). Phase 0-1 context: application understanding §4.7.1 (../Application_understanding_technical_document_master.md), dependency ladder (../excecutive_docs/Base_Project_Dependency_Ladder.md). Target: .NET Framework 4.8 Windows Service; focus: all categories; severity threshold: all. Audit only: no application fixes were applied. JIRA prefix: SIC-FR-#.
-1. Solution Overview (low/no-dependency -> high dependency)
-Tier	Project	Kind	Path
-0	Aplicacion	Class library (net48, x86) – orchestration logic, interfaces, models, Windows-service control	Aplicacion (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion)
-1	Infraestructura	Class library (net48, x86) – RepositorioTomi stored-procedure access (references Aplicacion)	Infraestructura (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura)
-2	Swf_IN_ControladorServicios	Windows Service host (Exe, net48, x86) – SimpleInjector composition root, timer tick	Swf_IN_ControladorServicios (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios)
-2	PruebasUnitarias_Swf_IN_ControladorServicios	MSTest 2.2.10 project (9 [TestMethod], hand-written fakes)	PruebasUnitarias_Swf_IN_ControladorServicios (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios)
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.ServiceProcess;
+using System.Threading.Tasks;
 
-External dependency of all four projects: the shared MUFG_T24.dll via a raw D:\ServiceCMS\MUFG_T24.dll HintPath (source read for contract confirmation at General/MUFGT24_BTMUM_64 (../../General/MUFGT24_BTMUM_64)).
-What this solution actually does: it is the *incoming-SWIFT supervisor*. It is a timer-driven Windows Service (interval and enable flag come from the shared central configuration; fallback 10 s, ServiceHost.cs:33-34 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs)). At start-up it registers its own process (PID, process name, display name) in the database and marks its port/service row as in use. On every tick it reads the TOMI system date, asks the shared RepositorioMaestro whether today is a business day (weekend + tb_srv_diasnohabiles for MXN/MXP), reads HORA_OP_INICIO/HORA_OP_FIN from tb_srv_parametros_sistema, and decides whether the *business day is open*. If it is, it starts the two Windows services CMS-Swf_IN_ETL and CMS-Swf_IN_FT (the incoming-SWIFT ETL and file-transfer workers); otherwise it stops both (OperacionServicio.cs:108-131 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)). It then stamps status=0 on its own tb_srv_controladoradeservicios row and, on stop, releases the port row. It processes no SWIFT messages itself; its correctness determines whether the two workers that do are running during operating hours.
-2. Scope & Methodology Note
-• Full read, no sampling. All 14 authored C# files (1,145 physical lines), 4 AssemblyInfo.cs, 4 .csproj, the .sln,
-2 packages.config, App.config, README.md (GitLab boilerplate, no content) and .gitignore were read in full, line by line (28 authored files; git internals, restored packages/ and .vs/ excluded from line review but counted for hygiene). The solution is below the large-project threshold (150 files / 5,000 lines), so no progress-tracker file was needed; it was completed in a single pass.
-• Cross-reads of dependencies (to avoid false positives on shared behavior): WindowsServiceHostBase (tick lock,
-start-up contract), Config.EscribirLog/Logging.WriteLegacy, ConversionHelper.ParseTimeSpanRequerido, Configuracion.Clone, RepositorioMaestro.ActualizaEJecucion/ActualizaTerminacion/EsDiaHabil, MUFG_T24.ControladorServicios_Utilidades.ControladorServicios, and the SQL project's usp_*_SwfInCtrlSrv, usp_EsDiaHabil, usp_ObtenerFechaSistema, usp_ActualizaEjecucion_MUFGLibreria, usp_ActualizaTerminacion_HotScan scripts.
-• Quantified cross-checks (supplement to the full read): Config.EscribirLog( 40 calls (15 in RepositorioTomi, 0 with a level
-prefix); 17 catch (Exception; 13 throw;; 0 throw ex;; 0 .Result/.Wait(); 9 new Exception(; 5 ProcesoInsertaAlerta(; 3 (int) casts of Pid; 9 [TestMethod]. Five structurally identical copies of ControladorServicios.cs exist in the portfolio (see SIC-FR-3).
-• Not verified: nothing was built or run. D:\ServiceCMS\MUFG_T24.dll does not exist on this machine and neither msbuild nor
-dotnet is on PATH. The deployed MUFG_T24.dll version is unknown (findings rely on the source in General\MUFGT24_BTMUM_64). Windows ServiceController.Start/Stop behavior on already-running/stopped services is stated from documented .NET behavior, not from a run on the target server. Timer interval, service account rights and the real content of tb_srv_* tables are deployment facts not visible in the repository.
-• Snapshot note: the working tree had 44 tracked files under Swf_IN_ControladorServicios/packages/ deleted (uncommitted). Findings
-are on committed source; no authored .cs file differed from HEAD.
-• The checklist's work-item/changed-lines rules are PR-specific; this is an as-is audit and does not assert acceptance against a story.
-3. What's Already Good
-• Clean layering and constructor injection: Aplicacion (rules + interfaces) -> Infraestructura (data) -> host
-(composition root); OperacionServicio, ControladorServicios and RepositorioTomi take dependencies by constructor and the business flow depends on IRepositorioTomi/IControladorServicios abstractions (OperacionServicio.cs:19-35 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs), IRepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Interfaces/IRepositorioTomi.cs)).
-• SimpleInjector with `Verify()` and scoped lifetimes: one AsyncScopedLifestyle scope per tick, _containerDI.Verify() at start-up,
-container disposed in a finally (ServiceHost.cs:50-97, 137-141, 188-191 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs)).
-• Shared host base used correctly: overlapping ticks are prevented by the base's SemaphoreSlim tick lock; the timer starts only
-after the PID/process-name/display-name contract has been validated; stop has timeouts and cleanup tokens.
-• No sync-over-async, no `async void`, no `throw ex;`: scans return 0 for .Result, .Wait(), GetResult(), throw ex;; the 13 rethrows all use throw;.
-ConfigureAwait(false) is used in the host's async calls.
-• Blocking service-control calls are off the async context: ServiceController.Start/Stop/WaitForStatus run inside Task.Run and the
-ServiceController is wrapped in using (ControladorServicios.cs:39-47, 90-98 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs)).
-• Parameterized stored procedures only: no dynamic SQL or string-concatenated queries in this solution; the SQL project's
-procedures use BEGIN TRY/ROLLBACK, audit logging, and bounded VARCHAR(50) parameters.
-• Fail-fast configuration parsing: ParseTimeSpanRequerido rejects empty/invalid hours and ObtenerParametros throws when either bound is
-missing (OperacionServicio.cs:52, 58, 91-95 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)); tests exercise both missing-bound cases (UnitTest1.cs:139-169 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/UnitTest1.cs)).
-• A real test project exists and is wired into the solution: MSTest, isolated by interface fakes, no database or Windows-service dependency,
-deterministic for its nine scenarios (but see SIC-FR-5).
-• Security hygiene: no secrets, credentials, cryptography, deserialization or plaintext-secret logging in any file; child service names are
-compile-time constants (no injection into ServiceController).
-• Graceful shutdown: TerminacionAsync waits for the start-up and running tasks, honors cancellation, and releases the DB state
-(ServiceHost.cs:152-192 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs)).
-4. Findings by Project (low/no-dependency -> high dependency)
-Severity legend (from code_review.md): Blocker must fix; Major fix unless waived; Minor fix or track; Info suggestion. Finding IDs SIC-FR-1 ... SIC-FR-21 are final and match the backlog in section 6.
-4.1 Aplicacion (Tier 0)
-MustChange / Rewrite
-SIC-FR-1 – Start/stop success checks are inverted, so a successful operation is reported as a failure (Blocker)
-• File:Line: ControladorServicios.cs:51-60 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs) (start) and
-ControladorServicios.cs:102-111 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs) (stop).
-• Current code:
-```csharp // IniciaServicioAsync, after Start() + WaitForStatus(Running, 30 s) + Refresh() if (serviceController.Status != ServiceControllerStatus.Running) { Config.EscribirLog($"INFO|IniciaServicio|Servicio {strNombreServicio} iniciado correctamente."); return true; } else { Config.EscribirLog($"INFO|IniciaServicio|Ocurrio un problema al iniciar el servicio {strNombreServicio}"); return false; }
-// DetieneServicioAsync, after Stop() + WaitForStatus(Stopped, 30 s) + Refresh() if (serviceController.Status != ServiceControllerStatus.Stopped && serviceController.Status != ServiceControllerStatus.StopPending) { ... "Finalización del Servicio" ... return true; } else { ... "Ocurrio un problema al detener el servicio." ... return false; } ```
-• Issue: both predicates are negated. When the service really reaches Running (or Stopped) the code takes the else branch,
-logs "problema" and returns false; the true branch is only reachable when the wait *did not* produce the target state. OperacionServicio then logs ERROR|Uno o mas servicios no alcanzaron el estado deseado (OperacionServicio.cs:133-136 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)) for the normal outcome, and the success INFO is effectively unreachable. The unit tests cannot detect this because ControladorServiciosFake always returns true (UnitTest1.cs:252-272 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/UnitTest1.cs)). The same pattern exists in 4 other solutions (GEN-15).
-• Recommended code: compare to the expected state, and treat StopPending as *not yet* stopped:
-``csharp serviceController.Refresh(); bool ok = serviceController.Status == ServiceControllerStatus.Running;          // start // bool ok = serviceController.Status == ServiceControllerStatus.Stopped;       // stop Config.EscribirLog(ok ? $"INFO|IniciaServicio|Servicio {strNombreServicio} iniciado correctamente." : $"ERROR|IniciaServicio|Servicio {strNombreServicio} no alcanzó el estado Running."); return ok; `` Preferably delete the local class and use the shared implementation (see SIC-FR-3).
-• Benefit: the controller's result and its summary log become truthful; monitoring on ERROR|Uno o mas servicios... becomes meaningful again.
-• Suggested JIRA: SIC-FR-1 (Blocker)
-SIC-FR-2 – Start()/Stop() are called unconditionally every tick, so steady state raises an ERROR log and an alert row per child service per tick (Blocker)
-• File:Line: ControladorServicios.cs:39-47, 63-78, 90-98, 114-128 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs);
-caller OperacionServicio.cs:120-131 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs).
-• Current code:
-``csharp using (ServiceController serviceController = new ServiceController(strNombreServicio, ".")) { await Task.Run(() => { serviceController.Start();          // never checks serviceController.Status first serviceController.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30)); }); ... catch (Exception ex) { Config.EscribirLog($"ERROR|IniciaServicio|Excepcion: {ex}"); await _repositorioTomi.ProcesoInsertaAlerta(new AlertaDTO() { ... ClaveAviso = "ERROR", ... Exception = ex }); } return false; ``
-• Issue: ServiceController.Start() on a running service and Stop() on a stopped service throw InvalidOperationException
-(inner Win32 error 1056 / 1062). The loop runs every timer tick (config-driven; 10000 ms fallback). In the normal steady state (inside the window the workers are already running; outside it they are already stopped) every tick therefore logs a full exception ERROR per child and inserts a new alert row per child: two alerts per tick, 720 alert rows per hour at a 10-second interval, with usp_InsertaAlerta_MUFGLibreria performing a plain insert (see GEN-10). Genuine failures are indistinguishable from this noise. Pending states (StartPending, StopPending, Paused) are not handled either. (Behavior stated from documented ServiceController semantics; not run on the target server.)
-• Recommended code: make the operation idempotent and state-driven; only alert on a failed *transition*:
-``csharp serviceController.Refresh(); if (serviceController.Status == ServiceControllerStatus.Running) return true;      // already in desired state if (serviceController.Status == ServiceControllerStatus.StartPending) { /* wait only */ } else serviceController.Start(); serviceController.WaitForStatus(ServiceControllerStatus.Running, timeout); ` The shared MUFG_T24.ControladorServicios_Utilidades.ControladorServicios.IniciaServicioConResultadoAsync/DetieneServicioConResultadoAsync already implements exactly this (already-running short-circuit, pending-state handling, typed catch for TimeoutException, InvalidOperationException, Win32Exception`, cancellation token and timeout parameters).
-• Benefit: removes the alert/log storm, makes each real alert actionable, and removes two avoidable exceptions per tick from the host.
-• Suggested JIRA: SIC-FR-2 (Blocker)
-Rewrite Recommended
-SIC-FR-3 – The same inverted, non-idempotent ControladorServicios is copy-pasted in five solutions while a correct shared implementation already exists (Major)
-• File:Line: ControladorServicios.cs:1-132 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs).
-• Evidence (count): a portfolio scan for new ServiceController( finds this class in SWF_IN_ControladorServicios, SWF_IN_ControladorServiciosMQ,
-SWF_OUT_ControladorServicios, SWF_OUT_ControladorServiciosMQ and CEP_ControladorServicios; the scan for the inverted predicates (Status != ServiceControllerStatus.Running / Stopped && ... StopPending) matches all five (10 hits), plus the shared library's own General/MUFGT24_BTMUM_64/.../ControladorServicios.cs which does not contain them. The log text also shows the origin: OperacionServicio.cs:59 still says "Hora de cancelacion SPEI" (see SIC-FR-11). Tracked as GEN-15; the SWIFT pairs also relate to GEN-4.
-• Current code: five near-identical copies (85-130 lines each, line numbers differ), each constructing ServiceController, waiting 30 s, and holding its own alert-insertion catch.
-• Recommended code: delete the local class; register the shared one behind the existing IControladorServicios seam (adapter if the
-Task<bool> signature is wanted): ``csharp // Aplicacion/Service/ControladorServiciosAdapter.cs public sealed class ControladorServiciosAdapter : Aplicacion.Interfaces.IControladorServicios { private readonly MUFG_T24.ControladorServicios_Utilidades.ControladorServicios _inner = new MUFG_T24.ControladorServicios_Utilidades.ControladorServicios(); public Task<bool> IniciaServicioAsync(string nombre) => _inner.IniciaServicioConResultadoAsync(nombre); public Task<bool> DetieneServicioAsync(string nombre) => _inner.DetieneServicioConResultadoAsync(nombre); } ` Alerting on a *failed transition* then belongs in OperacionServicio` (see SIC-FR-7), once, not in a per-copy catch.
-• Benefit: one tested implementation instead of five; fixes SIC-FR-1/SIC-FR-2 in every consumer at once; honors cancellation and timeouts.
-• Suggested JIRA: SIC-FR-3 (Major)
-SIC-FR-4 – finally performs I/O and its throw; replaces the primary exception (Major)
-• File:Line: OperacionServicio.cs:145-164 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs).
-• Current code:
-``csharp catch (Exception ex) { ...log...; throw; } finally { try { await _repositorioTomi.ProcesoActualizaTerminacion(_configuracion.StrNombreServicio, (int)_configuracion.Pid, _configuracion.NombreProceso); } catch (Exception exFinally) { Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|no fue posible maracar el servicio en finalización: {exFinally}"); throw; } } ``
-• Issue: if the tick fails because the database is unreachable, the termination call fails for the same reason, and the throw; inside finally
-replaces the original exception; the caller (ServiceHost.cs:143-146 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs)) logs only the secondary one. finally also does I/O (checklist §5: "finally used only to release resources"). (int)_configuracion.Pid throws InvalidOperationException if Pid were null (see SIC-FR-8).
-• Recommended code: record the outcome and finalize outside the exception path, preserving the first failure:
-``csharp Exception primary = null; try { await EjecutarCicloAsync(); } catch (Exception ex) { primary = ex; throw; } finally { await MarcarTerminacionSeguroAsync(primary); }   // logs its own failure, never throws over primary ``
-• Benefit: the root cause is never hidden by a cleanup error; the lifecycle write is isolated and testable.
-• Suggested JIRA: SIC-FR-4 (Major)
-SIC-FR-5 – Tick lifecycle is unpaired: ActualizaTerminacion runs every tick, ActualizaEjecucion is never called (Major)
-• File:Line: OperacionServicio.cs:156 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs); unused
-IRepositorioTomi.cs:63 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Interfaces/IRepositorioTomi.cs) / RepositorioTomi.cs:217-237 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs).
-• Issue: usp_ActualizaEjecucion_MUFGLibreria sets tb_srv_controladoradeservicios.status = 1; usp_ActualizaTerminacion_HotScan sets status = 0
-(plus date/time). ProcesoActualizaEjecucion exists, is implemented and is in the interface, but nothing calls it. The row is therefore written status=0 after every tick *including while the service is running* and is never set to 1 — the opposite of the status other controllers publish (compare GEN-7). Whether a monitor or another service reads this flag for this controller is not visible in the repository. The shared terminate procedure is also named ..._HotScan, a naming leak (see GEN-13).
-• Recommended code: decide the contract explicitly: either call ProcesoActualizaEjecucion at tick start and finalize with the outcome in finally
-(SIC-FR-4), or remove both per-tick calls and keep the start-up/stop updates only. Document which table columns are the heartbeat.
-• Benefit: persisted state reflects reality; removes a DB round-trip per tick if the flag is not used.
-• Suggested JIRA: SIC-FR-5 (Major)
-SIC-FR-6 – Operating-window evaluation is clock-coupled, unvalidated and cannot cross midnight (Major)
-• File:Line: OperacionServicio.cs:88-89, 115-118 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs).
-• Current code:
-``csharp var horaActual = DateTime.Now; _configuracion.StrFechaSistemaServicio = new TimeSpan(horaActual.Hour, horaActual.Minute, 0); ... _configuracion.EnHorarioOperaciones = (StrFechaSistemaServicio >= HORA_OP_INICIO && StrFechaSistemaServicio <= HORA_OP_FIN); ``
-• Issue: (a) DateTime.Now is read directly, so the "outside window" branch cannot be unit-tested (the existing tests pin 00:00–23:59 to stay
-always inside); (b) no validation that HORA_OP_INICIO <= HORA_OP_FIN, and a window crossing midnight (e.g. 22:00–06:00) is never "in hours"; (c) the end bound is inclusive at minute granularity, so services are stopped at the first minute *after* HORA_OP_FIN, which may or may not be intended; (d) the business-day decision comes from the shared repository using the server's local calendar date while the window uses the local clock — two clock sources, and the TOMI system date fetched in line 80 is not used (SIC-FR-10); (e) TimeSpan? lifted comparisons make a null bound silently false rather than a failure (guarded today only by the earlier throw).
-• Recommended code: inject Func<DateTime> _ahora (or ISystemClock), validate inicio < fin (or support an overnight window explicitly), and
-extract static bool EstaEnHorario(TimeSpan ahora, TimeSpan inicio, TimeSpan fin) with table-driven tests for before/at/after each bound.
-• Benefit: the decision that starts/stops two payment-adjacent workers becomes deterministic and testable; configuration mistakes fail fast.
-• Suggested JIRA: SIC-FR-6 (Major)
-SIC-FR-7 – Alerts fire for the expected state but not for real faults (Major)
-• File:Line: alerts: ControladorServicios.cs:67-77, 117-127 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs);
-no alert: OperacionServicio.cs:145-149 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs), ServiceHost.cs:143-146 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs), summary OperacionServicio.cs:133-140 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs).
-• Issue: only the ServiceController catch inserts an alert (ProcesoInsertaAlerta has exactly two call sites in production code, both in ControladorServicios). A database failure, invalid/missing HORA_OP_*, or a false result from a child service ("one or more services did not reach the desired state")
-only reaches the log; the Task.WhenAll result is never turned into an alert. Combined with SIC-FR-2 the alert table is full of expected-state noise while the failures that matter are silent.
-• Recommended code: define one policy — one alert per failed transition (false result or exception) with the target service, desired state, and de-duplication;
-alert on repeated tick-level failures (e.g. DB unavailable N times); never alert for "already in desired state".
-• Benefit: operators receive few, actionable alerts. Related: GEN-10, GEN-11.
-• Suggested JIRA: SIC-FR-7 (Major)
-SIC-FR-8 – Nullable Pid is unwrapped without a HasValue check (Major)
-• File:Line: ServiceHost.cs:119 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs) (_configuracionBase.Pid.Value);
-OperacionServicio.cs:156 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs), ControladorServicios.cs:74, 124 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs) ((int)_configuracion.Pid).
-• Issue: Configuracion.Pid is int?. At runtime the three tick-time casts are mitigated: the shared host validates Pid > 0 before the timer starts
-(ValidarContratoInicializacionProceso) and the scoped config is a clone of _configuracionBase. Line 119 is not mitigated: it runs inside ParametrizacionesAsync, *before* that validation, so a null PID from ObtenerProcesoActualAsync raises InvalidOperationException (Nullable object must have a value) instead of the explicit contract error. In the alert catch (ControladorServicios.cs:74, 124 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs)) a secondary exception would also suppress the alert (GEN-8).
-• Recommended code: if (!nuevaConfig.Pid.HasValue) throw new InvalidOperationException("ObtenerProcesoActualAsync no devolvió PID."); and pass Pid ?? 0 (or a validated
-int) into the alert/termination helpers.
-• Benefit: precise start-up diagnostics and no masking exception in error paths.
-• Suggested JIRA: SIC-FR-8 (Major)
-SIC-FR-9 – Child service names are hard-coded and the start/stop pairs are duplicated (Minor)
-• File:Line: EnumComunes.cs:14-15 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Enums/EnumComunes.cs);
-OperacionServicio.cs:120-129 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs).
-• Current code: public const string Swf_IN_ETL = "CMS-Swf_IN_ETL"; and two parallel ternaries
-bolPuedeIniciar ? Inicia(X) : Detiene(X) for ETL and FT.
-• Issue: environment-specific Windows service names are compiled in (checklist §11 "no hard-coded environment values"); adding a third worker means editing code in
-two places. The helper Aplicacion.Enums.EnumComunes is also a static class of constants named like an enum.
-• Recommended code: read the managed service list from configuration and loop:
-``csharp var tareas = _configuracion.ServiciosAdministrados .Select(s => puedeIniciar ? _controlador.IniciaServicioAsync(s) : _controlador.DetieneServicioAsync(s)).ToArray(); ``
-• Benefit: no code change for renamed/new workers; test fakes can assert per-service outcomes.
-• Suggested JIRA: SIC-FR-9 (Minor)
-SIC-FR-10 – A database call whose result is never used runs every tick (Minor)
-• File:Line: OperacionServicio.cs:80 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs);
-RepositorioTomi.cs:111-134 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs).
-• Current code: _configuracion.StrFechaSistemaTomi = await _repositorioTomi.ObtenerFechaSistema();
-• Issue: scans show StrFechaSistemaTomi is assigned once and never read, so usp_ObtenerFechaSistema is executed (and can throw on an empty
-tb_srv_fecha_sistema row set) on every tick purely for its side effects. A failure here aborts the whole tick and therefore the start/stop decision.
-• Recommended code: remove the call and property, or use the TOMI date as the single calendar source for the business-day decision (SIC-FR-6).
-• Benefit: one fewer SP per tick and one fewer unrelated failure mode in a safety-relevant decision.
-• Suggested JIRA: SIC-FR-10 (Minor)
-Nice to Rewrite if Time Permits
-SIC-FR-11 – Copy-paste log text, typos and mismatched XML docs (Minor)
-• File:Line: OperacionServicio.cs:59 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs) ("Hora de cancelacion SPEI" logged for HORA_OP_FIN;
-tag obtenerEnums.ObtenerParametrosSistema), :116 ({...}horario de operaciones — missing space, logs "Iniciohorario"/"Terminahorario" on every tick and says "Inicio" when merely *inside* the window), :160 ("maracar", tag Ejecuta_Procedimientos), :93 (no level prefix); EnumComunes.cs:26 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Enums/EnumComunes.cs) (usp_MarcaPuertoEnEso); IRepositorioTomi.cs:17-20, 25-30, 53-55, 61-63 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Interfaces/IRepositorioTomi.cs) (doc comments list parameters that do not exist, and ValidaSiEsDiaHabil is documented as returning Dictionary<string,string>); ConfiguracionServicio.cs:13-17 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Modelos/ConfiguracionServicio.cs) (Str* prefix on TimeSpan? properties).
-• Recommended: correct the text, log only on window *transitions* at INFO (see GEN-10), rename StrFechaSistemaServicio to HoraActual, fix XML docs.
-• Benefit: logs that match behavior; fewer false leads for the next maintainer.
-• Suggested JIRA: SIC-FR-11 (Minor)
-SIC-FR-12 – Dead and duplicate members (Minor)
-• Inventory: Aplicacion/Modelos/Proceso.cs (class never used); ConfiguracionServicio.StrHoraOperacionesInicio/Fin (never read);
-IRepositorioTomi.ActualizaPuertoLibre/ActualizaPuertoEnUso + RepositorioTomi.cs:47-105 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs) + EnumProcedimientosAlmacenados.usp_MarcaPuertoEnEso/usp_MarcaPuertoLibre/usp_EsDiaHabil (the host uses the shared ControlServicio instead; EsDiaHabil comes from the base repository); ConfiguracionServicio.EnHorarioOperaciones/BoEsDiaHabil are written then only used locally; unused using directives in most files (System.Linq, System.Text, System.Runtime.InteropServices); MapearCamposGenerales serves three result shapes with mixed fields (Fecha, Num_regs, Id_parametro, Valor).
-• Recommended: delete or wire the dead members; split the multi-purpose DTO (FechaSistema, Parametro).
-• Benefit: smaller interface to fake in tests, less confusion about which SQL objects are live.
-• Suggested JIRA: SIC-FR-12 (Minor)
-4.2 Infraestructura (Tier 1)
-MustChange / Rewrite
-None identified. The repository's lifecycle/alert helpers were traced into the shared RepositorioMaestro and behave correctly for the failure shapes that exist today (see SIC-FR-13 for the fragile guard).
-Rewrite Recommended
-SIC-FR-13 – The failed-result guard in ProcesoActualizaEjecucion/ProcesoActualizaTerminacion AND-s three conditions (Minor)
-• File:Line: RepositorioTomi.cs:222-224 and 252 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs).
-• Current code:
-``csharp if (resultActualizaTerm.MensajeError != null && resultActualizaTerm.Exception != null && !resultActualizaTerm.Exito) { ...throw new Exception(strMsjErro); } ``
-• Issue: the sibling methods in the same class test only !resultadoSP.Exito (RepositorioTomi.cs:57, 93 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs)). Tracing the shared code,
-EjecutarStoredProceduredNonQuery today always sets Exception together with MensajeError when it fails (SqlException and general catches; a non-empty @mensajeError is turned into a ResultadoStoredProcedureException and captured the same way), so the three-way guard is currently equivalent to !Exito and no silent failure was proven. It is nevertheless fragile: any future shared-layer path that returns Exito=false with only one of the fields set would be ignored without a log line here, and new Exception(...) discards the inner exception. Checklist §5/§8; related to GEN-11.
-• Recommended code:
-``csharp if (!resultActualizaTerm.Exito) throw new InvalidOperationException($"No se actualizó la terminación de '{strNombreServicio}' (pid {intgpId}): {resultActualizaTerm.MensajeError}", resultActualizaTerm.Exception); `` Apply to both methods and cover with a fake repository result in a unit test.
-• Benefit: one consistent contract across the repository; inner exception preserved.
-• Suggested JIRA: SIC-FR-13 (Minor)
-SIC-FR-14 – Repository logs carry no severity, are logged-and-rethrown at every layer, and name a file the logger ignores (Major)
-• File:Line: every EscribirLog call in RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs)
-(lines 60, 66, 96, 102, 122, 131, 149, 155, 173, 193, 206, 228, 234, 256, 262); OperacionServicio.cs:93 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs).
-• Current code: Config.EscribirLog("Error: no se completo actualizacion del puerto:" + resultadoSP.MensajeError, _configuracionServicio.NombreServicio);
-• Issue: Logging.WriteLegacy derives the level from a INFO|/WARN|/ERROR| prefix; messages without one go to the neutral Write level. 15 of 15 repository log calls (and 1 in OperacionServicio)
-therefore have no ERROR level even though they describe failures, so severity-based filtering/alerting will miss them. Each failure is also logged in the repository, again in OperacionServicio (catch ... throw;), and again in the host (3+ entries per fault). WriteLegacy(msg, nombreArchivo, ...) ignores the second argument (shared source: "el nombre de archivo ya no aplica"), so passing NombreServicio conveys nothing. Config.EscribirLog is a static legacy facade (marked obsolete in its Logging sibling), so logging is not injectable (baseline §4.7/§5).
-• Recommended code: inject an ILogger-style abstraction (or use Logging.Error(...) directly), log once at the boundary that handles the exception, wrap with context instead of log-and-throw
-(throw new InvalidOperationException("ObtenerFechaSistema falló", ex)).
-• Benefit: accurate severities, one log entry per fault, testable logging.
-• Suggested JIRA: SIC-FR-14 (Major)
-Nice to Rewrite if Time Permits
-SIC-FR-15 – Small robustness gaps in parameter/date reads (Minor)
-• File:Line: RepositorioTomi.cs:197-201 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs) (diccParametros.Add(...) throws ArgumentException on a duplicate id_parametro;
-null keys throw too); RepositorioTomi.cs:119-124, 190-195 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs) (when Data.Count == 0 and MensajeError == null the exception message is just "Error: "); RepositorioTomi.cs:126 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs) (FirstOrDefault().Fecha is guarded by the preceding Count == 0 check — verified safe).
-• Recommended: diccParametros[parametro.Id_parametro] = parametro.Valor; and an explicit "sin filas" message naming the SP.
-• Benefit: clearer diagnostics. usp_ConsultaParametrosSistema_SwfInCtrlSrv selects from a configuration table by IN (...); duplicates are unlikely, hence Minor.
-• Suggested JIRA: SIC-FR-15 (Minor)
-4.3 Swf_IN_ControladorServicios host (Tier 2)
-Rewrite Recommended
-SIC-FR-16 – The Boolean result of MarcarPuertoEnUsoAsync is discarded and the shutdown call is mislabeled (Major)
-• File:Line: ServiceHost.cs:119 and 172 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs).
-• Current code:
-``csharp //Marca el servicio en uso... await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false); ``
-• Issue: the shared method returns resultado.Exito (GEN-9); a provider failure returns false without throwing and the host then logs "Terminación exitosa de bases de datos"
-(ServiceHost.cs:177 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs)). The shutdown call is commented as "en uso" but passes null PID/process names, i.e. it *frees* the row — and this solution already carries an unused ActualizaPuertoLibre (RepositorioTomi.cs:47-69 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs)). Also note usp_ActualizaServicioEnUso/Libre_SwfInCtrlSrv return @Exito = 1 even when @@ROWCOUNT = 0, so a missing tb_srv_puerto_x_servicio row for this service also looks successful. TerminacionAsync stops this controller only; it does not stop CMS-Swf_IN_ETL/CMS-Swf_IN_FT — presumably intentional (workers keep running without a supervisor), but undocumented.
-• Recommended code: if (!await ...MarcarPuertoEnUsoAsync(...)) throw/log ERROR; rename the shutdown call/comment ("libera puerto") or call an explicit LiberarPuertoAsync; return/check FilasAfectadas.
-• Benefit: start-up/shutdown state is trustworthy; the shutdown contract is documented.
-• Suggested JIRA: SIC-FR-16 (Major)
-SIC-FR-17 – DI and composition-root clean-ups (Minor)
-• File:Line: RepositorioTomi.cs:22, 32 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs) (depends on concrete Alertas) vs
-ServiceHost.cs:52-53 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs) (IAlertas registered); ServiceHost.cs:89 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs) (var parametrizacion = new Parametrizacion(); never used); ServiceHost.cs:83 vs 91 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs) (the scoped Configuracion and ConfiguracionServicio registrations are two separate clones, and the (ConfiguracionServicio) cast relies on MemberwiseClone preserving the runtime type); ConfiguracionServicio is a mutable bag written by the application layer on every tick.
-• Recommended: take IAlertas in RepositorioTomi; delete the unused local; register Configuracion and ConfiguracionServicio against one instance; consider immutable per-tick results instead of mutating shared config.
-• Benefit: honest dependencies, fake alerting in repository tests, fewer hidden state paths.
-• Suggested JIRA: SIC-FR-17 (Minor)
-4.4 PruebasUnitarias_Swf_IN_ControladorServicios (Tier 2)
-MustChange / Rewrite
-SIC-FR-18 – The test project covers 1 of 3 behavior-bearing classes and cannot see the defects above (Major)
-• File:Line: UnitTest1.cs:15-170 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/UnitTest1.cs) (9 tests), fakes at :172-273.
-• Evidence: 9 [TestMethod], all against OperacionServicio; 0 tests for ControladorServicios (SIC-FR-1/2) or RepositorioTomi (SIC-FR-13/15), and none for the host (ServiceHost). ControladorServiciosFake returns true
-unconditionally, so the "one or more services failed" path, per-service outcomes, and the outside-window branch (UnitTest1.cs:56-85 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/UnitTest1.cs) assert counts only) are never exercised. RepositorioTomiFake.ProcesoInsertaAlerta/ProcesoActualizaEjecucion throw NotImplementedException, so any change that alerts would fail the suite. No assertion checks the arguments passed to IniciaServicioAsync (which service, which state). The exception assertions use exact-type ThrowsExceptionAsync<Exception> and do not check messages. Do not read this as a measured coverage percentage; no coverage run was executed.
-• Recommended code: add (1) ControladorServicios tests behind a thin IWindowsServiceClient seam (already-running, StartPending, timeout, access denied) — or test the shared implementation instead; (2) a window-boundary theory
-(before/at/after start and end; overnight) once SIC-FR-6 exists; (3) fake Task.WhenAll outcomes (one false, one throws) and assert alert/log policy; (4) a RepositorioTomi test with a fake repository result for Exito=false without Exception; (5) a regression test that fails on the inverted predicates.
-• Benefit: the defects that currently reach production (SIC-FR-1/2) become test failures first (checklist §13: bug fixes need a failing-without-fix regression test).
-• Suggested JIRA: SIC-FR-18 (Major)
-Nice to Rewrite if Time Permits
-SIC-FR-19 – Test organization and tooling (Minor)
-• File:Line: UnitTest1.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/UnitTest1.cs) (generic file/class name UnitTest1, fakes in the same file);
-PruebasUnitarias...csproj:62-67, 3, 97-100 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios.csproj).
-• Issue: the class name does not describe the scenarios (the nine method names do); hand-written fakes instead of the portfolio's usual mocking library (the baseline cites MSTest + Moq); each test writes a real log folder under %TEMP%
-through the static Config.Rutas (mutable global state shared across tests); MSTest 2.2.10 is old; package paths point at the *host* project's ..\Swf_IN_ControladorServicios\packages\, so the test project builds only after restoring that sibling.
-• Recommended: rename to OperacionServicioTests, move fakes to Fakes/, use a logging seam instead of the static, upgrade MSTest, and give the test project its own restore.
-• Benefit: clearer suite, fewer inter-test dependencies.
-• Suggested JIRA: SIC-FR-19 (Minor)
-4.5 Solution-wide (all projects)
-MustChange / Rewrite
-SIC-FR-20 – MUFG_T24.dll is referenced through a hard-coded absolute D:\ServiceCMS\ path in all four projects (Blocker)
-• File:Line: Aplicacion.csproj:54-57 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Aplicacion.csproj),
-Infraestructura.csproj:54-57 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Infraestructura.csproj), Swf_IN_ControladorServicios.csproj:91-94 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/Swf_IN_ControladorServicios.csproj), PruebasUnitarias...csproj:68-70 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios.csproj).
-• Current code: <Reference Include="MUFG_T24, ..."><SpecificVersion>False</SpecificVersion><HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath></Reference> (SpecificVersion=False in three, none in the test project).
-• Issue: confirmed on this machine: D:\ServiceCMS\MUFG_T24.dll does not exist, so the solution cannot be built here; there is no nuget.config or package for it; whichever DLL happens to be at that path at build time is compiled in
-with SpecificVersion=False — no version trace between source and binary (checklist §11: "no direct DLL references"). Systemic (GEN-1); the fix is one portfolio-level change, not per project. Note the contract matters here: this solution depends on the shared WindowsServiceHostBase start-up contract, ControlServicio, Alertas and RepositorioMaestro behavior.
-• Recommended code: publish MUFG_T24 as a versioned internal NuGet package; replace the four HintPath references with a single PackageReference per project; pin the version.
-• Benefit: reproducible builds and an auditable dependency version.
-• Suggested JIRA: SIC-FR-20 (Blocker)
-Rewrite Recommended
-SIC-FR-21 – 710 packages/ files (340 binaries) and .vs caches are committed despite .gitignore (Major)
-• File:Line: git ls-files at commit 93404d5: 741 tracked files, 710 under Swf_IN_ControladorServicios/packages/, 340 *.dll/*.exe/*.pdb/*.nupkg, 3 .vs/*.dtbcache.json;
-.gitignore:34-35, 207 (../../SWIFT/Incoming/SWF_IN_ControladorServicios/.gitignore) already lists [Bb]in/, [Oo]bj/, **/[Pp]ackages/*.
-• Issue: the ignore rules were added after the files were committed, so they do not apply; 44 of the tracked package files are currently deleted in the working tree (uncommitted). Committed binaries bloat history, hide
-upgrades, and .vs caches are per-developer state (checklist §11/§15: "no committed binaries", repo hygiene).
-• Recommended code: git rm -r --cached Swf_IN_ControladorServicios/packages Aplicacion/.vs Infraestructura/.vs PruebasUnitarias_Swf_IN_ControladorServicios/.vs, commit, and rely on package restore (SIC-FR-22).
-• Benefit: a repository of 28 source files instead of 741 tracked files; clean diffs.
-• Suggested JIRA: SIC-FR-21 (Major)
-Nice to Rewrite if Time Permits
-SIC-FR-22 – Build/packaging modernization and docs (Info)
-• File:Line: packages.config (host (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/packages.config), tests (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/packages.config));
-the four AssemblyInfo.cs (empty AssemblyCompany, fixed 1.0.0.0); README.md (../../SWIFT/Incoming/SWF_IN_ControladorServicios/README.md) (GitLab template, no purpose/runbook).
-• Issue: old-style csproj + packages.config with 19 packages other than SimpleInjector (Microsoft.Extensions.*, System.Text.Json 10.x, BCL polyfills) in the host that no code in this solution uses directly (presumably required transitively by MUFG_T24; the dependency is implicit,
-not declared). Debug/Release AnyCPU configurations force PlatformTarget=x86 while LangVersion 7.3 applies only to the explicit x86 configurations. No runbook documents the managed services, schedule parameters or the table rows needed (tb_srv_puerto_x_servicio, tb_srv_controladoradeservicios, HORA_OP_INICIO/FIN).
-• Recommended: when the package feed exists (SIC-FR-20) migrate to SDK-style/PackageReference, declare only direct dependencies, stamp versions in CI, replace the README with a one-page runbook.
-• Benefit: maintainability; deferred until the real defects above are fixed.
-• Suggested JIRA: SIC-FR-22 (Info)
-5. Architecture-Fit Note
-This solution is a scheduled, stateless supervisor loop, not a continuous listener or a multi-step saga: each tick reads three small facts (business day, operating hours, current service states), decides "running" or "stopped" for two Windows services, and writes a heartbeat. Applying the portfolio's standing architecture question (./_ORCHESTRATION.md#6-standing-architecture-question-is-the-current-hostingarchitecture-model-right) to that shape: modernize in place is the only option the evidence supports. The Windows Service host is a natural fit (it manages other Windows services and needs local ServiceController rights), the DI/layering is sound, and no requirement in the code needs message-driven or workflow semantics. A serverless function or a Kubernetes-style scheduler would not be able to start/stop CMS-Swf_IN_ETL/CMS-Swf_IN_FT without an agent on the same host, and a microservice rewrite has no scaling or ownership driver. Unknowns that would change the answer and are not visible in the repository: the production timer interval, whether the two workers are expected to survive a supervisor stop, the SLA for how quickly workers must start at HORA_OP_INICIO, and the Windows account/rights model. Sequence: fix SIC-FR-1/2 (+ SIC-FR-3 by adopting the shared implementation) -> add the missing tests (SIC-FR-18) -> resolve the MUFG_T24 packaging (SIC-FR-20) -> only then consider runtime/hosting modernization (net48 -> .NET 8 Worker Service, which also needs the shared library to move).
-Standing cross-cutting findings touched by this solution (status recorded in the control document): GEN-1 (SIC-FR-20), GEN-2 (SIC-FR-18), GEN-4/GEN-15 (SIC-FR-3), GEN-7 (SIC-FR-4/5), GEN-8 (SIC-FR-8), GEN-9 (SIC-FR-16), GEN-10 (SIC-FR-2/7), GEN-11 (SIC-FR-13), GEN-14 (inherited: ServiceHost derives directly from WindowsServiceHostBase and does not override OnStart; no solution-level change possible).
-6. JIRA-Ready Backlog
-22 open findings: 4 MustChange/rewrite, 13 rewrite_recommended, 5 NiceToRewrite_ifTimePermits; priorities 3 Blocker, 10 Major, 8 Minor, 1 Info.
-ID	Title	Category	Project	File(s)	Priority
-SIC-FR-1	Fix inverted success predicates in service start/stop	MustChange/rewrite	Aplicacion	ControladorServicios.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs)	Blocker
-SIC-FR-2	Make start/stop idempotent; stop per-tick ERROR + alert storm	MustChange/rewrite	Aplicacion	ControladorServicios.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs), OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)	Blocker
-SIC-FR-3	Replace the 5 copy-pasted ControladorServicios with the shared implementation	rewrite_recommended	Aplicacion	ControladorServicios.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs)	Major
-SIC-FR-4	Stop finally I/O from masking the primary exception	rewrite_recommended	Aplicacion	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)	Major
-SIC-FR-5	Pair ActualizaEjecucion/ActualizaTerminacion or remove both per-tick calls	rewrite_recommended	Aplicacion	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs), IRepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Interfaces/IRepositorioTomi.cs)	Major
-SIC-FR-6	Inject clock, validate and test the operating-window logic (overnight, bounds)	rewrite_recommended	Aplicacion	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)	Major
-SIC-FR-7	Define alert policy: alert failed transitions, not expected state	rewrite_recommended	Aplicacion / Host	ControladorServicios.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Service/ControladorServicios.cs), OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs), ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs)	Major
-SIC-FR-8	Guard nullable Pid (.Value before validation; (int) casts)	rewrite_recommended	Host / Aplicacion	ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs), OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)	Major
-SIC-FR-9	Move child service names to configuration; loop instead of duplicated ternaries	rewrite_recommended	Aplicacion	EnumComunes.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Enums/EnumComunes.cs), OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)	Minor
-SIC-FR-10	Remove the unused per-tick ObtenerFechaSistema call (or use it)	rewrite_recommended	Aplicacion	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)	Minor
-SIC-FR-11	Correct copy-paste log text, typos and XML docs	NiceToRewrite_ifTimePermits	Aplicacion	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs), IRepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Interfaces/IRepositorioTomi.cs)	Minor
-SIC-FR-12	Delete dead members (Proceso, ActualizaPuerto*, unused constants/properties)	NiceToRewrite_ifTimePermits	Aplicacion / Infraestructura	Proceso.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Modelos/Proceso.cs), ConfiguracionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Modelos/ConfiguracionServicio.cs), RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs)	Minor
-SIC-FR-13	Replace the three-way failed-result guard with !Exito	rewrite_recommended	Infraestructura	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs)	Minor
-SIC-FR-14	Log at the right severity once per fault; inject logging	rewrite_recommended	Infraestructura / Aplicacion	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs), OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/OperacionServicio.cs)	Major
-SIC-FR-15	Harden parameter dictionary build and empty-result messages	NiceToRewrite_ifTimePermits	Infraestructura	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs)	Minor
-SIC-FR-16	Check MarcarPuertoEnUsoAsync result; fix mislabeled shutdown call	rewrite_recommended	Host	ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs)	Major
-SIC-FR-17	DI clean-ups (IAlertas, unused local, duplicate config registrations)	rewrite_recommended	Host / Infraestructura	ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/ServiceHost.cs), RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Servicio/RepositorioTomi.cs)	Minor
-SIC-FR-18	Add tests for ControladorServicios, RepositorioTomi, window bounds and failure paths	MustChange/rewrite	Tests	UnitTest1.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/UnitTest1.cs)	Major
-SIC-FR-19	Rename/organize tests, remove static log dependency, upgrade MSTest	NiceToRewrite_ifTimePermits	Tests	UnitTest1.cs (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/UnitTest1.cs)	Minor
-SIC-FR-20	Publish MUFG_T24 as a versioned package; remove D:\ServiceCMS HintPaths	MustChange/rewrite	All 4 projects	Aplicacion.csproj (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Aplicacion/Aplicacion.csproj), Infraestructura.csproj (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Infraestructura/Infraestructura.csproj), Swf_IN_ControladorServicios.csproj (../../SWIFT/Incoming/SWF_IN_ControladorServicios/Swf_IN_ControladorServicios/Swf_IN_ControladorServicios.csproj), PruebasUnitarias...csproj (../../SWIFT/Incoming/SWF_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios/PruebasUnitarias_Swf_IN_ControladorServicios.csproj)	Blocker
-SIC-FR-21	Untrack 710 committed packages/ files and .vs caches	rewrite_recommended	Repository	.gitignore (../../SWIFT/Incoming/SWF_IN_ControladorServicios/.gitignore)	Major
-SIC-FR-22	Modernize packaging; replace boilerplate README with runbook	NiceToRewrite_ifTimePermits	All	README.md (../../SWIFT/Incoming/SWF_IN_ControladorServicios/README.md)	Info
+namespace Aplicacion.Service
+{
+    /// <summary>
+    /// Clase para levantar y detener servicios
+    /// </summary>
+    public class ControladorServicios : IControladorServicios
+    {
+        private readonly ConfiguracionServicio _configuracion;
+        private readonly IRepositorioTomi _repositorioTomi;
 
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        /// <param name="configuracion"></param>
+        /// <param name="repositorioTomi"></param>
+        public ControladorServicios(ConfiguracionServicio configuracion, IRepositorioTomi repositorioTomi)
+        {
+            _configuracion = configuracion;
+            _repositorioTomi = repositorioTomi;
+        }
+
+        /// <summary>
+        /// Inicia un servico de Windows.
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        public async Task<bool> IniciaServicioAsync(string strNombreServicio)
+        {
+            try
+            {
+                using (ServiceController serviceController = new ServiceController(strNombreServicio, "."))
+                {
+
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Running)
+                    {
+                        Config.EscribirLog($"INFO|IniciaServicio|El servicio {strNombreServicio} ya se encuentra iniciado.");
+                        return true;
+                    }
+
+                    Config.EscribirLog($"INFO|IniciaServicio|Inicialización del Servicio '{strNombreServicio}'.");
+
+                    await Task.Run(() =>
+                    {
+                        serviceController.Start();
+
+                        serviceController.WaitForStatus(
+                            ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
+                    });
+
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Running)
+                    {
+                        Config.EscribirLog($"INFO|IniciaServicio|Servicio '{strNombreServicio}' iniciado correctamente.");
+                        return true;
+                    }
+                    else
+                    {
+                        string msj = $"No fue posible iniciar el servicio {strNombreServicio}.";
+                        Config.EscribirLog($"ERROR|IniciaServicio|{msj}");
+
+                        try
+                        {
+                            await _repositorioTomi.ProcesoInsertaAlerta(
+                            new AlertaDTO()
+                            {
+                                Folio = null,
+                                TipoOPeracion = null,
+                                Servicio = _configuracion.StrNombreServicio,
+                                ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                                Descipcion = msj,
+                                PId = (int)_configuracion.Pid,
+                                NombreProceso = _configuracion.NombreProceso,
+                                Exception = null
+                            });
+                        }
+                        catch (Exception exAlerta)
+                        {
+                            Config.EscribirLog($"INFO|IniciaServicio|No fue posible generar la alerta: {exAlerta}.");
+                        }
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|IniciaServicio|Excepcion: {ex}");
+
+                try
+                {
+                    await _repositorioTomi.ProcesoInsertaAlerta(
+                    new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.StrNombreServicio,
+                        ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                        Descipcion = $"Error al tratar de levantar el servicio '{strNombreServicio}'",
+                        PId = (int)_configuracion.Pid,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = ex
+                    });
+                }
+                catch (Exception exAlerta)
+                {
+                    Config.EscribirLog($"INFO|IniciaServicio|No fue posible generar la alerta: {exAlerta}.");
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Detiene un servicio de Windows.
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        public async Task<bool> DetieneServicioAsync(string strNombreServicio)
+        {
+            try
+            {
+                using (ServiceController serviceController = new ServiceController(strNombreServicio, "."))
+                {
+
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Stopped)
+                    {
+                        Config.EscribirLog($"INFO|DetieneServicio|El servicio '{strNombreServicio}' del Servicio");
+                        return true;
+                    }
+
+                    Config.EscribirLog($"INFO|DetieneServicio|Finalización del servicio '{strNombreServicio}'");
+
+                    await Task.Run(() =>
+                    {
+                        serviceController.Stop();
+
+                        serviceController.WaitForStatus(
+                            ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
+                    });
+
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Stopped)
+                    {
+                        Config.EscribirLog($"INFO|DetieneServicio|Finalización del Servicio");
+                        return true;
+                    }
+                    else
+                    {
+                        string msj = $"No fue posible detener el servicio {strNombreServicio}.";
+
+                        Config.EscribirLog($"ERROR|DetieneServicio|{msj}");
+
+                        try
+                        {
+                            await _repositorioTomi.ProcesoInsertaAlerta(
+                            new AlertaDTO()
+                            {
+                                Folio = null,
+                                TipoOPeracion = null,
+                                Servicio = _configuracion.StrNombreServicio,
+                                ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                                Descipcion = msj,
+                                PId = (int)_configuracion.Pid,
+                                NombreProceso = _configuracion.NombreProceso,
+                                Exception = null
+                            });
+                        }
+                        catch (Exception exAlert)
+                        {
+                            Config.EscribirLog($"INFO|DetieneServicio|No fue posible generar la alerta: {exAlert}.");
+                        }
+
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|DetieneServicio|Excepcion: {ex}");
+
+                try
+                {
+                    await _repositorioTomi.ProcesoInsertaAlerta(new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.StrNombreServicio,
+                        ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                        Descipcion = $"Error al tratar de detener el servicio '{strNombreServicio}'",
+                        PId = (int)_configuracion.Pid,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = ex
+                    });
+                }
+                catch (Exception exAlerta)
+                {
+                    Config.EscribirLog($"INFO|DetieneServicio|No fue posible generar la alerta: {exAlerta}.");
+                }
+            }
+            return false;
+        }
+    }
+}
+
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+
+namespace Aplicacion
+{
+    /// <summary>
+    /// Ejecuta el proceso para levantar y detener servicios
+    /// </summary>
+    public class OperacionServicio : IOperacionServicio
+    {
+        private readonly IRepositorioTomi _repositorioTomi;
+        private readonly IControladorServicios _controlador;
+        private readonly ConfiguracionServicio _configuracion;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        /// <param name="repositorioTomi"></param>
+        /// <param name="configuracion"></param>
+        /// <param name="controlador"></param>
+        public OperacionServicio(IRepositorioTomi repositorioTomi,
+            ConfiguracionServicio configuracion, IControladorServicios controlador)
+        {
+            _configuracion = configuracion;
+            _repositorioTomi = repositorioTomi;
+            _controlador = controlador;
+        }
+
+
+        /// <summary>
+        /// Parametros sistema, hora, url
+        /// </summary>
+        private async Task ObtenerParametrosSistema()
+        {
+            try
+            {
+                Dictionary<string, string> ltsParametrosSistema = await _repositorioTomi.ObtenerParametrosSistema();
+                foreach (KeyValuePair<string, string> paramSistema in ltsParametrosSistema)
+                {
+                    if (!Enum.TryParse(paramSistema.Key, out Enums.ParametrosSistema parametro)) continue;
+                    switch (parametro)
+                    {
+                        case Enums.ParametrosSistema.HORA_OP_INICIO:
+                            _configuracion.HORA_OP_INICIO = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_INICIO.ToString());
+                            Config.EscribirLog("INFO|ObtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_INICIO + "'.",
+                                _configuracion.StrNombreServicio);
+                            break;
+
+                        case Enums.ParametrosSistema.HORA_OP_FIN:
+                            _configuracion.HORA_OP_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_FIN.ToString());
+                            Config.EscribirLog("INFO|ObtenerParametrosSistema|Hora de cancelacion SPEI '" + _configuracion.HORA_OP_FIN + "'.",
+                                _configuracion.StrNombreServicio);
+                            break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ObtenerParametrosSistema|Se presenta exception: " + ex.Message, _configuracion.StrNombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio
+        /// </summary>
+        private async Task ObtenerParametros()
+        {
+            try
+            {
+
+                await _repositorioTomi.ProcesoActualizaEjecucion(
+                   _configuracion.StrNombreServicio, (int)_configuracion.Pid, _configuracion.NombreProceso);
+
+                // Valida si es dia habil
+                _configuracion.BoEsDiaHabil = await _repositorioTomi.ValidaSiEsDiaHabil();
+
+                await ObtenerParametrosSistema();
+
+                // Obtencion de la fecha del sistema.
+                var horaActual = DateTime.Now;
+                _configuracion.StrFechaSistemaServicio = new TimeSpan(horaActual.Hour, horaActual.Minute, 0);
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_INICIO.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_FIN.ToString()))
+                {
+                    Config.EscribirLog($"ERROR|No se especifica la hora de inicio/fin de operaciones", _configuracion.StrNombreServicio);
+                    throw new Exception($"Error de especificación de hora inicio/fin");
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ObtenerParametros|Se presenta exception: " + ex, _configuracion.StrNombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta procedimeinto
+        /// </summary>
+        /// <returns></returns>
+        public async Task EjecutaProcedimiento()
+        {
+            Exception excepcionPrincipal = null;
+
+            try
+            {
+                await ObtenerParametros();
+
+                _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_INICIO && 
+                    _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_FIN);
+
+                Config.EscribirLog($"INFO|EjecutaProcedimiento|{(_configuracion.EnHorarioOperaciones ? "Inicio" : "Termina")} " +
+                    $"horario de operaciones, HoraSistema='{_configuracion.StrFechaSistemaServicio:hh\\:mm}'.", NombreServicio.Swf_IN_ControladorServicios.ToString());
+
+                bool bolPuedeIniciar = _configuracion.BoEsDiaHabil && _configuracion.EnHorarioOperaciones;
+
+                Task<bool>[] tareas = new[]
+                {
+                        bolPuedeIniciar
+                        ? _controlador.IniciaServicioAsync(EnumComunes.Swf_IN_ETL)
+                        : _controlador.DetieneServicioAsync(EnumComunes.Swf_IN_ETL),
+
+                        bolPuedeIniciar
+                        ? _controlador.IniciaServicioAsync(EnumComunes.Swf_IN_FT)
+                        : _controlador.DetieneServicioAsync(EnumComunes.Swf_IN_FT),
+                };
+
+                var result = await Task.WhenAll(tareas);
+
+                if (result.Any(r => r == false))
+                {
+                    Config.EscribirLog($"ERROR|Uno o mas servicios no alcanzaron el estado deseado: " +
+                        $"{_configuracion.StrNombreServicio}");
+                }
+                else
+                {
+                    Config.EscribirLog($"INFO|Todos los servicios alcanzaron el estado deseado: " +
+                        $"{_configuracion.StrNombreServicio}");
+                }
+            }
+            catch (Exception ex)
+            {
+                excepcionPrincipal = ex;
+                Config.EscribirLog("ERROR|EjecutaProcedimiento|Se presenta exception: " + ex,
+                    _configuracion.StrNombreServicio);
+
+                throw;
+            }
+            finally
+            {
+                try
+                {
+                    await _repositorioTomi.ProcesoActualizaTerminacion(
+                        _configuracion.StrNombreServicio, (int)_configuracion.Pid, _configuracion.NombreProceso);
+                }
+                catch (Exception exFinally)
+                {
+                    Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|No fue posible marcar el servicio en finalización: {exFinally}");
+
+                    if (excepcionPrincipal == null)
+                    {
+                        throw;
+                    }
+                }
+            }
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interface IControladorServicios, tiene la lista de los metodos que se van a utilizar para iniciar o detener los servicios.
+    /// </summary>
+    public interface IControladorServicios
+    {
+        /// <summary>
+        /// Proceso para levantar servicio
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <returns>true/false</returns>
+        Task<bool> IniciaServicioAsync(string strNombreServicio);
+
+        /// <summary>
+        /// Proceso para bajar servicio
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <returns>true/false</returns>
+        Task<bool> DetieneServicioAsync(string strNombreServicio);
+    }
+}
+
+using Aplicacion.Modelos;
+using MUFG_T24.Modelos;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interfaz que implementa consultas y no consultas a bd InterfacesT24
+    /// </summary>
+    public interface IRepositorioTomi
+    {
+        /// <summary>
+        /// Marca puerto libre
+        /// </summary>
+        /// <param name="intpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="strServicio"></param>
+        /// <returns></returns>
+        Task ActualizaPuertoLibre(string strServicio);
+
+        /// <summary>
+        /// Marca puerto en uso
+        /// </summary>
+        /// <param name="intpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="strServicio"></param>
+        /// <returns></returns>
+        Task ActualizaPuertoEnUso(int intpId, string strNombreProceso, string strNombreServicio, string strServicio);
+
+        /// <summary>
+        /// Obtiene las fechas del sistema
+        /// </summary>
+        /// <returns>Parametros</returns>
+        Task<string> ObtenerFechaSistema();
+
+        /// <summary>
+        /// Inserta alertas
+        /// </summary>
+        /// <param name="alerta"></param>
+        /// <returns></returns>
+        Task ProcesoInsertaAlerta(AlertaDTO alerta);
+
+        /// <summary>
+        /// Valida si puede operar el servicio
+        /// </summary>
+        /// <returns>true/false</returns>
+        Task<bool> ValidaSiEsDiaHabil();
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        Task<Dictionary<string, string>> ObtenerParametrosSistema();
+
+        /// <summary>
+        /// Actualiza ejecucion del servicio INICIO
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns></returns>
+        Task ProcesoActualizaEjecucion(string strNombreServicio, int intgpId, string strNombreProceso);
+
+        /// <summary>
+        /// Actualiza terminacion del proceso
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <returns></returns>
+        Task ProcesoActualizaTerminacion(string strNombreServicio, int intgpId, string strNombreProceso);
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace Aplicacion.Enums
+{
+    /// <summary>
+    /// Enum para datos generales
+    /// </summary>
+    public static class EnumComunes
+    {
+        public const string ALERTA_ESTATUS_ERROR = "ERROR";
+
+        public const string Swf_IN_ETL = "CMS-Swf_IN_ETL";
+        public const string Swf_IN_FT = "CMS-Swf_IN_FT";
+    }
+
+    /// <summary>
+    /// Enum para Procedimientos Almacenados
+    /// </summary>
+    public static class EnumProcedimientosAlmacenados
+    {       
+        public const string usp_ConsultaFechaSistema = "usp_ObtenerFechaSistema";
+        public const string usp_EsDiaHabil = "usp_EsDiaHabil";
+        public const string usp_ParametrosSistema = "usp_ConsultaParametrosSistema_SwfInCtrlSrv";
+        public const string usp_MarcaPuertoEnEso = "usp_ActualizaServicioEnUso_SwfInCtrlSrv";
+        public const string usp_MarcaPuertoLibre = "usp_ActualizaServicioLibre_SwfInCtrlSrv";
+    }
+
+    /// <summary>
+    /// Enum para parametros del sistema
+    /// </summary>
+    public enum ParametrosSistema
+    {       
+        HORA_OP_INICIO,
+        HORA_OP_FIN
+    }
+}
+
+﻿using MUFG_T24.Configuracion_utilidades;
+using System;
+
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Propiedades generales del servicio
+    /// </summary>
+    public class ConfiguracionServicio : Configuracion
+    {
+        public string StrFechaSistemaTomi { get; set; } = null;
+        public TimeSpan? StrFechaSistemaServicio { get; set; } = null;
+        public TimeSpan? StrHoraOperacionesInicio { get; set; } = null;
+        public TimeSpan? StrHoraOperacionesFin { get; set; } = null;
+        public TimeSpan? HORA_OP_INICIO {  get; set; } = null;
+        public TimeSpan? HORA_OP_FIN { get; set; } = null;
+        public bool EnHorarioOperaciones { get; set; } = false;
+        public string StrNombreServicio { get; set; } = null;
+        public bool BoEsDiaHabil { get; set; } = false;
+
+        // Logs y rutas archivo config
+        public string RutaArchivoConfiguracionOriginal { get; set; }
+        public string RutaArchivoConfiguracionFinal { get; set; }
+        public string RutaArchivoLogs { get; set; }
+    }
+}
+
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+
+namespace Infraestructura.Servicio
+{
+    /// <summary>
+    /// Clase para conectarse a BD InterfacesT24 
+    /// </summary>
+    public class RepositorioTomi : RepositorioMaestro, IRepositorioTomi
+    {
+        private readonly Alertas _alertas;
+        private readonly ConfiguracionServicio _configuracionServicio;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        /// <param name="proveedor"></param>
+        /// <param name="nombreBasedatos"></param>
+        /// <param name="proveedorVistasT24"></param>
+        /// <param name="nombreBasedatosVistasT24"></param>
+        public RepositorioTomi(Alertas alertas, ConfiguracionServicio configuracionServicio) : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            _alertas = alertas;
+            _configuracionServicio = configuracionServicio;
+        }
+
+        /// <summary>
+        /// Marca puerto libre
+        /// </summary>
+        /// <param name="intpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="strServicio"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaPuertoLibre(string strServicio)
+        {
+            try
+            {
+                StoredProcedureResult resultadoSP = await EjecutarStoredProceduredNonQuery(
+              EnumProcedimientosAlmacenados.usp_MarcaPuertoLibre, cmd =>
+              {
+                  cmd.Parameters.Add(basedatosConexion.CrearParametro("@Servicio", strServicio));
+              });
+
+                if (!resultadoSP.Exito)
+                {
+                    string strMsjError = $"Error|ActualizaPuertoLibre|No se completo actualizacion del puerto {resultadoSP.MensajeError}";
+                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjError);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ActualizaPuertoLibre: " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Marca puerto en uso
+        /// </summary>
+        /// <param name="intpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="strServicio"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaPuertoEnUso(int intpId, string strNombreProceso, string strNombreServicio, string strServicio)
+        {
+            try
+            {
+                StoredProcedureResult resultadoSP = await EjecutarStoredProceduredNonQuery(
+               EnumProcedimientosAlmacenados.usp_MarcaPuertoEnEso, cmd =>
+               {
+                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@PId", intpId));
+                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@NombreProceso", strNombreProceso, 50));
+                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@NombreServicio", strNombreServicio, 50));
+                   cmd.Parameters.Add(basedatosConexion.CrearParametro("@Servicio", strServicio, 50));
+               });
+
+                if (!resultadoSP.Exito)
+                {
+                    string strMsjError = $"ERROR|ActualizaPuertoEnUso|No se completo actualizacion del puerto: {resultadoSP.MensajeError}";
+                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjError);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ActualizaPuertoEnUso: " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene las fechas del sistema.
+        /// </summary>
+        /// <returns>string</returns>
+        public async Task<string> ObtenerFechaSistema()
+        {
+            try
+            {
+                StoredProcedureResult<MapearCamposGenerales> strFecha =
+                await EjecutarStoredProcedureQuery<MapearCamposGenerales>(EnumProcedimientosAlmacenados
+                .usp_ConsultaFechaSistema);
+
+                if (strFecha.Data.Count == 0 || strFecha.MensajeError != null)
+                {
+                    string strMsjError = $"ERROR|ObtenerFechaSistema: {strFecha.MensajeError}";
+                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjError);
+                }
+
+                string strFechaFormateada = strFecha.Data.FirstOrDefault().Fecha.ToString(EnumParametrosGenerales.FECHA_BD);
+                return strFechaFormateada;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ObtenerFechaSistema: " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Inserta alertas
+        /// </summary>
+        /// <param name="alerta"></param>
+        /// <returns></returns>
+        public async Task ProcesoInsertaAlerta(AlertaDTO alerta)
+        {
+            try
+            {
+                bool boAlertaInsertada = await _alertas.InsertarAlerta(alerta);
+                if (!boAlertaInsertada)
+                {
+                    string strMsjError = "ERROR|ProcesoInsertaAlerta|No se completo la insercion de la Alerta";
+                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjError);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ProcesoInsertaAlerta: " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        public async Task<bool> ValidaSiEsDiaHabil()
+        {
+            try
+            {
+                return await EsDiaHabil();
+            }
+            catch (Exception ex)
+            {
+                string strMsjError = $"ERROR|ValidaSiEsDiaHabil|No se pudo recuperar dia habil. Excepcion: {ex}";
+                Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        public async Task<Dictionary<string, string>> ObtenerParametrosSistema()
+        {
+            try
+            {
+                StoredProcedureResult<MapearCamposGenerales> resultadoSp =
+                await EjecutarStoredProcedureQuery<MapearCamposGenerales>(
+                EnumProcedimientosAlmacenados.usp_ParametrosSistema);
+
+                if (resultadoSp.Data.Count == 0 || resultadoSp.MensajeError != null)
+                {
+                    string strMsjError = "ERROR|ObtenerParametrosSistema|" + resultadoSp.MensajeError;
+                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjError);
+                }
+
+                Dictionary<string, string> diccParametros = new Dictionary<string, string>();
+                foreach (MapearCamposGenerales parametro in resultadoSp.Data)
+                {
+                    diccParametros.Add(parametro.Id_parametro, parametro.Valor);
+                }
+                return diccParametros;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ObtenerParametrosSistema: " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Actualiza ejecucion del servicio INICIO
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ProcesoActualizaEjecucion(string strNombreServicio, int intgpId, string strNombreProceso)
+        {
+            try
+            {
+                StoredProcedureResult resultActualizaEjec = await ActualizaEJecucion(strNombreServicio);
+                if (resultActualizaEjec.MensajeError != null &&
+                    resultActualizaEjec.Exception != null &&
+                    !resultActualizaEjec.Exito)
+                {
+                    string strMsjErro = $"ERROR|ProcesoActualizaEjecucion| " +
+                        $"Error al ejecutar consulta. gpId:{intgpId}, proceso:{strNombreProceso}, Ex: {resultActualizaEjec.Exception}, Mensaje: {resultActualizaEjec.MensajeError}";
+
+                    Config.EscribirLog(strMsjErro, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjErro);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ProcesoActualizaEjecucion: " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Actualiza terminacion del proceso
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ProcesoActualizaTerminacion(string strNombreServicio, int intgpId, string strNombreProceso)
+        {
+            try
+            {
+                StoredProcedureResult resultActualizaTerm = await ActualizaTerminacion(strNombreServicio);
+                if (resultActualizaTerm.MensajeError != null && resultActualizaTerm.Exception != null && !resultActualizaTerm.Exito)
+                {
+                    string strMsjErro = $"ERROR|ProcesoActualizaTerminacion| " +
+                        $"Error al ejecutar consulta. gpId:{intgpId}, proceso:{strNombreProceso}, Ex: {resultActualizaTerm.Exception}, Mensaje: {resultActualizaTerm.MensajeError}";
+
+                    Config.EscribirLog(strMsjErro, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjErro);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ProcesoActualizaTerminacion " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+    }
+}
+
+using Aplicacion;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Infraestructura.Servicio;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Swf_IN_ControladorServicios
+{
+    /// <summary>
+    /// Clase principal serviceHost
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private ConfiguracionServicio _configuracionBase;
+
+        protected override string NombreServicioLog => NombreServicio.Swf_IN_ControladorServicios.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost() { }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+
+            _configuracionBase = new ConfiguracionServicio();
+
+            //Inicializa la obtención de la configuración general y el logging...
+            {
+                MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.ObtenerServicio(NombreServicio.Swf_IN_ControladorServicios.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.StrNombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.RutaArchivoConfiguracion = $@"{EnumRutasGenerales.Path_Log_CMS}{NombreServicio.Swf_IN_ControladorServicios.ToString()}\";
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log + servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.configuracion = servicioMainConfiguracion.configuracion;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+
+                RutasConfiguracion rutas = new RutasConfiguracion()
+                {
+                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+                };
+                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+                Logging.Write("INFO|OnStart|Leyendo archivo de configuración.");
+            }
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            _containerDI.Register<ConfiguracionServicio>(() => (ConfiguracionServicio)_configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<IRepositorioTomi, RepositorioTomi>(Lifestyle.Scoped);
+            _containerDI.Register<Aplicacion.Interfaces.IControladorServicios, Aplicacion.Service.ControladorServicios>(Lifestyle.Scoped);
+            _containerDI.Register<Aplicacion.Interfaces.IOperacionServicio, OperacionServicio>(Lifestyle.Scoped);
+
+            _containerDI.Verify();
+
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+
+                Configuracion configMufgT24 = new Configuracion();
+                Configuracion nuevaConfig = await _parametrizacion.ObtenerProcesoActualAsync(configMufgT24);
+                _configuracionBase.Pid = nuevaConfig.Pid;
+                _configuracionBase.NombreProceso = nuevaConfig.NombreProceso;
+                _configuracionBase.NombreDisplay = nuevaConfig.NombreDisplay;
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ParametrizacionesAsync|{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>   
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<Aplicacion.Interfaces.IOperacionServicio>();
+                    await operacionServicio.EjecutaProcedimiento().ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
+
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                //Apagado normal
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
+            }
+            finally
+            {
+                _containerDI?.Dispose();
+            }
+        }
+
+    }
+}
+
+﻿using MUFG_T24.Comunes;
+using MUFG_T24.ControladorServicios_Utilidades;
+using System.ServiceProcess;
+
+namespace Swf_IN_ControladorServicios
+{
+
+    /// <summary>
+    /// Clase de entrada.
+    /// </summary>
+    internal static class Program
+    {
+        /// <summary>
+        /// Punto de entrada Main.
+        /// </summary>
+        static void Main(string[] args)
+        {
+            WindowsServiceProgramRunner.Run(
+                NombreServicio.Swf_IN_ControladorServicios.ToString(),
+                () => new ServiceHost(),
+                args,
+                (service, startupArgs) => ((ServiceHost)service).DebugRun(startupArgs));
+        }
+
+    }
+
+}
+
+App.config
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+    <startup> 
+        <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" />
+    </startup>
+</configuration>
+
+Aplicacion.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{D2BA13B9-2941-402C-910E-CF902AB9F5DC}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>Aplicacion</RootNamespace>
+    <AssemblyName>AplicacionSWF_IN_CONTROLADORSERVICIOS</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, processorArchitecture=x86">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Enums\EnumComunes.cs" />
+    <Compile Include="Interfaces\IControladorServicios.cs" />
+    <Compile Include="Interfaces\IOperacionServicio.cs" />
+    <Compile Include="Interfaces\IRepositorioTomi.cs" />
+    <Compile Include="Modelos\ConfiguracionServicio.cs" />
+    <Compile Include="Modelos\Tomi\MapearCamposGenerales.cs" />
+    <Compile Include="OperacionServicio.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Service\ControladorServicios.cs" />
+  </ItemGroup>
+  <ItemGroup />
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
+
+
+Infraestructura.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>Infraestructura</RootNamespace>
+    <AssemblyName>InfraestructuraSWF_IN_CONTROLADORSERVICIOS</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, processorArchitecture=x86">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Servicio\RepositorioTomi.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj">
+      <Project>{D2BA13B9-2941-402C-910E-CF902AB9F5DC}</Project>
+      <Name>Aplicacion</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
+
+
+Swf_IN_ControladorServicios.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{D033944C-F2CA-433D-8C6E-2D12ACABD822}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Swf_IN_ControladorServicios</RootNamespace>
+    <AssemblyName>Swf_IN_ControladorServicios</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup>
+    <StartupObject />
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Bcl.AsyncInterfaces.10.0.3\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.10.0.3\lib\net462\Microsoft.Extensions.Configuration.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.Abstractions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.Abstractions.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Abstractions.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.Binder, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.Binder.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Binder.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.FileExtensions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.FileExtensions.10.0.3\lib\net462\Microsoft.Extensions.Configuration.FileExtensions.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.Json, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.Json.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.FileProviders.Abstractions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.FileProviders.Abstractions.10.0.3\lib\net462\Microsoft.Extensions.FileProviders.Abstractions.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.FileProviders.Physical, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.FileProviders.Physical.10.0.3\lib\net462\Microsoft.Extensions.FileProviders.Physical.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.FileSystemGlobbing, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.FileSystemGlobbing.10.0.3\lib\net462\Microsoft.Extensions.FileSystemGlobbing.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Primitives, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Primitives.10.0.3\lib\net462\Microsoft.Extensions.Primitives.dll</HintPath>
+    </Reference>
+    <Reference Include="MUFG_T24">
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="SimpleInjector, Version=5.0.0.0, Culture=neutral, PublicKeyToken=984cb50dea722e99, processorArchitecture=MSIL">
+      <HintPath>packages\SimpleInjector.5.5.0\lib\net461\SimpleInjector.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Configuration" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.IO.Pipelines, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.IO.Pipelines.10.0.3\lib\net462\System.IO.Pipelines.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Memory, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Memory.4.6.3\lib\net462\System.Memory.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Numerics" />
+    <Reference Include="System.Numerics.Vectors, Version=4.1.6.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Runtime.CompilerServices.Unsafe, Version=6.0.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Text.Encodings.Web, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Text.Encodings.Web.10.0.3\lib\net462\System.Text.Encodings.Web.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Text.Json, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Text.Json.10.0.3\lib\net462\System.Text.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll</HintPath>
+    </Reference>
+    <Reference Include="System.ValueTuple" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="ServiceHost.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ServiceHost.Designer.cs">
+      <DependentUpon>ServiceHost.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Program.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="App.config" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj">
+      <Project>{D2BA13B9-2941-402C-910E-CF902AB9F5DC}</Project>
+      <Name>Aplicacion</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\Infraestructura\Infraestructura.csproj">
+      <Project>{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}</Project>
+      <Name>Infraestructura</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Import Project="packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets'))" />
+  </Target>
+</Project>
+
+
+Swf_IN_ControladorServicios.sln
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.5.11723.231 stable
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Swf_IN_ControladorServicios", "Swf_IN_ControladorServicios.csproj", "{D033944C-F2CA-433D-8C6E-2D12ACABD822}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Aplicacion", "..\Aplicacion\Aplicacion.csproj", "{D2BA13B9-2941-402C-910E-CF902AB9F5DC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Infraestructura", "..\Infraestructura\Infraestructura.csproj", "{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PruebasUnitarias_Swf_IN_ControladorServicios", "..\PruebasUnitarias_Swf_IN_ControladorServicios\PruebasUnitarias_Swf_IN_ControladorServicios.csproj", "{029DB447-0C86-4178-A56C-4F6C756BC678}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Debug|x86 = Debug|x86
+		Release|Any CPU = Release|Any CPU
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|x86.ActiveCfg = Debug|x86
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Debug|x86.Build.0 = Debug|x86
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|x86.ActiveCfg = Release|x86
+		{D033944C-F2CA-433D-8C6E-2D12ACABD822}.Release|x86.Build.0 = Release|x86
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|x86.ActiveCfg = Debug|x86
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Debug|x86.Build.0 = Debug|x86
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|x86.ActiveCfg = Release|x86
+		{D2BA13B9-2941-402C-910E-CF902AB9F5DC}.Release|x86.Build.0 = Release|x86
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|x86.ActiveCfg = Debug|x86
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Debug|x86.Build.0 = Debug|x86
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|x86.ActiveCfg = Release|x86
+		{FE64292F-3102-4ACA-A034-18FC4A6BBBE6}.Release|x86.Build.0 = Release|x86
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|x86.ActiveCfg = Debug|x86
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Debug|x86.Build.0 = Debug|x86
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|Any CPU.Build.0 = Release|Any CPU
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|x86.ActiveCfg = Release|x86
+		{029DB447-0C86-4178-A56C-4F6C756BC678}.Release|x86.Build.0 = Release|x86
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9DDF43B9-1825-489F-81A6-D97678A16CA8}
+	EndGlobalSection
+EndGlobal
+
+
+packages.config
+﻿<?xml version="1.0" encoding="utf-8"?>
+<packages>
+  <package id="Microsoft.Bcl.AsyncInterfaces" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.Configuration" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.Configuration.Abstractions" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.Configuration.Binder" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.Configuration.FileExtensions" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.Configuration.Json" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.FileProviders.Abstractions" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.FileProviders.Physical" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.FileSystemGlobbing" version="10.0.3" targetFramework="net48" />
+  <package id="Microsoft.Extensions.Primitives" version="10.0.3" targetFramework="net48" />
+  <package id="SimpleInjector" version="5.5.0" targetFramework="net48" />
+  <package id="System.Buffers" version="4.6.1" targetFramework="net48" />
+  <package id="System.IO.Pipelines" version="10.0.3" targetFramework="net48" />
+  <package id="System.Memory" version="4.6.3" targetFramework="net48" />
+  <package id="System.Numerics.Vectors" version="4.6.1" targetFramework="net48" />
+  <package id="System.Runtime.CompilerServices.Unsafe" version="6.1.2" targetFramework="net48" />
+  <package id="System.Text.Encodings.Web" version="10.0.3" targetFramework="net48" />
+  <package id="System.Text.Json" version="10.0.3" targetFramework="net48" />
+  <package id="System.Threading.Tasks.Extensions" version="4.6.3" targetFramework="net48" />
+  <package id="System.ValueTuple" version="4.6.2" targetFramework="net48" />
+</packages>
+
+
+.gitignore
+## Ignore Visual Studio temporary files, build results, and
+## files generated by popular Visual Studio add-ons.
+##
+## Get latest from `dotnet new gitignore`
+
+# dotenv files
+.env
+/setup
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# User-specific files (MonoDevelop/Xamarin Studio)
+*.userprefs
+
+# Mono auto generated files
+mono_crash.*
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio 2015/2017 cache/options directory
+.vs/
+# Uncomment if you have tasks that create the project's static files in wwwroot
+#wwwroot/
+
+# Visual Studio 2017 auto generated files
+Generated\ Files/
+
+# MSTest test Results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# NUnit
+*.VisualState.xml
+TestResult.xml
+nunit-*.xml
+
+# Build Results of an ATL Project
+[Dd]ebugPS/
+[Rr]eleasePS/
+dlldata.c
+
+# Benchmark Results
+BenchmarkDotNet.Artifacts/
+
+# .NET
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Tye
+.tye/
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# StyleCop
+StyleCopReport.xml
+
+# Files built by Visual Studio
+*_i.c
+*_p.c
+*_h.h
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*_wpftmp.csproj
+*.log
+*.tlog
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# Chutzpah Test files
+_Chutzpah*
+
+# Visual C++ cache files
+ipch/
+*.aps
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+# Visual Studio profiler
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# Visual Studio Trace Files
+*.e2e
+
+# TFS 2012 Local Workspace
+$tf/
+
+# Guidance Automation Toolkit
+*.gpState
+
+# ReSharper is a .NET coding add-in
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# TeamCity is a build add-in
+_TeamCity*
+
+# DotCover is a Code Coverage Tool
+*.dotCover
+
+# AxoCover is a Code Coverage Tool
+.axoCover/*
+!.axoCover/settings.json
+
+# Coverlet is a free, cross platform Code Coverage Tool
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# Visual Studio code coverage results
+*.coverage
+*.coveragexml
+
+# NCrunch
+_NCrunch_*
+.*crunch*.local.xml
+nCrunchTemp_*
+
+# MightyMoose
+*.mm.*
+AutoTest.Net/
+
+# Web workbench (sass)
+.sass-cache/
+
+# Installshield output folder
+[Ee]xpress/
+
+# DocProject is a documentation generator add-in
+DocProject/buildhelp/
+DocProject/Help/*.HxT
+DocProject/Help/*.HxC
+DocProject/Help/*.hhc
+DocProject/Help/*.hhk
+DocProject/Help/*.hhp
+DocProject/Help/Html2
+DocProject/Help/html
+
+# Click-Once directory
+publish/
+
+# Publish Web Output
+*.[Pp]ublish.xml
+*.azurePubxml
+# Note: Comment the next line if you want to checkin your web deploy settings,
+# but database connection strings (with potential passwords) will be unencrypted
+*.pubxml
+*.publishproj
+
+# Microsoft Azure Web App publish settings. Comment the next line if you want to
+# checkin your Azure Web App publish settings, but sensitive information contained
+# in these scripts will be unencrypted
+PublishScripts/
+
+# NuGet Packages
+*.nupkg
+# NuGet Symbol Packages
+*.snupkg
+# The packages folder can be ignored because of Package Restore
+**/[Pp]ackages/*
+# except build/, which is used as an MSBuild target.
+!**/[Pp]ackages/build/
+# Uncomment if necessary however generally it will be regenerated when needed
+#!**/[Pp]ackages/repositories.config
+# NuGet v3's project.json files produces more ignorable files
+*.nuget.props
+*.nuget.targets
+
+# Microsoft Azure Build Output
+csx/
+*.build.csdef
+
+# Microsoft Azure Emulator
+ecf/
+rcf/
+
+# Windows Store app package directories and files
+AppPackages/
+BundleArtifacts/
+Package.StoreAssociation.xml
+_pkginfo.txt
+*.appx
+*.appxbundle
+*.appxupload
+
+# Visual Studio cache files
+# files ending in .cache can be ignored
+*.[Cc]ache
+# but keep track of directories ending in .cache
+!?*.[Cc]ache/
+
+# Others
+ClientBin/
+~$*
+*~
+*.dbmdl
+*.dbproj.schemaview
+*.jfm
+*.pfx
+*.publishsettings
+orleans.codegen.cs
+
+# Including strong name files can present a security risk
+# (https://github.com/github/gitignore/pull/2483#issue-259490424)
+#*.snk
+
+# Since there are multiple workflows, uncomment next line to ignore bower_components
+# (https://github.com/github/gitignore/pull/1529#issuecomment-104372622)
+#bower_components/
+
+# RIA/Silverlight projects
+Generated_Code/
+
+# Backup & report files from converting an old project file
+# to a newer Visual Studio version. Backup files are not needed,
+# because we have git ;-)
+_UpgradeReport_Files/
+Backup*/
+UpgradeLog*.XML
+UpgradeLog*.htm
+ServiceFabricBackup/
+*.rptproj.bak
+
+# SQL Server files
+*.mdf
+*.ldf
+*.ndf
+
+# Business Intelligence projects
+*.rdl.data
+*.bim.layout
+*.bim_*.settings
+*.rptproj.rsuser
+*- [Bb]ackup.rdl
+*- [Bb]ackup ([0-9]).rdl
+*- [Bb]ackup ([0-9][0-9]).rdl
+
+# Microsoft Fakes
+FakesAssemblies/
+
+# GhostDoc plugin setting file
+*.GhostDoc.xml
+
+# Node.js Tools for Visual Studio
+.ntvs_analysis.dat
+node_modules/
+
+# Visual Studio 6 build log
+*.plg
+
+# Visual Studio 6 workspace options file
+*.opt
+
+# Visual Studio 6 auto-generated workspace file (contains which files were open etc.)
+*.vbw
+
+# Visual Studio 6 auto-generated project file (contains which files were open etc.)
+*.vbp
+
+# Visual Studio 6 workspace and project file (working project files containing files to include in project)
+*.dsw
+*.dsp
+
+# Visual Studio 6 technical files
+*.ncb
+*.aps
+
+# Visual Studio LightSwitch build output
+**/*.HTMLClient/GeneratedArtifacts
+**/*.DesktopClient/GeneratedArtifacts
+**/*.DesktopClient/ModelManifest.xml
+**/*.Server/GeneratedArtifacts
+**/*.Server/ModelManifest.xml
+_Pvt_Extensions
+
+# Paket dependency manager
+.paket/paket.exe
+paket-files/
+
+# FAKE - F# Make
+.fake/
+
+# CodeRush personal settings
+.cr/personal
+
+# Python Tools for Visual Studio (PTVS)
+__pycache__/
+*.pyc
+
+# Cake - Uncomment if you are using it
+# tools/**
+# !tools/packages.config
+
+# Tabs Studio
+*.tss
+
+# Telerik's JustMock configuration file
+*.jmconfig
+
+# BizTalk build output
+*.btp.cs
+*.btm.cs
+*.odx.cs
+*.xsd.cs
+
+# OpenCover UI analysis results
+OpenCover/
+
+# Azure Stream Analytics local run output
+ASALocalRun/
+
+# MSBuild Binary and Structured Log
+*.binlog
+
+# NVidia Nsight GPU debugger configuration file
+*.nvuser
+
+# MFractors (Xamarin productivity tool) working folder
+.mfractor/
+
+# Local History for Visual Studio
+.localhistory/
+
+# Visual Studio History (VSHistory) files
+.vshistory/
+
+# BeatPulse healthcheck temp database
+healthchecksdb
+
+# Backup folder for Package Reference Convert tool in Visual Studio 2017
+MigrationBackup/
+
+# Ionide (cross platform F# VS Code tools) working folder
+.ionide/
+
+# Fody - auto-generated XML schema
+FodyWeavers.xsd
+
+# VS Code files for those working on multiple tools
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# Local History for Visual Studio Code
+.history/
+
+# Windows Installer files from build outputs
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# JetBrains Rider
+*.sln.iml
+.idea/
+
+##
+## Visual studio for Mac
+##
+
+
+# globs
+Makefile.in
+*.userprefs
+*.usertasks
+config.make
+config.status
+aclocal.m4
+install-sh
+autom4te.cache/
+*.tar.gz
+tarballs/
+test-results/
+
+# Mac bundle stuff
+*.dmg
+*.app
+
+# content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# content below from: https://github.com/github/gitignore/blob/main/Global/Windows.gitignore
+# Windows thumbnail cache files
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+
+# Dump file
+*.stackdump
+
+# Folder config file
+[Dd]esktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Windows Installer files
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# Windows shortcuts
+*.lnk
+
+# Vim temporary swap files
+*.swp
+
+
+README.md
+  # SWF_IN_ControladorServicios
+
+
+
+## Getting started
+
+To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+
+Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+
+## Add your files
+
+- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
+- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+
+```
+cd existing_repo
+git remote add origin http://gitlab.mufg.mx/mufg-it/mufg-sda/middleware-nttdata/SWIFT/incoming/SWF_IN_ControladorServicios.git
+git branch -M main
+git push -uf origin main
+```
+
+## Integrate with your tools
+
+- [ ] [Set up project integrations](http://gitlab.mufg.mx/mufg-it/mufg-sda/middleware-nttdata/SWIFT/incoming/SWF_IN_ControladorServicios/-/settings/integrations)
+
+## Collaborate with your team
+
+- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
+- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
+- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
+- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
+- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+
+## Test and Deploy
+
+Use the built-in continuous integration in GitLab.
+
+- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
+- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
+- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
+- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
+- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+
+***
+
+# Editing this README
+
+When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+
+## Suggestions for a good README
+
+Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+
+## Name
+Choose a self-explaining name for your project.
+
+## Description
+Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+
+## Badges
+On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+
+## Visuals
+Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+
+## Installation
+Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+
+## Usage
+Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+
+## Support
+Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+
+## Roadmap
+If you have ideas for releases in the future, it is a good idea to list them in the README.
+
+## Contributing
+State if you are open to contributions and what your requirements are for accepting them.
+
+For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+
+You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+
+## Authors and acknowledgment
+Show your appreciation to those who have contributed to the project.
+
+## License
+For open source projects, say how it is licensed.
+
+## Project status
+If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
