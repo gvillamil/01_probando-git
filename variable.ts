@@ -1,476 +1,1018 @@
-SwfIOUTMQGCMS Recommendations
-SwfIOUTMQGCMS - Architecture & Code Quality Recommendations
-Solution: SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfOUTMQGCMS.slnx (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfOUTMQGCMS.slnx) Reviewed source: branch CodeReview2, commit f344bffb3355e97cce77ea0063551c78ccd8e57c (2026-09-22, clean working tree) Compared against: LoansApp architecture and coding baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md) See also: _ORCHESTRATION.md (_ORCHESTRATION.md) for the portfolio methodology, template, and standing findings.
-1. Solution Overview (low/no-dependency -> high dependency)
-Tier	Project	Kind	Path
-0	AplicacionSwfOUTMQGCMS	.NET Framework 4.8 class library (classic csproj, AnyCPU/x86)	AplicacionSwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/AplicacionSwfOUTMQGCMS.csproj)
-1	InfraestructuraSwfOUTMQGCMS	.NET Framework 4.8 class library (classic csproj, IBM MQ client amqmdnet)	InfraestructuraSwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/InfraestructuraSwfOUTMQGCMS.csproj)
-2	SwfOUTMQGCMS (folder SwfIOUTMQGCMS)	.NET Framework 4.8 Windows Service host (Exe, classic csproj SwfOUTMQGCMS.csproj, packages.config, SimpleInjector 5.0.0)	SwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/SwfOUTMQGCMS.csproj)
-2	PruebasUnitarias	MSTest 2.2.10 / Moq 4.20.72 project (net48, classic csproj, packages.config)	PruebasUnitarias.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/PruebasUnitarias.csproj)
+using AplicacionSwfOUTMQGCMS.Enums;
+using AplicacionSwfOUTMQGCMS.Interfaces;
+using AplicacionSwfOUTMQGCMS.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using IOperacionServicio = AplicacionSwfOUTMQGCMS.Interfaces.IOperacionServicio;
 
-What this solution actually does: SwfIOUTMQGCMS is the delivery stage of the outbound SWIFT chain toward the GCMS destination: a timer-driven Windows Service (service identity Swf_OUT_MQ_GCMS; the host falls back to a 10-second timer when the configured interval is absent, and the configured interval lives in the encrypted service configuration, so it is not visible here) that publishes SWIFT messages the ETL has already prepared (tb_srv_swf_trabajo.nf_mq_msg_etl, with a control row in status INI) to an IBM MQ queue. Each tick opens a SimpleInjector scope, marks the service as running, reads the database business date, the business-day flag, and 14 system parameters (the window HORA_OP_INICIO/HORA_OP_FIN, the override flag SWF_OUT_GET_MT_BATCH, MAIL_ERROR, and the MQ.SWF_OUT_GCMS.* connection set: queue manager, host, port, channel, queue, user, password, TLS cipher spec, key repository, and certificate label), and then queries the pending operations with usp_ObtenerOperacionesSWFOutMq. When the override flag is exactly 1 it sends immediately; otherwise it requires a business day (the shared EsDiaHabil() is false on every Saturday and Sunday unless FORZA_EJECUCION_SERVICIOS=1) and a local time inside the window. To send, it opens one TLS client connection to the queue manager and, for each operation, (1) sets the control row to SNDNG with usp_ActualizaEstatusEnvioMensajeSWFOutMq, (2) puts the message on the queue as a UTF-8 (CCSID 1208) MQFMT_STRING message with default put options, and (3) sets the control, work-plan, and work rows to PROC with usp_ActualizaEstatusProcesoSWFOutMq; an MQException from the put sets that row to ERROR (when that status update itself succeeds). The batch result is true only when no operation was rejected or failed, but the host discards it. An operator e-mail is attempted only for non-MQ exceptions that reach the batch-level catch. The SQL project's own procedures for this service (usp_ObtenerOperacionesSWFOutMqGcms and two siblings, created on 2026-05-25) are meant to select only MT-998 messages, yet the reviewed code calls the sibling SWF_OUT_MQ procedure family instead (GCMS-FR-1, GCMS-FR-2).
-2. Scope & Methodology Note
-This is a new review after the authoritative reset dated 2026-10-07. The tracker row was Not started and no earlier SwfIOUTMQGCMS_Recommendations.md was present in docs/recommendation/ when this review began; findings or severities from older audit runs were not used as evidence.
-• Read 28/28 Git-tracked files, 2,504/2,504 lines, in full and line by line: 17 C# files / 1,653 lines (Aplicacion 8 / 527, Infraestructura 3 / 617, host 4 / 284, tests 2 / 225), the four project files, the .slnx, App.config, two packages.config, .gitattributes, .gitignore, and .github/copilot-instructions.md. git status is clean and the working tree holds no untracked or ignored files. The solution is below the 150-file / 5,000-line threshold, so no on-disk progress tracker was required.
-• Directly relevant SQL was read in full: the three solution-owned procedures under SWF_OUT_MQ_GCMS/IT24/Procedures (SWF_OUT_MQ_GCMS/001 SP usp_ObtenerOperacionesSWFOutMqGcms.sql:1-84 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMqGcms.sql#L1-L84), SWF_OUT_MQ_GCMS/002 SP usp_ActualizaEstatusMensajeSWFOutMqGcms.sql:1-72 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/002%20SP%20usp_ActualizaEstatusMensajeSWFOutMqGcms.sql#L1-L72), SWF_OUT_MQ_GCMS/003 SP usp_ActualizaEstatusProcesoSWFOutMqGcms.sql:1-129 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/003%20SP%20usp_ActualizaEstatusProcesoSWFOutMqGcms.sql#L1-L129)) and the three SWF_OUT_MQ procedures that the code actually calls (SWF_OUT_MQ/001 SP usp_ObtenerOperacionesSWFOutMq.sql:1-84 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMq.sql#L1-L84), SWF_OUT_MQ/002 SP usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql:1-72 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/002%20SP%20usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql#L1-L72), SWF_OUT_MQ/003 SP usp_ActualizaEstatusProcesoSWFOutMq.sql:1-129 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/003%20SP%20usp_ActualizaEstatusProcesoSWFOutMq.sql#L1-L129)); all six are UTF-8, and a raw line comparison shows each pair differs only in object names (including the header NOMBRE line) and, in the selector, in the MT-998 predicate and the header comment that describes it. A decode-aware scan of all 2,189 .sql files in the workspace (41 are UTF-16) found no file that mentions usp_ActualizaEstatusEnvioMensajeSWFOutMq (the name the code executes); its only match anywhere in the SQL project is a build-item path in DBMDW.sqlproj (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1159). The DDL of tb_srv_swf_swift_out_ctl, tb_srv_swf_trabajo, and tb_srv_swf_plan_trabajo_maestro, and the queue, channel, and TLS definitions on the MQ side, are not in the repository.
-• Traced only the shared MUFG_T24 contracts (workspace copy under General/MUFGT24_BTMUM_64, branch CR3rdround, commit d1e49a0) that control effective behavior here: parameter loading, lifecycle updates, business-day and clock handling, the repository adapters, the mail helper, logging, and the WindowsServiceHostBase timer/stop contract. These external reads verify behavior; they are not counted as solution-owned files. The sibling SWF_OUT_MQ constants were read only to compare procedure and parameter names.
-• Supplemented the full read with quantified scans over the 17 C# files: zero matches for .Result, .Wait(, async void, throw ex;, DateTime.Now, and FirstOrDefault; 11 catch (Exception (four in the application service, four in the repository, three in the host); 29 ConfigureAwait(false); 15 Config.EscribirLog call sites (the whole Config class is obsolete); two Pid.Value reads, both after validation; two TimeSpan.TryParse and one int.TryParse (current culture); and 13 of the 76 constants in ConstantesServicio.cs that no other file references by qualified name.
-• Code blocks that precede a Recommendation are excerpts of existing code, abridged for reading: .ConfigureAwait(false) suffixes and unrelated lines are omitted (... marks a gap), long statements are joined onto one line, and trailing // comments are the reviewer's, not the source's. Code blocks after a Recommendation are proposed code, not existing code.
-• One throwaway experiment supports GCMS-FR-18: a short console program in %TEMP%, compiled with the machine's .NET Framework C# compiler (CLR 4.0.30319), casts Task.CompletedTask to Task<T>. Its output was `CompletedTask runtime type: System.Threading.Tasks.Task followed by InvalidCastException: Unable to cast object of type 'System.Threading.Tasks.Task' to type 'System.Threading.Tasks.Task1[Result]'``.
-• Provenance: CodeReview2 is two commits ahead of origin/CodeReview (334dd78 "CodeReview2 changes", which introduced ResultadoOperacionMq, per-operation outcomes, the batch result fallidas == 0 && rechazadas == 0, and the cancellation tokens and checks on the repository contract, and f344bff "throw added") and is 13 commits ahead of and 22 behind origin/develop. origin/develop (73d3b08, 2026-09-04) is a different lineage: it already points the constants at the ...Gcms procedure names (commits 3f1e8b7 and 6122b8b) and renames the solution and host project to SwfIOUTMQGCMS, but its repository contract predates the cancellation tokens and outcome model of CodeReview2, and it carries only a stub MapConnectionError class, an in-memory FakeMqClient unrelated to the IBM client, and the default GitLab README.md (GCMS-FR-21). An untracked sibling folder SWIFT/Outgoing/SWF_OUT_TMP (not a Git repository) holds an older copy of this solution and was not reviewed.
-• No JIRA/ADO work item or acceptance criteria was supplied. Business expectations are limited to behavior expressed by code, SQL, and the portfolio baseline.
-• Production source was not modified. Build and test execution were unavailable: dotnet, modern MSBuild, vstest.console, nuget, and vswhere are not installed (only the .NET Framework 4.0 MSBuild exists), the D: drive and D:\ServiceCMS\MUFG_T24.dll and amqmdnet.dll are absent, there is no packages folder, and the .NET Framework 4.8 reference pack is not installed. Validation is therefore static plus the experiment above and document/tooling checks. By static reading, none of the five existing tests can run (GCMS-FR-18).
-Finding Summary
-Category	Blocker	Major	Minor	Total
-MustChange/rewrite	3	7	0	10
-rewrite_recommended	0	3	6	9
-NiceToRewrite_ifTimePermits	0	0	2	2
-Total	3	10	8	21
+namespace AplicacionSwfOUTMQGCMS
+{
+    /// <summary>
+    /// Clase principal para ejecutar procedimientos.
+    /// </summary>
+    public class OperacionServicio : IOperacionServicio
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IAlertas _alertas;
+        private readonly IParametrizacion _parametrizacion;
+        private readonly IRepositorioTomi<OperacionSWF> _repositorioTomi;
 
-Fresh Cross-Cutting Checks
-Candidate	Result	Current evidence
-GEN-1 absolute DLL references	Yes	Five absolute D:\ServiceCMS references across all four projects: MUFG_T24.dll in each project (application (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/AplicacionSwfOUTMQGCMS.csproj#L53-L56), infrastructure (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/InfraestructuraSwfOUTMQGCMS.csproj#L57-L59), host (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/SwfOUTMQGCMS.csproj#L62-L64), tests (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/PruebasUnitarias.csproj#L73-L75)) plus amqmdnet.dll in the infrastructure project (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/InfraestructuraSwfOUTMQGCMS.csproj#L53-L56); SimpleInjector is a restored NuGet package; no nuget.config or MUFG_T24 package exists anywhere in the review workspace (GCMS-FR-20).
-GEN-2 zero automated tests	Yes (effective)	A test project with five MSTest methods exists, but its [TestInitialize] throws InvalidCastException, so none can run (SwfOUTMQGCMSTest.cs:44-50 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L44-L50)); once repaired, the tests cover only the orchestrator's return values (GCMS-FR-18, GCMS-FR-19).
-GEN-3 duplicate project files	No	Four distinct project files; each of the 17 C# files is compiled by exactly one project (application (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/AplicacionSwfOUTMQGCMS.csproj#L67-L74), infrastructure (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/InfraestructuraSwfOUTMQGCMS.csproj#L71-L73), host (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/SwfOUTMQGCMS.csproj#L85-L92), tests (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/PruebasUnitarias.csproj#L87-L88)). The untracked SWF_OUT_TMP copy is outside the repository (GCMS-FR-21).
-GEN-4 near-identical solutions	Lead (partial)	This solution is the twin of SwfOUTMQ, which has not been reviewed yet. A normalized, trimmed, non-blank, non-comment line comparison of 15 paired C# files against the sibling's checked-out develop (53578ab) shares 606 of this solution's 1,127 lines (53.8%; 558 of 1,067, or 52.3%, excluding the four AssemblyInfo.cs pairs): OperacionServicio.cs 67%, ServiceHost.cs 67%, RepositorioTomi.cs 57%, ConfiguracionMQ.cs 94%, ConstantesServicio.cs 16%. The sibling's develop is an older, pre-review lineage, so the figure is a lead only. Confirmed drift: the clone still calls the original's three procedure names and the original's selector (GCMS-FR-1, GCMS-FR-2). Confirm after SwfOUTMQ is reviewed.
-GEN-5 sensitive logging	No	The solution logs folios, message lengths, counts, parameter names, and exception text; no credential, SWIFT payload, account number, or amount. The password, user id, cipher spec, key repository, and certificate label are declared sensitive (ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L10)), so the shared loader masks their values (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L253-L258)). Whether the password is stored in clear text in the parameter table is a confirmation item.
-GEN-6 undisposed signing helper	No	No signing helper or certificate object is constructed locally; the MQ queue and queue manager are closed in a finally (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L129-L148)).
-GEN-7 finalization only on success	No	ActualizaTerminacion is attempted from a finally (OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L104-L119)); its discarded result belongs to GEN-9 (GCMS-FR-16), and its behavior with a cancelled token is GCMS-FR-4.
-GEN-8 nullable PID dereference	No	The shared ObtenerProcesoActualAsync assigns the PID from the current process (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L59-L63)); the host rejects a missing PID (ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L101-L104)) and the base host validates it before starting the timer (WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L251-L252)); both .Value reads (OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L265), ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L118)) follow that validation.
-GEN-9 discarded service-state results	Yes	Startup and shutdown discard the MarcarPuertoEnUsoAsync Boolean, the ActualizaTerminacion result is ignored in two places, InsertarAlerta is ignored, the tick outcome is discarded, and shutdown logs success whatever the results (GCMS-FR-16).
-GEN-10 out-of-hours alert per tick	Yes (partial)	Only the non-business-day branch alerts on every tick, and only when operations are pending and the override flag is off; the out-of-window and invalid-window branches log an ERROR on every tick without an alert (GCMS-FR-3).
-GEN-11 repository failure looks like empty/success	Yes (read side)	RecuperaOperacionesAsync returns resultado.Data without reading Exito, so a failed read becomes "No hay operaciones para procesar." (GCMS-FR-11). Both status writes check Exito and throw (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L411-L414), RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L436-L439)).
-GEN-12 culture-dependent money/date conversion	No (latent)	No money or date value is converted; the culture-sensitive TimeSpan.TryParse and int.TryParse calls read invariant-looking text (GCMS-FR-6).
-GEN-13 stored-procedure contract drift (proposed)	Yes	The code calls the wrong procedure family and a status procedure that no SQL file defines (GCMS-FR-1, GCMS-FR-2).
+        /// <summary>
+        /// Constructor principal de Operaciones.
+        /// </summary>
+        /// <param name="configuracion"></param>
+        /// <param name="controlServicio"></param>
+        /// <param name="alertas"></param>
+        /// <param name="parametrizacion"></param>
+        /// <param name="repositorioTomi"></param>
+        public OperacionServicio(Configuracion configuracion,
+            IControlServicio controlServicio,
+            IAlertas alertas,
+            IParametrizacion parametrizacion,
+            IRepositorioTomi<OperacionSWF> repositorioTomi)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _alertas = alertas;
+            _parametrizacion = parametrizacion;
+            _repositorioTomi = repositorioTomi;
+        }
 
-Items Requiring Business/Integration Confirmation
-These are not classified as defects without the missing contract evidence:
-• Deployed procedures. List the InterfacesT24 procedures that actually exist (usp_ObtenerOperacionesSWFOutMq, usp_ObtenerOperacionesSWFOutMqGcms, usp_ActualizaEstatusEnvioMensajeSWFOutMq, usp_ActualizaEstatusMensajeSWFOutMq, and the two ...Gcms status procedures) with their current definitions. GCMS-FR-1 and GCMS-FR-2 rest on the SQL project and the constants, not on the deployed database.
-• Routing intent. Confirm that MT-998 messages are meant for the GCMS queue and all other outbound messages for the SWF_OUT_MQ queue, and whether any other process sends MT-998 messages today.
-• Which lineage runs in production. Confirm whether the release line is origin/develop (73d3b08, already using the ...Gcms constants) or CodeReview2 (f344bff), and how the two are to be merged (GCMS-FR-21).
-• Destination queue. Provide the queue's default persistence (DEFPSIST), maximum depth, backout/dead-letter handling, whether GCMS needs the folio as message or correlation id, whether ordering matters, and whether GCMS tolerates duplicates (GCMS-FR-8, GCMS-FR-12).
-• TLS settings. Provide the production value format of MQ.SWF_OUT_GCMS.SSL_KEYREPOSITORY (the code requires an existing directory), the server certificate DN the channel should present, the permitted cipher specs, and whether MQ.SWF_OUT_GCMS.PASSWORD is stored in clear text in the parameter table (GCMS-FR-13). The IBM documentation was not consulted in this review.
-• Timer interval and volumes. TimerInterval comes from the encrypted configuration; per-tick figures below use the host's 10-second fallback for illustration only. Provide the real interval, the typical and peak number of pending operations per tick, and whether operations are ever pending on weekends or holidays (GCMS-FR-3, GCMS-FR-8, GCMS-FR-9).
-• Operating window. Confirm whether an overnight window (HORA_OP_INICIO later than HORA_OP_FIN) will ever be needed for this service (GCMS-FR-6).
-• `ERROR` and `SNDNG` handling. Confirm how operators re-queue an operation left in ERROR or SNDNG, and by which procedure (GCMS-FR-8, GCMS-FR-9, GCMS-FR-10).
-• Log-size unit. Confirm whether the configured TamanoMaximoArchivoLogKB values are kilobytes (as named) or megabytes (as Logging.Init treats them) (GCMS-FR-17).
-External Dependency Notes (belong to the MUFG_Library review, not counted here)
-• RepositorioMaestro.EjecutarReader<T> defaults to CommandType.Text (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L80-L81)) and converts a SqlException into Exito = false with empty data and no log entry (lines 202-207 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L202-L207)); this is the root of GCMS-FR-11 (LIB-FR-56).
-• ActualizaTerminacion rethrows OperationCanceledException and converts every other failure into Exito = false (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1230)), so a call with a cancelled token cannot finalize the run state (GCMS-FR-4); ActualizaEJecucion throws a new Exception that drops the inner exception (lines 1170-1174 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1170-L1174)).
-• ObtenerParametrosSistemaAsync(string, string, CancellationToken) marks every listed key required and throws when one is missing or blank (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L235-L248)) and logs each value at INFO on every call (lines 253-258 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L253-L258)), which for this solution is 14 parameter lines on every tick that reaches the load, before the operations are fetched. ObtenerHoraSistema() uses the application server's local clock (line 41 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L41-L44)) while the business date comes from the database.
-• CorreoHelper.EnviarCorreoAsync never throws for delivery problems: it logs the failure with the full recipient list and body and returns false (CorreoHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Correo/CorreoHelper.cs#L47-L91)).
-• Logging.Init(..., int maxMb) multiplies its argument by 1,024 to obtain kilobytes (Logging.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L32-L41)), while every host passes a setting named TamanoMaximoArchivoLogKB (GCMS-FR-17).
-• The static Config class, every ConfiguracionEncriptadaHelper member, and ConstantesGenerales are [Obsolete] compatibility shims (Config.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/Config.cs#L11-L12), ConfiguracionEncriptadaHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConfiguracionEncriptadaHelper.cs#L11-L13), ConstantesGenerales.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConstantesGenerales.cs#L6-L7)), so each use compiles with a CS0618 warning.
-3. What's Already Good
-• Constructor injection and a verified composition root. OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L37-L48) receives every collaborator through its constructor, and ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L48-L87) registers them in SimpleInjector and calls Verify(). Configuracion is a scoped clone of the startup configuration (line 81 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L81)), and each tick opens its own scope (line 140 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L140)), so the application service and the repository of one tick share the same configuration object and nothing leaks between ticks.
-• Database access is parameterized and fixed. The two status writes bind @Folio, @TipoOperacion, and @ClaveEstatus through CrearParametro against fixed procedure names (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L399-L410), lines 425-435 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L425-L435)), the selector takes no input, and no SQL is built from values in C#.
-• The status procedures are transactional and report errors. usp_ActualizaEstatusProcesoSWFOutMqGcms (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/003%20SP%20usp_ActualizaEstatusProcesoSWFOutMqGcms.sql#L67-L127) updates the control, work-plan, and work tables in one transaction under SET XACT_ABORT ON, rolls back, writes Auditoria.ErrorLog, and ends with THROW;; the status update (002 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/002%20SP%20usp_ActualizaEstatusMensajeSWFOutMqGcms.sql#L53-L70)) and the selector (001 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMqGcms.sql#L49-L82)) do the same, so a database failure surfaces as an exception.
-• Status writes check the result and throw. Both repository methods convert Exito == false into an InvalidOperationException that carries the folio and the SQL message (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L411-L414), lines 436-439 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L436-L439)) instead of discarding it, which is the pattern GEN-11 asks for (the read side is the exception, GCMS-FR-11).
-• A partial failure is no longer reported as success. Commit 334dd78 introduced a per-operation outcome (ResultadoOperacionMq.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ResultadoOperacionMq.cs#L6-L11)), isolation of one bad operation from the rest of the batch, and a batch result that is true only when nothing was rejected or failed (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L84-L112)).
-• MQ cleanup is independent and exception-safe. The queue and the queue manager are each closed in their own try/catch inside a finally (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L129-L148)), so a failure to close one does not leak the other.
-• The message encoding is explicit. The payload is sent as MQFMT_STRING with CCSID 1208 (UTF-8) (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L306-L313)).
-• TLS parameters are mandatory, and secrets are classified. Every MQ.SWF_OUT_GCMS.* key, including the cipher spec, key repository, and certificate label, is in the required list (ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L9-L10)), the shared loader throws when one is missing or blank (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L235-L248)), and the repository re-checks the SSL values (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L496-L527)), so the service cannot fall back to a plaintext connection through a missing parameter; the password, user id, cipher spec, key repository, and certificate label are declared sensitive so their values are masked in the parameter log (commit 56d090a).
-• Run-state finalization and shutdown are mostly sound. ActualizaTerminacion is attempted from a finally with its own try/catch (OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L104-L119)); shutdown finalizes with a separate cleanupCt and disposes the container in a finally (ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L175-L194)).
-• Inherited overlap protection and bounded shutdown. WindowsServiceHostBase skips a tick while the previous one is running (WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L372-L373)), bounds stop to a 60-second wait plus a 30-second cleanup (lines 27-28 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L27-L28)), and EsperarTareaActivaAsync logs a timeout instead of throwing (lines 195-205 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L195-L205)), so the cleanup in TerminacionAsync still runs after a slow tick.
-• Cancellation is honored between operations. The batch loop checks the token before connecting, before opening the queue, and before every operation (RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L66), line 82 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L82), line 86 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L86), line 225 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L225)); the placement of two later checks is GCMS-FR-8.
-• A single, unique service identity. NombreServicio.Swf_OUT_MQ_GCMS is used by Program.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/Program.cs#L20-L27), NombreServicioLog (ServiceHost.cs line 30 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L30)), and the configuration lookup (line 61 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L61)); the enum member exists in the shared library (NombreServicio.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/NombreServicio.cs#L17)), and a workspace-wide search for NombreServicio.Swf_OUT_MQ_GCMS finds only this solution. The shared ObtenerServicio throws on a missing configuration node instead of returning null.
-• Clean coding-pattern scans. The solution has no .Result, .Wait(, async void, throw ex;, DateTime.Now, FirstOrDefault, weak cryptography, TLS-validation bypass, SQL built from values, or secret logged by its own code.
-• Hygiene is clean. The working tree has no untracked source and no committed build output; .gitignore (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/.gitignore#L20-L31) excludes bin/, obj/, packages/ (line 200 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/.gitignore#L200)), and *.pfx (line 239 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/.gitignore#L239)); App.config (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/App.config#L1-L6) holds only the runtime declaration, so no secret is in tracked configuration.
-• Test scaffolding is wired to both production libraries. PruebasUnitarias.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/PruebasUnitarias.csproj#L93-L102) references the application and infrastructure projects, MSTest and Moq are pinned in packages.config (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/packages.config#L1-L9), and the service collaborators are behind interfaces (only Configuracion is injected as a concrete type), which keeps the repair cost of GCMS-FR-18 low.
-• Ruled out as defects (recorded to avoid re-investigation): the Pid.Value reads (OperacionServicio.cs line 265 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L265), ServiceHost.cs line 118 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L118)) are safe because the PID is assigned and validated first (GEN-8); the shutdown wait does not skip the cleanup, because EsperarTareaActivaAsync returns after logging a timeout; the e-mail settings MAIL_TO, MAIL_SUBJECT, and MAIL_SENDER_TEST are read at startup through ObtenerValorGeneral, which throws when a value is missing (ObtencionConfguracionGeneral.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Configuracion/ObtencionConfguracionGeneral.cs#L246-L268)), so the service fails fast instead of running with mail silently disabled; CorreoHelper.EnviarCorreoAsync returns false instead of throwing for delivery problems, so an ordinary mail failure does not break the repository's error handling; the shared FileLogger returns without writing when it has not been initialized (FileLogger.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/FileLogger.cs#L102)), so logging calls are not what stops the unit tests; and calling a stored procedure by its bare name as command text (EjecutarReader with the default CommandType.Text) is valid T-SQL when the name is the whole batch, so it is a contract smell, not a failure (GCMS-FR-11).
-4. Findings by Project (low/no-dependency -> high dependency)
-4.1 AplicacionSwfOUTMQGCMS (Tier 0)
-MustChange / Rewrite
-GCMS-FR-1 - The service calls the SWF_OUT_MQ procedure family, whose selector excludes MT-998, instead of its own ...Gcms procedures, and both services read the same pool (Blocker)
-• Category / severity: MustChange/rewrite - Blocker
-• Evidence: ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L17-L19) (the three procedure names), the called selector usp_ObtenerOperacionesSWFOutMq (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMq.sql#L57-L59) (header lines 22-25 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMq.sql#L22-L25)) against the unused usp_ObtenerOperacionesSWFOutMqGcms (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMqGcms.sql#L57-L59) (header lines 22-25 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMqGcms.sql#L22-L25)), the unconditional status update in usp_ActualizaEstatusMensajeSWFOutMqGcms (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/002%20SP%20usp_ActualizaEstatusMensajeSWFOutMqGcms.sql#L56-L59), the repository calls at RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L382-L389), the sibling's constants at SWF_OUT_MQ ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/Enums/ConstantesServicio.cs#L12-L14), and the six build items at DBMDW.sqlproj (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1158-L1163)
-Code block (csharp)
-public const string UspObtenerOperacionesSwfOutMq = "usp_ObtenerOperacionesSWFOutMq";                     // L17
-public const string UspActualizaEstatusEnvioMensajeSwfOutMq = "usp_ActualizaEstatusEnvioMensajeSWFOutMq"; // L18
-public const string UspActualizaEstatusProcesoSwfOutMq = "usp_ActualizaEstatusProcesoSWFOutMq";          // L19
-Code block (sql)
--- 001 SP usp_ObtenerOperacionesSWFOutMq.sql (called)      001 SP usp_ObtenerOperacionesSWFOutMqGcms.sql (never called)
-AND Det.NF_CVE_MENSAJE NOT IN ('MT-998');                  AND Det.NF_CVE_MENSAJE IN ('MT-998');
-The SQL project holds two procedure families created on 2026-05-25: the SWF_OUT_MQ family, whose selector returns the INI operations whose message type is not MT-998, and the SWF_OUT_MQ_GCMS family (names ending in Gcms), whose selector returns only MT-998. The two sets of three procedures are otherwise identical line for line. This solution's constants point at the first family, which is also the family used by the sibling SWF_OUT_MQ solution (its constants name the same three procedures and publish to its own MQ.SWF_OUT.* queue). By static reading, three consequences follow. (1) As configured, neither of these two services selects MT-998 messages: this service asks for the non-998 set, the sibling asks for the same set, and MT-998 control rows stay in INI. (2) Every non-998 operation is selected by both services, which publish it to two different queues; the first status update is unconditional (WHERE folio = @Folio AND tipo_operacion = @TipoOperacion, with no cve_estatus = 'INI' guard), so nothing makes one service the owner of a row, and a message can reach the wrong destination, both destinations, or the same destination twice. (3) The three dedicated ...Gcms procedures are unused. Commits 3f1e8b7 (selector) and 6122b8b (status procedures) on origin/develop and origin/cambio02 already switch the constants to the ...Gcms names; they are not on CodeReview2. The finding rests on the SQL project and the constants; the deployed InterfacesT24 may differ (see the confirmation list).
-Recommendation: point the constants at the dedicated procedures (and align the status-procedure name at the same time, GCMS-FR-2), pin the contract with a test that compares every procedure constant with the SQL project (GCMS-FR-19), and turn the first status update into a claim so that only one service can take a row (GCMS-FR-8).
-Code block (csharp)
-public const string UspObtenerOperacionesSwfOutMq = "usp_ObtenerOperacionesSWFOutMqGcms";
-public const string UspActualizaEstatusEnvioMensajeSwfOutMq = "usp_ActualizaEstatusMensajeSWFOutMqGcms";   // must equal the CREATE PROCEDURE name
-public const string UspActualizaEstatusProcesoSwfOutMq = "usp_ActualizaEstatusProcesoSWFOutMqGcms";
-Benefit: MT-998 messages reach GCMS, the other messages stop being published to the wrong queue, and the twin services stop competing for the same rows.
-GCMS-FR-2 - The status procedure executed before every send, usp_ActualizaEstatusEnvioMensajeSWFOutMq, is defined by no SQL file (Blocker)
-• Category / severity: MustChange/rewrite - Blocker
-• Evidence: ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L18), the call at RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L399-L417), the file that carries the name but creates another object (SWF_OUT_MQ 002 lines 40-43 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/002%20SP%20usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql#L40-L43), header line 9 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/002%20SP%20usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql#L9)), the Gcms copy (lines 40-43 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/002%20SP%20usp_ActualizaEstatusMensajeSWFOutMqGcms.sql#L40-L43)), the build items line 1159 (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1159) and line 1162 (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1162), and the sibling constant SWF_OUT_MQ ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/Enums/ConstantesServicio.cs#L13)
-Code block (sql)
--- file: SWF_OUT_MQ/IT24/Procedures/002 SP usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql
-DROP PROCEDURE IF EXISTS dbo.usp_ActualizaEstatusMensajeSWFOutMq;     -- L40
-CREATE PROCEDURE dbo.usp_ActualizaEstatusMensajeSWFOutMq              -- L43  (no "Envio")
-Code block (csharp)
-public const string UspActualizaEstatusEnvioMensajeSwfOutMq = "usp_ActualizaEstatusEnvioMensajeSWFOutMq";   // executed
-The control-row status update that runs before every send executes usp_ActualizaEstatusEnvioMensajeSWFOutMq. The SQL project has a file with that name in the SWF_OUT_MQ folder, but the object the file creates is usp_ActualizaEstatusMensajeSWFOutMq (the word "Envio" is missing), and the SWF_OUT_MQ_GCMS copy creates usp_ActualizaEstatusMensajeSWFOutMqGcms. A decode-aware scan of all 2,189 .sql files in the workspace finds no file that mentions the called name; its only match in the SQL project is the .sqlproj build-item path. In a database built from the project, the first EXEC would fail with SQL error 2812 (procedure not found), EjecutarStoredProceduredNonQuery would turn it into Exito = false, the repository would throw InvalidOperationException (lines 411-414 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L411-L414)), and the per-operation catch would log it and mark the operation Fallida (lines 295-299 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L295-L299)): nothing would be sent and, because failures are only logged (GCMS-FR-10), nothing would be alerted. If production holds a hand-created procedure with the called name instead, the SQL project is out of sync with production and cannot rebuild it. The same drift survives in the corrected lineage: origin/develop calls usp_ActualizaEstatusEnvioMensajeSWFOutMqGcms, while its SQL project creates usp_ActualizaEstatusMensajeSWFOutMqGcms. This is the portfolio pattern proposed as GEN-13 (compare LIB-FR-70, LEC-FR-49, FO-FR-26, and ETL-FR-44, which has the same mismatch between a file name and the CREATE PROCEDURE inside it).
-Recommendation: choose one name per procedure and make the CREATE PROCEDURE, the file name, the .sqlproj item, and the C# constant agree; make the SQL project the source of truth; add a check that every procedure constant has a matching CREATE PROCEDURE (and, at deployment, a sys.procedures row); and verify the deployed names before the next release.
-Code block (csharp)
-[TestMethod]
-public void Every_procedure_constant_is_created_by_the_sql_project()
-{
-    var names = new[] { ConstantesServicio.UspObtenerOperacionesSwfOutMq,
-                        ConstantesServicio.UspActualizaEstatusEnvioMensajeSwfOutMq,
-                        ConstantesServicio.UspActualizaEstatusProcesoSwfOutMq };
-    var sql = string.Join("\n", Directory.GetFiles(ProcedureFolder, "*.sql").Select(File.ReadAllText));
-    foreach (var name in names)
-        StringAssert.Contains(sql, "CREATE PROCEDURE dbo." + name);
-}
-Benefit: the status update can run, the contract is verified before release, and the SQL project can rebuild the database it targets.
-Rewrite Recommended
-GCMS-FR-3 - With the override flag off, a non-business day with pending operations raises an ERROR alert on every tick, and the gates run after the database fetch (GEN-10, Minor)
-• Category / severity: rewrite_recommended - Minor
-• Evidence: OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L74-L96) (fetch, then gates), lines 143-151 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L143-L151) (EsDiaHabilAsync), lines 202-214 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L202-L214) (invalid window and out-of-window); the shared day rule at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1252-L1263); alert persistence in usp_InsertaAlerta_MUFGLibreria (../../StoredProcedures/MWD_DB/DBMDW/General/MUFG_T24_BTMUM_64/IT24/Procedures/031%20SP%20usp_InsertaAlerta_MUFGLibreria.sql#L58-L70) (a plain INSERT with getdate())
-Code block (csharp)
-var operaciones = await _repositorioTomi.RecuperaOperacionesAsync(ct);   // read first ...
-...
-if (!await EsDiaHabilAsync().ConfigureAwait(false))                        // ... decide second
-    return false;
-...
-LogError(ConstantesServicio.MensajeDiaInhabil);
-await RegistrarAlertaAsync(ConstantesClaveAviso.Error, new Exception(ConstantesServicio.MensajeDiaInhabil), ConstantesServicio.MensajeDiaInhabil);
-The operations are fetched before the business-day and window gates, so every tick reads the pending operations even when the service is going to refuse to send them. When the override flag is off and operations are pending, a non-business day logs an ERROR and inserts an alert row on every tick, and nothing de-duplicates it. The shared EsDiaHabil() is false on every Saturday and Sunday unless FORZA_EJECUCION_SERVICIOS=1, so a weekend with pending operations at the host's 10-second fallback interval adds 8,640 alert rows per day (the real interval is not visible), plus an ERROR log line per tick. An out-of-window tick and an invalid window (inicio >= fin) each log one ERROR line per tick without an alert. An empty queue returns after a single INFO line, so the noise appears only while work is waiting. Waiting work on a non-business day deserves one alert; one row per tick does not, and the fabricated new Exception(...) hides that no failure occurred. Run-state finalization is already correct thanks to the finally (GEN-7).
-Recommendation: evaluate the gates first (they need no data access), write one INFO line per transition (entering or leaving a non-business day or the window), and alert once per transition or when the oldest INI operation has waited longer than a configured age, instead of once per tick.
-Code block (csharp)
-var ventana = await EvaluarVentanaAsync(ct);            // business day + window, no data access
-if (ventana != EstadoVentana.Abierta)
-{
-    _transiciones.RegistrarSiCambio(ventana);           // one INFO line, at most one alert, per transition
-    return ResultadoTick.Omitido(ventana);
-}
-var operaciones = await _repositorioTomi.RecuperaOperacionesAsync(ct);
-Benefit: alerts regain meaning, the alert table and logs stop growing with idle time, and an idle weekend costs no database read.
-GCMS-FR-4 - A normal service stop is handled as a failure: it logs ERROR lines and, depending on where the tick is, raises a CRITICO alert or an operator e-mail
-• Category / severity: rewrite_recommended - Minor
-• Evidence: OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L98-L103) (catch-all and CRITICO alert), lines 104-119 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L104-L119) (finalization with the same token); RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L120-L128) (generic catch and e-mail) with the token checks at line 66 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L66), line 82 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L82), line 86 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L86), and line 225 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L225); ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L146-L149); the stop sequence at WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L125-L126) and its own filter at line 381 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L381-L384); the shared finalization at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1230)
-Code block (csharp)
-catch (Exception ex)                      // also catches OperationCanceledException
-{
-    LogError($"{ConstantesClaveAviso.Error} en {ConstantesServicio.MensajeEjecuta}: {ex}");
-    await RegistrarAlertaAsync(ConstantesClaveAviso.Critico, ex);
-    return false;
-}
-finally
-{
-    try { await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct).ConfigureAwait(false); }   // ct is already cancelled
-    catch (Exception ex) { LogError($"Error en ActualizaTerminacion: {ex}"); }
-}
-When the Windows service is stopped, the base host cancels the tick token first and then waits for the tick, and what is reported depends on where the tick is. In the application service's own database calls, the OperationCanceledException reaches the catch-all, which logs an ERROR and inserts a CRITICO alert. In the batch but outside an operation's own try (before the connection, between operations, or at the top of ProcesarOperacionAsync), the repository's generic catch logs "Error general" and e-mails operations that the insertion failed (the e-mail body carries the cancellation text), then returns false, so no alert follows. Inside one operation, the per-operation catch logs "Error general | Folio=..." and returns Fallida (the row may be left in SNDNG, GCMS-FR-8), and the next loop check raises the previous case unless that was the last operation. In every case the finally calls ActualizaTerminacion with the cancelled token, which rethrows the cancellation before touching the database, so the tick cannot finalize itself and logs another ERROR. OnTimerAsync has no cancellation filter either (the base host's own wrapper has one), so a cancellation that escaped the application service would be logged there as an ERROR as well. The host's shutdown path then attempts to finalize the run state with its own token (its result is not checked, GCMS-FR-16), but a restart that overlaps a tick is still reported as a failure for a normal event: ERROR lines in every case, plus an operator e-mail or a CRITICO alert unless the cancellation lands inside the last operation.
-Recommendation: treat cancellation as its own outcome (log once at INFO, no alert, no e-mail) and finalize with a short independent token so the run state is released even when the tick token is cancelled.
-Code block (csharp)
-catch (OperationCanceledException)
-{
-    LogInfo("Tick cancelado por detención del servicio.");
-    return ResultadoTick.Cancelado;
-}
-...
-finally
-{
-    using (var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
-        await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, cleanup.Token);
-}
-Benefit: restarts stop raising false CRITICO alerts and e-mails, and the run state is released by the tick that owned it.
-GCMS-FR-5 - Unreachable branches, duplicated validation, and dead loads hide the real behavior
-• Category / severity: rewrite_recommended - Minor
-• Evidence: OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L60-L71) and lines 162-186 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L162-L186); RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L263-L267), lines 276-283 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L276-L283), lines 411-415 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L411-L415), lines 436-440 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L436-L440), lines 479-527 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L479-L527), and line 326 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L326); OperacionServicio.cs line 131 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L131); the shared loader at Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L235-L248); the latest commit f344bff
-1. The `!actualizado` and `!procesado` branches can never run. Both status methods return resultado.Exito only after throwing when it is false, so they return true or throw. The most recent commit (f344bff, "throw added", 2026-09-22) rewrote exactly the unreachable !procesado branch: it now logs "Mensaje enviado a MQ pero no se actualizo en BD ... Favor de actualizar manualmente." and throws. The real failure (an InvalidOperationException from the status method) goes to the generic catch, which logs only "Error general | Folio=... | Error al Actualizar Estatus Proceso Out MQ: ..." and returns Fallida, so the one message that tells an operator the MQ message was already delivered is never produced (GCMS-FR-8).
-2. The missing-parameter checks are unreachable. The shared loader marks every key in ConstantesServicio.ParametrosSistema and ParametroWsT24MwPassword as required and throws InvalidOperationException when one is missing or blank, so the TryGetValue/IsNullOrWhiteSpace guards for SWF_OUT_GET_MT_BATCH, HORA_OP_INICIO, and HORA_OP_FIN never fire. In reality a missing parameter is caught by the catch-all at lines 98-103 and becomes a CRITICO alert on every tick, not the quiet return false the code (and the unit test, GCMS-FR-19) describes.
-3. Validation is duplicated. ValidarConfiguracionMq re-checks three SSL values that ObtenerValorObligatorio has just rejected when blank, so its only new rule is the Directory.Exists call (GCMS-FR-13).
-4. `MAIL_ERROR` is loaded and validated on every tick but never effective. The recipient is the mandatory general setting MAIL_TO (the host fails at startup without it), so ObtenerValorConfig(_configuracion.CorreoParaDefault, config.MailTo) always returns the first argument.
-5. `FechaSistema` is loaded on every tick and never read. The database call only has the side effect of throwing when the database has no business date.
-6. `ObtenerEnteroObligatorio` always names `Port` in its error text, whatever key it was given.
-Recommendation: give the repository methods a typed result (for example Updated, NotFound, Failed) so the caller's branches are real; drop the unreachable guards or move the real validation to one place (the shared loader already enforces presence); drop MAIL_ERROR from the required list or use it as the actual fallback; and remove the FechaSistema assignment unless the business date is needed.
-Code block (csharp)
-var estado = await ActualizaEstatusProcesoAsync(folio, ct);           // Updated | NotFound | Failed
-if (estado != ResultadoActualizacion.Updated)
-    throw new MensajeEnviadoSinConfirmarException(folio, estado);     // "already delivered to MQ, status not confirmed"
-Benefit: the code states what it really does, the operator guidance appears on the real failure path, and dead configuration stops being validated on every tick.
-GCMS-FR-6 - Schedule and override handling: culture-sensitive parsing, silently rejected overnight windows, a flag accepted only as 1, and mixed clocks (GEN-12, latent)
-• Category / severity: rewrite_recommended - Minor
-• Evidence: OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L72) (flag), line 161 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L161) (clock), lines 188-207 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L188-L207) (parsing and window rule), line 209 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L209); RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L180-L188) (int.TryParse); the shared clock at Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L41-L44); the sibling service's handling at SWF_OUT_READ OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_READ/Aplicacion/OperacionServicio.cs#L83-L97), `ParseBool` (../../SWIFT/Outgoing/SWF_OUT_READ/Aplicacion/OperacionServicio.cs#L102-L108), and its invariant, overnight-capable window (../../SWIFT/Outgoing/SWF_OUT_READ/Aplicacion/OperacionServicio.cs#L151-L166)
-Code block (csharp)
-bool esActivo = gbMensajesBatch == ConstantesParametroSistema.ValorBatchActivo;        // only the exact text "1"
-...
-if (!TimeSpan.TryParse(inicio, out var inicioResult))                                  // current culture
-...
-if (inicioResult >= finResult)                                                         // overnight and zero-length windows rejected
-{
-    var mensajeFueraDeHorario = $"El horario configurado no es valido'.";
-    LogError(mensajeFueraDeHorario);
-    return false;
-}
-• Culture. TimeSpan.TryParse and int.TryParse use the current culture. 08:00:00 and a port number read the same in every culture, so this is latent, but the portfolio's rule (already applied in SWF_OUT_READ) is an explicit invariant parse. The port is also not range-checked (-1 or 70000 would parse and be handed to the MQ client).
-• Overnight windows. inicioResult >= finResult rejects a window that crosses midnight and a zero-length window, and the only reaction is one ERROR line per tick: no alert, and nothing is ever sent. SWF_OUT_READ supports inicio > fin with an || test.
-• The override flag. The same shared parameter SWF_OUT_GET_MT_BATCH is read here as exactly "1" and in SWF_OUT_READ as "1" or "true" (case-insensitive); a value such as TRUE would switch one service into batch mode and leave the other on schedule. The flag also bypasses both the business-day and the window gates, so a single database value changes the schedule of every service that reads it.
-• Mixed clocks. The window is compared with the application server's local clock (ObtenerHoraSistema() is DateTime.Now.TimeOfDay), while the business date and the business-day flag come from the database and the local calendar; around midnight or with clock skew they can disagree.
-Recommendation: parse with CultureInfo.InvariantCulture (or TryParseExact), validate the port range, support overnight windows or reject them once at configuration time with a single alert, share one boolean parser for the flag, and document that the flag overrides the schedule.
-Code block (csharp)
-if (!TimeSpan.TryParse(inicio, CultureInfo.InvariantCulture, out var ini) ||
-    !TimeSpan.TryParse(fin, CultureInfo.InvariantCulture, out var fi)) { /* configuration error: alert once */ }
-bool dentro = ini <= fi ? (ahora >= ini && ahora <= fi) : (ahora >= ini || ahora <= fi);
-Benefit: configuration mistakes become visible once, schedule behavior matches the sibling services, and the flag has one meaning.
-Nice to Rewrite if Time Permits
-GCMS-FR-7 - Constant, naming, and interface hygiene
-• Category / severity: NiceToRewrite_ifTimePermits - Minor
-• Evidence: ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L9-L10) (parameter lists), lines 14 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L14), 20 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L20), 24 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L24), 47-64 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L47-L64), 80-85 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L80-L85), 97-99 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L97-L99); IRepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Interfaces/IRepositorioTomi.cs#L11-L37); RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L137) and line 146 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L146); OperacionSWF.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Modelos/OperacionSWF.cs#L6-L11); ConfiguracionMQ.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Modelos/ConfiguracionMQ.cs#L6-L19)
-• Dead constants. 13 of the 76 constants have no reference outside the constants file: Servicio, MaxSpTimeout, Application, MensajeErrorGeneral, MensajeError, MensajeOnStart, MensajeElapsed, ErrorHora, MensajeFueraDeServicio, MensajeConexionExitosa, MensajeErrorColaMQ, MensajeErrorDescMQ, and MensajeConfiguracionBatch. MaxSpTimeout = 10 is never applied as a command timeout, so the stored procedures run with the provider default, and the repository repeats the "cerrar cola MQ" and "deesconectar MQ" texts as literals instead of using the constants.
-• Typos and misleading text. "Emeal" (comment), "deesconectar", CerticateLabel, the accented identifier MensajeConexiónFallida, a message that names SWFOUTGETMTBATCH although the key is SWF_OUT_GET_MT_BATCH, MensajeErrorGeneral ("INFO|OnStart|Último fallback: no hacer nada."), and ParametroWsT24MwPassword, a name inherited from another solution for the MQ secret list.
-• Interface shape. IRepositorioTomi<Tipo> is generic only for the read method; GuardaMensajesOutMQ is bound to OperacionSWF. "Guarda" (save) names an MQ publish, the Async suffix is used on three of the four methods, and the class called "Tomi" repository is the MQ publisher (GCMS-FR-14). OperacionSWF and ConfiguracionMQ carry no validation, so an empty folio or message is discovered only deep in the repository.
-Recommendation: delete the unused constants, fix the typos, rename the interface and methods for what they do (IMensajeriaSwift.PublicarAsync, RecuperarPendientesAsync), and apply the command timeout or remove the constant.
-Benefit: less noise, accurate messages, and names that match behavior.
-4.2 InfraestructuraSwfOUTMQGCMS (Tier 1)
-MustChange / Rewrite
-GCMS-FR-8 - The per-message delivery state machine is not atomic, leaves operations in SNDNG that nothing retries or reports, and the latest fix edits an unreachable branch (Major)
-• Category / severity: MustChange/rewrite - Major
-• Evidence: RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L253-L299) (ProcesarOperacionAsync), lines 399-442 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L399-L442) (the two status methods); the selector that reads only INI at usp_ObtenerOperacionesSWFOutMq (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMq.sql#L57-L59); the unconditional flip at usp_ActualizaEstatusMensajeSWFOutMqGcms (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/002%20SP%20usp_ActualizaEstatusMensajeSWFOutMqGcms.sql#L56-L59); the final updates at usp_ActualizaEstatusProcesoSWFOutMqGcms (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ_GCMS/IT24/Procedures/003%20SP%20usp_ActualizaEstatusProcesoSWFOutMqGcms.sql#L74-L98); the stop sequence at WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L125-L126); commits 334dd78 (token checks) and f344bff ("throw added")
-Code block (csharp)
-var actualizado = await ActualizaEstatusMensajeOutMQAsync(folio, ConstantesServicio.EstatusSndng, ct);   // 1. INI -> SNDNG (SQL)
-...
-ct.ThrowIfCancellationRequested();                                                                      // 2. cancellation checked AFTER the flip
-queue.Put(mqMessage, new MQPutMessageOptions());                                                        // 3. MQ, outside any shared unit of work
-var procesado = await ActualizaEstatusProcesoSWFOutMqAsync(folio, ct);                                  // 4. SNDNG -> PROC (SQL); its first statement is ct.ThrowIfCancellationRequested()
-Two resource managers are updated one after the other without a shared unit of work. The selector returns only rows in INI, so the flip to SNDNG is the only thing that stops the next tick from sending the same message again. The failure points are:
-• Step 4 fails after step 3 (a deadlock, a timeout, a lost connection, or a process stop or crash between the put and the update). The message is on the queue and the row stays SNDNG. The status method throws, the generic catch logs "Error general | Folio=... | Error al Actualizar Estatus Proceso Out MQ: ..." without saying that the message was already delivered, and the operation is Fallida.
-• The cancellation checks sit in the wrong places. The check at step 2 is after the flip, so a stop request in that window leaves a message that was never sent in SNDNG; and the first statement of the status method called at step 4 is itself a cancellation check (lines 425-428 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L425-L428)), so a stop between the put and the update leaves a delivered message in SNDNG. Both windows are narrow, but the stop path cancels the token first, and both checks were added by commit 334dd78.
-• Nothing reconciles `SNDNG`. There is no retry, no age-based alert, and no query that reports these rows; an operator has to find them in the database. The only text written for the "delivered but not recorded" case sits in the unreachable !procesado branch that commit f344bff edited (GCMS-FR-5).
-• The flip is not a claim. Because the update has no cve_estatus = 'INI' guard and no rows-affected check, a second instance or the twin service can send the same row (GCMS-FR-1).
-For a single instance, the design therefore chooses "at most once" for database failures but gives up visibility; that is acceptable only if stuck rows are monitored and recoverable.
-Recommendation: (1) make the flip a claim (UPDATE ... SET cve_estatus = 'SNDNG' WHERE folio = @Folio AND tipo_operacion = @TipoOperacion AND cve_estatus = 'INI', and treat zero rows as "not mine, skip"); (2) check cancellation before the claim, never between claim and put; (3) do the post-put bookkeeping with a short independent token and a few retries, and when it still fails throw a dedicated exception that says the message was delivered; (4) monitor SNDNG rows older than a threshold with an alert and a documented operator procedure; (5) if GCMS can tolerate duplicates, carry the folio in the MQ message or correlation id and re-queue stuck rows (at least once); if it cannot, keep at-most-once and make the recovery manual but visible.
-Code block (csharp)
-var reclamada = await ReclamarOperacionAsync(folio, ct);          // guarded UPDATE; false when 0 rows were changed
-if (!reclamada) return ResultadoOperacionMq.Rechazada;            // another instance owns it
-queue.Put(mqMessage, opcionesPut);                                // no cancellation check between claim and put
-using (var cierre = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
-    await MarcarProcesadaConReintentoAsync(folio, cierre.Token);  // throws MensajeEnviadoSinConfirmarException if it still fails
-Benefit: no message is lost or silently left in limbo, duplicates between instances are prevented, and stuck rows become a monitored state instead of a silent one.
-GCMS-FR-9 - A connection that breaks in the middle of a batch can turn every remaining operation into ERROR, and every MQ reason code is treated as permanent (Major)
-• Category / severity: MustChange/rewrite - Major
-• Evidence: RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L84-L109) (the loop), lines 287-294 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L287-L294) (the MQ catch), lines 120-128 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L120-L128) (batch-level catch), lines 399-417 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L399-L417); the terminal-status rule in the selector usp_ObtenerOperacionesSWFOutMq (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMq.sql#L57-L59) (only INI is read); the catalogue in ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L67-L78)
-Code block (csharp)
-catch (MQException ex)                                                                       // every reason code, one outcome
-{
-    LogError($"Error MQ en PUT | Folio={folio} | Reason={ex.Reason} | {ex.Message}");
-    await ActualizaEstatusMensajeOutMQAsync(folio, ConstantesServicio.EstatusError, ct);    // terminal; throws if the SQL call fails
-    return ResultadoOperacionMq.Fallida;                                                     // the foreach continues with the same queue object
-}
-ProcesarOperacionAsync handles every MQException the same way: log, set the control row to ERROR, return Fallida. The loop then moves to the next operation with the same MQQueue. When the connection breaks in the middle of a batch (reason 2009 MQRC_CONNECTION_BROKEN is already in the catalogue), every following operation is expected to flip to SNDNG, fail at the put (nothing reconnects), and be flipped to ERROR; a failure while connecting never reaches the loop, because the batch-level catch logs it and the rows stay INI. ERROR is terminal because the selector reads only INI, so one network blip turns the rest of the batch into rows that need manual repair, and conditions that clear by themselves (queue full 2053, put inhibited 2051) are classified the same way as a bad message. The handler also performs a database call; if that call throws (InvalidOperationException, or a cancellation), the exception escapes both catch clauses of ProcesarOperacionAsync, aborts the loop through the batch-level catch, and sends the operations e-mail of GCMS-FR-10.
-Recommendation: classify the reason codes. Connection and availability failures (2009, 2059, 2538, and their relatives) abort the batch, leave the remaining rows in INI, and raise one alert; transient queue conditions leave the row retryable; only message-level errors mark that one row ERROR.
-Code block (csharp)
-catch (MQException ex) when (EsFalloDeConexion(ex.ReasonCode))       // 2009, 2059, 2538, ...
-{
-    throw new MqNoDisponibleException(ex);                           // abort the batch; remaining rows stay INI; alert once
-}
-catch (MQException ex) when (EsCondicionTransitoria(ex.ReasonCode))  // queue full, put inhibited
-{
-    await LiberarAsync(folio, ct);                                   // back to INI, retried on the next tick
-    return ResultadoOperacionMq.Reintentar;
-}
-catch (MQException ex)                                               // message-level error
-{
-    await MarcarErrorAsync(folio, ex, ct);                           // ERROR for this row only
-    return ResultadoOperacionMq.Fallida;
-}
-Benefit: a transient MQ outage no longer corrupts the status of a whole batch, and each failure class has the handling it needs.
-GCMS-FR-10 - Failed deliveries are visible only as log lines: no alert or e-mail for MQ and per-operation failures, the batch result is discarded, and persistent non-MQ failures e-mail on every tick (Major)
-• Category / severity: MustChange/rewrite - Major
-• Evidence: RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L114-L119) (MQ catch), lines 120-128 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L120-L128) (generic catch and e-mail), lines 226-251 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L226-L251) (rejections), lines 287-299 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L287-L299) (per-operation catches), lines 324-344 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L324-L344) (NotificarErrorAsync); OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L235-L246) (ProcesarOperacionesAsync) and lines 98-103 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L98-L103); ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L135-L150); the mail helper at CorreoHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Correo/CorreoHelper.cs#L47-L91)
-Failure	Log line	Alert row	E-mail
-MQ connect or queue-open error (batch-level MQException)	ERROR	no	no
-Rejected operation (null operation, empty folio or message)	ERROR	no	no
-Per-operation failure handled inside the loop (put error, or a status procedure error before or after the put)	ERROR	no	no
-Non-MQ exception that reaches the batch catch once the configuration object exists (for example the ValidarConfiguracionMq rules, a cancellation outside an operation, or a status update that throws inside the per-operation MQ catch)	ERROR	no	attempted, on each tick that hits it
-Exception that reaches OperacionServicio	ERROR	CRITICO (insert result unchecked, GCMS-FR-16)	no
+        /// <summary>
+        /// Método principal de ejecución de procesos de servicio SwfIOUTMQGCMS.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> EjecutarProcedimientosAsync(CancellationToken ct)
+        {
+            try
+            {
+                await InicializarContextoAsync(ct).ConfigureAwait(false);
 
-The batch result (false when anything was rejected or failed) is returned unchanged through ProcesarOperacionesAsync (which logs only when the repository throws) and EjecutarProcedimientosAsync, and OnTimerAsync discards it. A queue manager that is down (reason 2059), a rejected credential (2035), a TLS failure (2381, 2393, 2400), or one operation that fails on every tick therefore appears only as ERROR lines in the log file, once per tick, and nobody is notified. The e-mail path does the opposite: a persistent non-MQ failure (for example the key-repository check of GCMS-FR-13) attempts an operations e-mail on every tick, which is up to 8,640 e-mails a day at the host's 10-second fallback interval (the real interval is not visible; a failed send is only logged), because nothing de-duplicates by cause. Rejected rows (an empty message or folio; whether that can be a transient state while the ETL is still writing the work row is a question for the ETL owner) keep their status, are fetched again on every tick, and keep the batch result at false indefinitely with no escalation.
-Recommendation: return a structured outcome (Succeeded, PartiallyFailed, or Failed, with counts, the first error, and the reason code) from the repository to the service and the host; alert once per cause and transition (or when a row has been rejected for longer than a threshold); send one summary e-mail per batch instead of one per tick; and park rows that stay invalid in a distinct status so that they are visible and do not recur.
-Code block (csharp)
-public sealed class ResultadoLote { public int Exitosas; public int Rechazadas; public int Fallidas; public string PrimerError; public int? ReasonCode; }
-...
-if (resultado.Fallidas > 0 || resultado.Rechazadas > 0)
-    await _notificador.NotificarUnaVezAsync(clave: resultado.PrimerError, detalle: resultado);   // de-duplicated per cause
-Benefit: an MQ outage or a stuck operation reaches a human once, persistent configuration errors stop flooding the mailbox, and the host can tell a healthy tick from a failed one.
-GCMS-FR-11 - A failed read of the pending operations is indistinguishable from an empty queue (GEN-11, Major)
-• Category / severity: MustChange/rewrite - Major
-• Evidence: RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L382-L389) (RecuperaOperacionesAsync) against the write methods at lines 411-414 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L411-L414) and lines 436-439 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L436-L439); OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L74-L81); the shared adapter at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L80-L81) and lines 202-207 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L202-L207); the selector's own error handling at usp_ObtenerOperacionesSWFOutMq (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/001%20SP%20usp_ObtenerOperacionesSWFOutMq.sql#L49-L82)
-Code block (csharp)
-var resultado = await EjecutarReader<OperacionSWF>(ConstantesServicio.UspObtenerOperacionesSwfOutMq).ConfigureAwait(false);
-return resultado.Data;                                   // Exito, MensajeError, and Exception are never read
-EjecutarReader converts a SqlException (a missing procedure, which is the situation of GCMS-FR-2, a permission error, a timeout, a deadlock, or a conversion error) into Exito = false with an empty Data list, and it writes nothing to the log for that case. The selector's own CATCH correctly logs and rethrows, but the adapter swallows the result, so OperacionServicio writes "No hay operaciones para procesar." at INFO and returns false. A persistent read failure therefore looks like an idle queue forever: no ERROR line, no alert, and no exception, and no message is ever sent. The two write methods in the same class do check Exito and throw, so the pattern is known; only the read side was missed. The call also omits the cancellation token and a command timeout (MaxSpTimeout is unused, GCMS-FR-7) and relies on the default CommandType.Text; a lone procedure name is a valid T-SQL batch, so it runs, but it is not the contract the call intends.
-Recommendation: check Exito and throw, exactly as the writes do, so the failure reaches the tick's error handling and the alert and outcome paths of GCMS-FR-10; call the procedure as a stored procedure with the token and a timeout. The shared adapter should also log the swallowed SqlException (LIB-FR-56).
-Code block (csharp)
-var resultado = await EjecutarStoredProcedureQuery<OperacionSWF>(ConstantesServicio.UspObtenerOperacionesSwfOutMq, null, ct);
-if (!resultado.Exito)
-    throw new InvalidOperationException($"Error al recuperar operaciones SWF Out MQ: {resultado.MensajeError}", resultado.Exception);
-return resultado.Data;
-Benefit: a database or contract failure is reported as a failure instead of looking like an empty queue.
-Rewrite Recommended
-GCMS-FR-12 - The MQ message and put options carry no persistence, correlation, or quiesce settings (Major)
-• Category / severity: rewrite_recommended - Major
-• Evidence: RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L306-L313) (CrearMensaje), line 75 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L75) (AccessQueue), line 272 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L272) (Put), lines 274-285 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L274-L285) (the status update that follows the put)
-Code block (csharp)
-var mqMessage = new MQMessage();
-mqMessage.Format = MQC.MQFMT_STRING;
-mqMessage.CharacterSet = 1208; // UTF-8
-mqMessage.WriteString(mensaje);                                   // Persistence, MessageId, CorrelationId, Expiry: all defaults
-...
-queue = queueManager.AccessQueue(config.QueueName, MQC.MQOO_OUTPUT);
-queue.Put(mqMessage, new MQPutMessageOptions());                  // default put options
-The message sets only its format and character set. Persistence is therefore expected to be left at the "as queue definition" default (client behavior this review did not verify), so the destination queue's DEFPSIST (which is not in the repository) would decide whether a queue-manager restart can lose the message; because the control rows move to PROC immediately after the put, such a loss would be invisible. The folio is not in the MQ message descriptor (no message or correlation id), so unless the payload itself identifies the operation (not checked here; confirm with GCMS), a message cannot be correlated to its operation or a duplicate discarded through MQ, which would also rule out the at-least-once option in GCMS-FR-8. The queue is opened with MQOO_OUTPUT only and the put uses a default MQPutMessageOptions, so neither the open nor the put asks to fail fast when the queue manager is quiescing, and the syncpoint behavior is whatever the client default is (expected, not verified; the database update is outside any shared unit of work in either case). These are hardening gaps rather than observed failures: confirm the queue definition and GCMS's expectations first.
-Recommendation: set persistence explicitly (persistent, unless GCMS has agreed otherwise), carry the folio in a field GCMS can read (the 24-byte correlation id or a message property, after confirming its length and GCMS's expectations), add the fail-if-quiescing options to the open and the put, and define the message and put options in one factory.
-Code block (csharp)
-mqMessage.Persistence = MQC.MQPER_PERSISTENT;
-queue = queueManager.AccessQueue(config.QueueName, MQC.MQOO_OUTPUT | MQC.MQOO_FAIL_IF_QUIESCING);
-queue.Put(mqMessage, new MQPutMessageOptions { Options = MQC.MQPMO_FAIL_IF_QUIESCING });
-Benefit: a queue-manager restart cannot silently drop SWIFT messages, GCMS can correlate and de-duplicate, and the service stops promptly when the queue manager shuts down.
-GCMS-FR-13 - TLS hardening: the server identity is not pinned, the key-repository rule may reject valid values, and the cipher spec is unconstrained (Major)
-• Category / severity: rewrite_recommended - Major
-• Evidence: RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L195-L211) (CrearPropiedadesConexion), lines 496-527 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L496-L527) (ValidarConfiguracionMq); ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L9-L10); the developer note in .github/copilot-instructions.md (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/.github/copilot-instructions.md#L4)
-Code block (csharp)
-{ MQC.SSL_CIPHER_SPEC_PROPERTY, config.Ssl},
-{ MQC.SSL_CERT_STORE_PROPERTY, config.SslPath},
-{ ConstantesServicio.CerticateLabel, config.Cert }
-...
-if (!Directory.Exists(config.SslPath)) throw new ConfigurationErrorsException($"El repositorio SSL no existe: {config.SslPath}");
-• No server identity check beyond the chain. The connection sets the cipher spec, the key repository, the certificate label, and the user id and password, but no SSL_PEER_NAME_PROPERTY (the server certificate DN filter). The client is therefore expected to accept any server certificate that chains to a trusted root in the repository (IBM MQ behavior that this review did not verify); with a private CA repository the exposure is small, with a broader repository it is not. This is a hardening gap, not a bypass.
-• The cipher spec is data, not policy. MQ.SWF_OUT_GCMS.SSL_CIPHERSPEC comes from the parameter table and is passed through unchecked, so a weak or obsolete spec would be accepted silently.
-• The "H2" strictness is mostly the shared loader's. The developer note says the strict TLS validation "podría afectar la comunicación si hay parámetros SSL incompletos en algún ambiente". Presence is enforced by the shared loader (every key is required) and re-checked by ValidarConfiguracionMq; the only new rule is Directory.Exists(config.SslPath). To the reviewer's knowledge, IBM MQ clients commonly specify the key repository as a key-database file stem or a Windows certificate-store token, neither of which is an existing directory, so this rule may reject a valid production value, or accept a directory that holds no key database. The IBM documentation was not consulted in this review; confirm the value format with the MQ administrator before changing the rule.
-• Secret handling. The password is read as a plain string from the parameter table and passed in a Hashtable; whether the table stores it in clear text is not visible here (see the confirmation list).
-Recommendation: add a configurable peer-name pattern, validate the cipher spec against an allow-list of TLS 1.2 or later specs, replace the directory check with a validation that matches the repository format actually in use (and covers the file that must exist), and add a connect-only smoke check that runs at startup and reports the MQ reason code once.
-Code block (csharp)
-{ MQC.SSL_PEER_NAME_PROPERTY, config.SslPeerName },            // for example "CN=gcms-qm.example.mx,O=..."
-...
-if (!CipherSpecsPermitidos.Contains(config.Ssl)) throw new ConfigurationErrorsException("SSL_CIPHERSPEC no permitido.");
-Benefit: the service connects only to the intended queue manager with an approved cipher, and a mis-specified repository fails with a clear message at startup.
-GCMS-FR-14 - RepositorioTomi mixes SQL access, MQ transport, e-mail, and configuration parsing and cannot be tested without a live queue manager (Major)
-• Category / severity: rewrite_recommended - Major
-• Evidence: RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L26) (class), lines 44-149 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L44-L149) (publish), lines 156-211 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L156-L211) (configuration), lines 324-344 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L324-L344) (e-mail), lines 382-442 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L382-L442) (SQL), lines 452-527 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L452-L527) (parsing and validation); IRepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Interfaces/IRepositorioTomi.cs#L11-L37); the test setup at SwfOUTMQGCMSTest.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L76-L81)
-The class named RepositorioTomi (530 lines) is simultaneously a SQL repository (three procedures), the MQ publisher (it constructs MQQueueManager, MQQueue, and MQMessage inline), the error notifier (it calls the static CorreoHelper), and the parser and validator of the MQ configuration (including Directory.Exists). There is no seam to replace any of those: the unit tests can only mock IRepositorioTomi as a whole, so the delivery path (the status sequence, the failure classes, the batch result) cannot be exercised without a queue manager and a database, which is why GCMS-FR-19 finds no test for it. The origin/develop lineage does not have an MQ abstraction either (its FakeMqClient is an unrelated in-memory queue).
-Recommendation: split the class along its responsibilities and keep the application service as the orchestrator: an IMensajeriaSwift (connect, publish with options, disconnect, reason-code classification) with an IBM implementation and a fake for tests; an IOperacionesSwiftRepositorio that only runs the three procedures and returns typed results; an INotificadorOperaciones for e-mail and alert de-duplication; and a MqSettings object that parses and validates the parameters once. The same split lets the twin SwfOUTMQ and this solution share one publisher library (GEN-4).
-Code block (csharp)
-public interface IMensajeriaSwift
-{
-    Task<ResultadoPublicacion> PublicarAsync(OperacionSWF operacion, CancellationToken ct);   // maps MQ reason codes to Published | Retry | Rejected
+                if (!_configuracion.ParametrosSistema.TryGetValue(ConstantesServicio.SwfOutGetMtBatch, out string gbMensajesBatch))
+                {
+                    LogError(ConstantesServicio.MensajeBatch);
+                    return false;
+                }
+
+
+                if (string.IsNullOrWhiteSpace(gbMensajesBatch))
+                {
+                    LogError(ConstantesServicio.MensajeBatch);
+                    return false;
+                }
+                bool esActivo = gbMensajesBatch == ConstantesParametroSistema.ValorBatchActivo;
+
+                var operaciones = await _repositorioTomi.RecuperaOperacionesAsync(ct).ConfigureAwait(false);
+                var listaOperaciones = operaciones?.ToList();
+
+                if (listaOperaciones == null || listaOperaciones.Count == 0)
+                {
+                    LogInfo(ConstantesServicio.MensajeOperaciones);
+                    return false;
+                }
+
+                if (esActivo)
+                {
+                    return await ProcesarOperacionesAsync(operaciones, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    if (!await EsDiaHabilAsync().ConfigureAwait(false))
+                        return false;
+
+                    if (!await EstaEnHorarioOperacionAsync().ConfigureAwait(false))
+                        return false;
+
+                    return await ProcesarOperacionesAsync(operaciones, ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"{ConstantesClaveAviso.Error} en {ConstantesServicio.MensajeEjecuta}: {ex}");
+                await RegistrarAlertaAsync(ConstantesClaveAviso.Critico, ex).ConfigureAwait(false);
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    await _controlServicio
+                        .ActualizaTerminacion(
+                            _configuracion.NombreServicio,
+                            ct)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    LogError(
+                        $"Error en ActualizaTerminacion: {ex}");
+                }
+            }
+        }
+
+        #region Inicialización
+        /// <summary>
+        /// Método para inicializar variables y parametros de confirguración.
+        /// </summary>
+        /// <returns></returns>
+        private async Task InicializarContextoAsync(CancellationToken ct)
+        {
+            await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio, ct).ConfigureAwait(false);
+
+            _configuracion.FechaSistema = await _parametrizacion.ObtenerFechaSistemaAsync(ct).ConfigureAwait(false);
+            _configuracion.EsDiaHabil = await _controlServicio.EsDiaHabil().ConfigureAwait(false);
+            _configuracion.ParametrosSistema = await _parametrizacion.ObtenerParametrosSistemaAsync(ConstantesServicio.ParametrosSistema, ConstantesServicio.ParametroWsT24MwPassword, ct).ConfigureAwait(false);
+        }
+
+        #endregion
+
+        #region Validaciones
+        /// <summary>
+        /// Método para validar si es una habil o inhabil.
+        /// </summary>
+        /// <returns></returns>
+        private async Task<bool> EsDiaHabilAsync()
+        {
+            if (_configuracion.EsDiaHabil == true) 
+                return true;
+
+            LogError(ConstantesServicio.MensajeDiaInhabil);
+            await RegistrarAlertaAsync(ConstantesClaveAviso.Error, new Exception(ConstantesServicio.MensajeDiaInhabil), ConstantesServicio.MensajeDiaInhabil).ConfigureAwait(false);
+            return false;
+        }
+
+        /// <summary>
+        /// Validación de horario de Operación.
+        /// </summary>
+        /// <returns></returns>
+        private async Task<bool> EstaEnHorarioOperacionAsync()
+        {
+            try
+            {
+                var horaActual = _parametrizacion.ObtenerHoraSistema();
+                if (!_configuracion.ParametrosSistema.TryGetValue(ConstantesGenerales.HoraOPInicio, out string inicio))
+                {
+                    LogError(ConstantesServicio.MensajeHoraInicio);
+                    return false;
+                }
+
+                if (!_configuracion.ParametrosSistema.TryGetValue(ConstantesGenerales.HoraOPFin, out string fin))
+                {
+                    LogError(ConstantesServicio.MensajeHoraFin);
+                    return false;
+                }
+
+                if (string.IsNullOrEmpty(inicio))
+                {
+                    var mensajeInicio = ConstantesServicio.MensajeHoraInicio;
+                    LogError(mensajeInicio);
+                    return false;
+                }
+
+                if (string.IsNullOrEmpty(fin))
+                {
+                    var mensajeFin = ConstantesServicio.MensajeHoraFin;
+                    LogError(mensajeFin);
+                    return false;
+                }
+
+                if (!TimeSpan.TryParse(inicio, out var inicioResult))
+                {
+                    var mensajeR = $"{ConstantesServicio.MensajeHoraInicioError}'{inicio}'.";
+                    LogError(mensajeR);
+                    return false;
+                }
+
+                if (!TimeSpan.TryParse(fin, out var finResult))
+                {
+                    var mensajeF = $"{ConstantesServicio.MensajeHoraFinError}'{fin}'.";
+                    LogError(mensajeF);
+                    return false;
+                }
+
+                if (inicioResult >= finResult)
+                {
+                    var mensajeFueraDeHorario = $"El horario configurado no es valido'.";
+                    LogError(mensajeFueraDeHorario);
+                    return false;
+                }
+
+                if (horaActual >= inicioResult && horaActual <= finResult)
+                    return true;
+
+                var mensaje = $"El servicio '{_configuracion.NombreServicio}' está fuera de horario";
+                LogError(mensaje);
+                return false;
+
+            }
+            catch (Exception ex)
+            {
+                var mensaje = $"{ConstantesClaveAviso.Error}|EstaEnHorarioOperacion:|{ex.Message}";
+                LogError(mensaje);
+                await RegistrarAlertaAsync(ConstantesClaveAviso.Error, new Exception(mensaje), "Validación de Horario").ConfigureAwait(false);
+                return false;
+            }
+        }
+
+
+        #endregion
+
+        #region Procesamiento
+        /// <summary>
+        /// Método principal para procesar operaciónes.
+        /// </summary>
+        /// <param name="operaciones"></param>
+        /// <returns></returns>
+        private async Task<bool> ProcesarOperacionesAsync(IEnumerable<OperacionSWF> operaciones, CancellationToken ct)
+        {
+            try
+            {
+                return await _repositorioTomi.GuardaMensajesOutMQ(operaciones, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogError($"{ConstantesClaveAviso.Error} en GuardaMensajesOutMQGCMS: {ex}");
+                return false;
+            }
+        }
+
+        #endregion
+
+        #region Alertas y Logging
+        /// <summary>
+        /// Método para Registrar Alertas.
+        /// </summary>
+        /// <param name="tipo"></param>
+        /// <param name="ex"></param>
+        /// <param name="descripcion"></param>
+        /// <returns></returns>
+        private async Task RegistrarAlertaAsync(string tipo, Exception ex, string descripcion = null)
+        {
+            await _alertas.InsertarAlerta(new AlertaDTO
+            {
+                Servicio = _configuracion.NombreServicio,
+                ClaveAviso = tipo,
+                Descipcion = descripcion,
+                PId = _configuracion.Pid.Value,
+                NombreProceso = _configuracion.NombreProceso,
+                Exception = ex
+            }).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// Método para el registro de Log Informativo.
+        /// </summary>
+        /// <param name="msg"></param>
+        private void LogInfo(string msg) =>
+            Config.EscribirLog($"{ConstantesServicio.MensajeInfo}|{ConstantesServicio.MensajeEjecuta}|{msg}");
+        /// <summary>
+        /// Método para el registro de Log de Errores.
+        /// </summary>
+        /// <param name="msg"></param>
+        private void LogError(string msg) =>
+            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.MensajeEjecuta}|{msg}");
+
+        #endregion
+    }
 }
-Benefit: the delivery path becomes testable, the failure classes of GCMS-FR-8 to GCMS-FR-10 can be pinned by unit tests, and the twin services stop duplicating the transport code.
-Nice to Rewrite if Time Permits
-GCMS-FR-15 - The MQ reason-code catalogue mislabels 2540 and omits common codes, and the repository's messages are inconsistent
-• Category / severity: NiceToRewrite_ifTimePermits - Minor
-• Evidence: ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L67-L78) (catalogue), MQErrorHandler.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Messaging/MQErrorHandler.cs#L12-L52); RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L116-L117) (batch-level use), line 289 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L289) (per-operation log), lines 456-458 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L456-L458) (missing-key message), line 122 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L122) (generic catch), line 185 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L185)
-• Mislabeled and missing codes. Codigo2540 is described as MQRC_CHANNEL_NOT_AVAILABLE, but IBM's reason-code reference lists 2540 as MQRC_UNKNOWN_CHANNEL_NAME and MQRC_CHANNEL_NOT_AVAILABLE as 2537 (checked in the SwfINMQ second-pass review; not re-fetched here). The 11-entry catalogue also lacks 2537, 2053 (queue full), 2051 (put inhibited), and 2030 (message too long for the queue).
-• Used in one place only. GetMQErrorDescription runs for the batch-level MQException (line 116 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L116)); the per-operation handler logs only the numeric Reason and the exception text, so the most common failure (a put error) carries no description.
-• Message quality. ObtenerValor logs a missing key at INFO although it then throws, and its exception text repeats the key (the mensaje variable already contains it); the generic catch logs ex.Message and HResult but no stack trace; ObtenerEnteroObligatorio always names Port; the e-mail body carries only ex.Message.
-Recommendation: correct the catalogue (generate it from IBM's reason-code list instead of by hand), use the description in both handlers, log failures at ERROR with the full exception, and let the messages name the key actually missing.
-Benefit: faster diagnosis of MQ problems from the log alone.
-4.3 SwfIOUTMQGCMS - Windows Service host (Tier 2)
-MustChange / Rewrite
-GCMS-FR-16 - Service-state, termination, alert, and tick results are awaited but discarded, and shutdown logs success regardless of them (GEN-9, Major)
-• Category / severity: MustChange/rewrite - Major
-• Evidence: ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L117-L118) (startup), lines 135-150 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L135-L150) (tick), lines 171-180 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L171-L180) (shutdown); OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L104-L119) (finalization) and lines 258-269 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L258-L269) (alert); the shared contracts at ControlServicio.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L50-L64) (MarcarPuertoEnUsoAsync returns false), RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1230) (ActualizaTerminacion returns Exito = false), and IAlertas.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Alertas/IAlertas.cs#L13-L14) (InsertarAlerta returns Task<bool>)
-Code block (csharp)
-await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, ..., ct);            // startup: Boolean ignored
-await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);                   // tick: outcome ignored
-...
-await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt);   // shutdown: ignored
-await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt);                         // ignored
-Config.EscribirLog(ConstantesServicio.MensajeTerminacionExitosa);                                               // "Terminación exitosa" always
-• MarcarPuertoEnUsoAsync returns false, it does not throw, for a cancellation or a non-success result, so a failed startup update leaves the service running with no recorded PID or port, and a failed shutdown update leaves the port marked in use; neither is noticed.
-• ActualizaTerminacion turns every non-cancellation failure into Exito = false; both the host and OperacionServicio ignore it, so a run state that could not be finalized is never reported. RegistrarAlertaAsync ignores the Boolean of InsertarAlerta in the same way.
-• OnTimerAsync discards the value returned by EjecutarProcedimientosAsync, so the service's true/false (success, idle, skipped, or failed) never reaches a log line, an alert, or the run-state row, and a tick that sent nothing looks like a healthy one (GCMS-FR-10).
-• TerminacionAsync logs "Terminación exitosa de bases de datos." after the calls whatever they returned.
-Recommendation: inspect each result, log a failure once at ERROR (and alert once), log the success line only when every call succeeded, decide explicitly whether a failed startup update should stop the service, and log the tick outcome once per non-idle tick; back it with startup and shutdown tests for false and exception results.
-Code block (csharp)
-if (!await _controlServicio.MarcarPuertoEnUsoAsync(pid, proceso, display, servicio, ct))
-    throw new InvalidOperationException("No se pudo registrar el puerto/PID del servicio.");
-Benefit: monitoring and overlap control stop working on stale run state, and a failed lifecycle update is visible.
-Rewrite Recommended
-GCMS-FR-17 - Host hygiene: obsolete shared APIs, an ambiguous log-size unit, a dead registration, project-name drift, and no cancellation filter
-• Category / severity: rewrite_recommended - Minor
-• Evidence: ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L60-L70) (obsolete configuration helper), lines 72-77 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L72-L77) (Logging.Init), line 82 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L82) (registration), lines 146-149 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L146-L149); OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L162-L168); Program.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/Program.cs#L1-L30); AssemblyInfo.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/Properties/AssemblyInfo.cs#L8-L12); SwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/SwfOUTMQGCMS.csproj#L9-L10); SwfOUTMQGCMS.slnx (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfOUTMQGCMS.slnx#L1-L18); the shared definitions at Config.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/Config.cs#L11-L12), ConfiguracionEncriptadaHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConfiguracionEncriptadaHelper.cs#L11-L13), ConstantesGenerales.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConstantesGenerales.cs#L6-L7), Logging.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L32-L41), and EstadoHorarioOperacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/DTOs/Inicializacion/EstadoHorarioOperacion.cs#L6-L13)
-• Obsolete APIs. Fifteen Config.EscribirLog calls (the whole class is [Obsolete]), five ConfiguracionEncriptadaHelper calls in the host (every member is [Obsolete]), and ConstantesGenerales.HoraOPInicio/HoraOPFin in the service (the class is [Obsolete]) compile with CS0618 warnings and will need migration when the shared library retires them.
-• Log-size unit. Logging.Init(rutas, name, servicioMainConfiguracion.TamanoMaximoArchivoLogKB) passes a setting named ...KB to a parameter named maxMb that is multiplied by 1,024; if the configured number is in kilobytes the log limit is 1,024 times larger than intended.
-• Dead registration. Register<EstadoHorarioOperacion>(Lifestyle.Singleton) is never injected; the type is a five-flag data class in the shared library.
-• No cancellation filter. OnTimerAsync logs every exception that reaches it, including OperationCanceledException, as an ERROR, while the base host's own timer wrapper filters cancellation; because the application service's catch-all rarely lets a cancellation through, the difference is latent (GCMS-FR-4).
-• Name drift. The folder and namespace are SwfIOUTMQGCMS, while the project file, assembly, and root namespace are SwfOUTMQGCMS, the solution is SwfOUTMQGCMS.slnx, the test class is SwfOUTMQGCMSTest, the service identity is Swf_OUT_MQ_GCMS, and ConstantesServicio.Servicio ("SWF_OUT_MQ_GCMS") is unused. Program.cs carries seven unused using directives (every System.* import).
-Recommendation: migrate to Logging.Info/Warn/Error and the non-legacy configuration API when the shared library allows, confirm the log-size unit (it is listed for confirmation in Section 2), remove the dead registration and constant, treat cancellation separately, and align the names on one spelling (the origin/develop lineage already renamed the solution and host project to SwfIOUTMQGCMS).
-Benefit: fewer warnings, a correct log limit, and one name for one service.
-4.4 PruebasUnitarias (Tier 2)
-MustChange / Rewrite
-GCMS-FR-18 - All five unit tests fail in [TestInitialize]: Task.CompletedTask is cast to Task<StoredProcedureResult> (GEN-2, Major)
-• Category / severity: MustChange/rewrite - Major
-• Evidence: SwfOUTMQGCMSTest.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L44-L50) (the two failing setups) inside `Setup` (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L28-L82); the return types at IControlServicio.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Parametrizacion/IControlServicio.cs#L19-L25); the experiment described in the scope note
-Code block (csharp)
-_controlServicio
-    .Setup(x => x.ActualizaEJecucion(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-    .Returns((Task<MUFG_T24.Comunes.StoredProcedureResult>)Task.CompletedTask);      // InvalidCastException
-ActualizaEJecucion and ActualizaTerminacion return Task<StoredProcedureResult>. Task.CompletedTask is a plain Task, not a Task<T>, so the cast compiles but throws InvalidCastException when the expression is evaluated, before Moq sees it; the experiment in the scope note reproduced that exception on the machine's .NET Framework runtime. The statement sits in [TestInitialize], so every one of the five tests is expected to fail in initialization (MSTest reports an exception there as a failed test), and none of them reaches its body. By static reading plus that experiment, the suite cannot pass from commit 334dd78 onward (the only commit that touches this setup; the file's earlier revisions did not contain the cast); there is no CI to notice (GCMS-FR-21), and the suite could not be run here because the build tooling and D:\ServiceCMS are absent.
-Recommendation: return a real result from the mock and run the suite in CI as soon as GCMS-FR-20 allows it.
-Code block (csharp)
-.ReturnsAsync(new StoredProcedureResult { Exito = true });
-Benefit: the existing tests execute, and any future regression in the orchestrator is caught.
-GCMS-FR-19 - Once repaired, the tests cover only the orchestrator's return values; two pin misleading behavior, and none touches the delivery, the SQL contract, the alerts, or the host (GEN-2)
-• Category / severity: MustChange/rewrite - Major
-• Evidence: SwfOUTMQGCMSTest.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L84-L203) (the five tests), lines 153-187 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L153-L187) (day-off test) with the wrong overload at lines 168-170 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L168-L170) and the default at lines 52-54 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L52-L54), lines 189-203 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L189-L203) (missing parameter); the production call at OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L132) and the unreachable guard at lines 60-71 (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L60-L71); the two overloads at IControlServicio.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Parametrizacion/IControlServicio.cs#L31-L32)
-• Shape. Five tests, five Assert. calls, and one Verify; every test asserts only the Boolean returned by EjecutarProcedimientosAsync. _alertas is never verified, ActualizaTerminacion in the finally is never verified, and there is no test for an exception, a cancellation, an out-of-window tick, an invalid window, the MQ path, or the repository. RepositorioTomi (530 lines), MQErrorHandler, and ServiceHost have no test at all (GCMS-FR-14 explains why).
-• The day-off test passes for the wrong reason. EsDiaHabil has two separate overloads. The production code calls the parameterless one, but the day-off test configures only EsDiaHabil(CancellationToken.None); the parameterless call keeps the true from Setup, so the day is treated as a business day, the 10:00 mock clock is inside the window, and the test reaches GuardaMensajesOutMQ, which was never set up on the loose mock and is expected to return a completed false (Moq's default for an unconfigured Task<bool>). The assertion IsFalse holds, and the non-business-day branch (and its alert) is never exercised. This is a static reading, because the suite cannot run (GCMS-FR-18).
-• The missing-parameter test pins an unreachable branch. It returns an empty dictionary and expects false; in production the shared loader throws for any missing key, so the real behavior (an exception, a CRITICO alert on every tick) is untested.
-• No contract test. Nothing would have caught that the code calls the wrong procedure family or an undefined procedure (GCMS-FR-1, GCMS-FR-2).
-Recommendation: after GCMS-FR-18, add tests for: an exception and a cancellation (alert, outcome, and ActualizaTerminacion called); the non-business-day, out-of-window, invalid-window, and override paths with the correct EsDiaHabil() overload and _alertas.Verify; the loader-throws case; and, once the transport is behind an interface (GCMS-FR-14), the delivery paths (success, rejected, put failure, connection failure mid-batch, status-update failure after the put) plus the SQL-contract test of GCMS-FR-2.
-Benefit: the failure paths that matter for a payment-message sender are specified and protected against regression.
-4.5 Solution-wide / build
-MustChange / Rewrite
-GCMS-FR-20 - Replace the absolute D:\ServiceCMS references with versioned packages (GEN-1, Blocker)
-• Category / severity: MustChange/rewrite - Blocker
-• Evidence: AplicacionSwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/AplicacionSwfOUTMQGCMS.csproj#L53-L56), InfraestructuraSwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/InfraestructuraSwfOUTMQGCMS.csproj#L53-L59), SwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/SwfOUTMQGCMS.csproj#L62-L64), PruebasUnitarias.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/PruebasUnitarias.csproj#L73-L75)
-Code block (xml)
-<Reference Include="amqmdnet, Version=9.4.0.20, Culture=neutral, PublicKeyToken=dd3cb1c9aae9ec97, processorArchitecture=MSIL">
-  <SpecificVersion>False</SpecificVersion>
-  <HintPath>D:\ServiceCMS\amqmdnet.dll</HintPath>
-</Reference>
-<Reference Include="MUFG_T24">
-  <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-</Reference>
-All four projects reference MUFG_T24.dll by absolute path and the infrastructure project also references the IBM MQ client amqmdnet.dll by absolute path (five references); the application project's entry carries a version and token with SpecificVersion=False, the other three carry neither. No nuget.config or MUFG_T24 package exists anywhere in the review workspace and the D: drive does not exist on the review machine, so a clean build cannot resolve either assembly anywhere that lacks that folder, nothing records which build of either DLL was used, and the tests need the same files. The review checklist classifies direct DLL references as a Blocker (section 11).
-Recommendation: publish MUFG_T24 to the internal NuGet feed as a pinned version, obtain the IBM MQ .NET client through a package (the vendor's NuGet package where the licence permits, or an internal feed), replace the five HintPath entries with package references, and commit a nuget.config that names the feed. This is the portfolio-wide remediation described in GEN-1.
-Benefit: reproducible builds, version traceability for the shared library and the MQ client, and a CI-verifiable dependency set.
-Rewrite Recommended
-GCMS-FR-21 - Repository and release hygiene: the SQL-name fix lives only on origin/develop, there is no CI or README, the platform matrix is inconsistent, and a stray copy exists
-• Category / severity: rewrite_recommended - Minor
-• Evidence: SwfOUTMQGCMS.slnx (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfOUTMQGCMS.slnx#L1-L18); AplicacionSwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/AplicacionSwfOUTMQGCMS.csproj#L16-L51); SwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/SwfOUTMQGCMS.csproj#L16-L57); .github/copilot-instructions.md (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/.github/copilot-instructions.md#L1-L4); git ls-files (28 files, no CI definition and no README); the branch facts in the scope note
-• Two lineages, neither complete. origin/develop (73d3b08) holds the procedure-name correction (GCMS-FR-1) and the renamed solution and host project; CodeReview2 (f344bff) holds the outcome model, the cancellation tokens, and the status-method behavior. The two diverge from 4f8c94e and neither contains the union, so a release from either one re-introduces a known defect. Decide the release line and merge.
-• No pipeline and no README. The reviewed branch has no build definition and no README, so nothing proves a clean restore, build, and test run, and nothing documents the parameters, tables, procedures, queue, and operating procedure (including how an operator recovers an ERROR or SNDNG row, GCMS-FR-8). The develop-lineage README is the unedited GitLab template.
-• Platform matrix. In all four projects Debug|AnyCPU builds as AnyCPU and Release|AnyCPU as x86; LangVersion 7.3 is set only on the x86 configurations; the host sets Prefer32Bit only for x86; and the .slnx maps every project's solution x86 platform to x86. The intended platform is not documented, so a Debug run and a Release run can differ in bitness.
-• Developer note in the tool-instruction file. .github/copilot-instructions.md holds a single one-off reminder about the "H2" TLS change instead of standing guidance; move it to the change log or a README.
-• Stray copy. SWIFT/Outgoing/SWF_OUT_TMP is an untracked, non-Git copy of an older variant of this solution; it can be built or deployed by mistake and should be removed or archived.
-Recommendation: pick the release line and merge the two lineages, add a CI pipeline that restores, builds, and runs the tests (after GCMS-FR-20), write a short README with the operating procedure, document and align the platform targets, and remove the stray copy.
-Benefit: one reviewed line of code, automated build and test evidence, and onboarding documentation.
-5. Architecture-Fit Note
-The workload is a poll-based database-to-queue publisher: a timer-driven Windows Service that, on every tick (the host's fallback is 10 seconds; the configured interval is not visible), reads the SWIFT messages the ETL has prepared in the TOMI work tables and publishes them one by one to an IBM MQ queue over TLS, recording progress in status columns. It is already message-oriented on the delivery side, so the lowest-risk path is to modernize in place after correcting the findings, which fits the sequencing in _ORCHESTRATION.md section 6 (real defects first, then duplication, DI, and tests, then hosting): first restore the routing and the SQL contract (GCMS-FR-1, GCMS-FR-2), because without them nothing correct is sent; then make the delivery state machine, the MQ failure classes, and the alerting truthful (GCMS-FR-8, GCMS-FR-9, GCMS-FR-10, GCMS-FR-11, GCMS-FR-16); then make the build reproducible and the tests real (GCMS-FR-20, GCMS-FR-18, GCMS-FR-19) and extract the MQ transport behind an interface (GCMS-FR-14) so that the twin SwfOUTMQ can share it (GEN-4); and only then evaluate hosting changes. The status columns plus the SNDNG flip already approximate a transactional-outbox shape (a durable work table in SQL drained by a publisher); what is missing is an atomic claim, handling and monitoring of stuck rows, and an explicit delivery guarantee agreed with GCMS (at most once, or at least once with an id GCMS can de-duplicate). An event-driven trigger (a notification when the ETL writes a message) could remove the polling, and a Worker Service could replace the Windows Service host, but both depend on facts this audit does not have: message volume and peak rate, the latency SLA from the ETL to GCMS, GCMS's tolerance for duplicates and its ordering needs, the queue's persistence and depth, hosting constraints (the 32-bit shared library and the D:\ServiceCMS deployment), and budget. A microservices rewrite is not justified by a code-quality review.
-6. JIRA-Ready Backlog
-Use the finding ID as the JIRA key suffix (GCMS-FR-#); priority equals the finding severity.
-ID	Title	Category	Project	File(s)	Priority
-GCMS-FR-1	Point the service at its own ...Gcms procedures and stop sharing the SWF_OUT_MQ pool	MustChange/rewrite	AplicacionSwfOUTMQGCMS / SQL	ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L17-L19)	Blocker
-GCMS-FR-2	Align the status procedure name between the SQL project and the code, and add a contract check	MustChange/rewrite	AplicacionSwfOUTMQGCMS / SQL	ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L18)	Blocker
-GCMS-FR-3	Evaluate the gates before the fetch and alert once per non-business-day transition (GEN-10)	rewrite_recommended	AplicacionSwfOUTMQGCMS	OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L74-L96)	Minor
-GCMS-FR-4	Treat cancellation as its own outcome and finalize with an independent token	rewrite_recommended	AplicacionSwfOUTMQGCMS / InfraestructuraSwfOUTMQGCMS	OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L98-L119)	Minor
-GCMS-FR-5	Remove unreachable branches and duplicated validation; give the status methods a typed result	rewrite_recommended	AplicacionSwfOUTMQGCMS / InfraestructuraSwfOUTMQGCMS	OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L60-L71)	Minor
-GCMS-FR-6	Parse the schedule invariantly, handle overnight windows, share one flag parser, and range-check the port	rewrite_recommended	AplicacionSwfOUTMQGCMS	OperacionServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/OperacionServicio.cs#L188-L207)	Minor
-GCMS-FR-7	Remove dead constants, fix typos, and rename misleading interface members	NiceToRewrite_ifTimePermits	AplicacionSwfOUTMQGCMS	ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/AplicacionSwfOUTMQGCMS/Enums/ConstantesServicio.cs#L47-L64)	Minor
-GCMS-FR-8	Make delivery claim-based and recoverable, fix the cancellation placement, and monitor SNDNG	MustChange/rewrite	InfraestructuraSwfOUTMQGCMS / SQL	RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L253-L299)	Major
-GCMS-FR-9	Classify MQ reason codes and stop an MQ failure from poisoning the rest of the batch	MustChange/rewrite	InfraestructuraSwfOUTMQGCMS	RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L287-L294)	Major
-GCMS-FR-10	Return a batch outcome, alert and e-mail once per cause, and park invalid rows	MustChange/rewrite	InfraestructuraSwfOUTMQGCMS / AplicacionSwfOUTMQGCMS / host	RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L114-L128)	Major
-GCMS-FR-11	Surface read failures instead of treating them as an empty queue (GEN-11)	MustChange/rewrite	InfraestructuraSwfOUTMQGCMS / MUFG_T24	RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L382-L389)	Major
-GCMS-FR-12	Set persistence, correlation, and quiesce options on the MQ message and put	rewrite_recommended	InfraestructuraSwfOUTMQGCMS	RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L306-L313)	Major
-GCMS-FR-13	Pin the MQ server identity, constrain the cipher spec, and correct the key-repository rule	rewrite_recommended	InfraestructuraSwfOUTMQGCMS	RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L195-L211)	Major
-GCMS-FR-14	Split RepositorioTomi into SQL access, MQ transport, notifier, and settings	rewrite_recommended	InfraestructuraSwfOUTMQGCMS	RepositorioTomi.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Repositorio/RepositorioTomi.cs#L44-L149)	Major
-GCMS-FR-15	Correct the MQ reason-code catalogue and the repository message quality	NiceToRewrite_ifTimePermits	InfraestructuraSwfOUTMQGCMS	MQErrorHandler.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/Messaging/MQErrorHandler.cs#L12-L52)	Minor
-GCMS-FR-16	Inspect service-state, termination, alert, and tick results (GEN-9)	MustChange/rewrite	SwfIOUTMQGCMS host / AplicacionSwfOUTMQGCMS	ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L117-L118)	Major
-GCMS-FR-17	Fix host hygiene: obsolete APIs, log-size unit, dead registration, and names	rewrite_recommended	SwfIOUTMQGCMS host	ServiceHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfIOUTMQGCMS/ServiceHost.cs#L60-L77)	Minor
-GCMS-FR-18	Fix the Task.CompletedTask casts so the five tests can run (GEN-2)	MustChange/rewrite	PruebasUnitarias	SwfOUTMQGCMSTest.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L44-L50)	Major
-GCMS-FR-19	Add failure-path, delivery, and SQL-contract tests and correct two misleading tests (GEN-2)	MustChange/rewrite	PruebasUnitarias	SwfOUTMQGCMSTest.cs (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/PruebasUnitarias/SwfOUTMQGCMSTest.cs#L153-L203)	Major
-GCMS-FR-20	Replace the absolute D:\ServiceCMS references with versioned packages (GEN-1)	MustChange/rewrite	All four projects	InfraestructuraSwfOUTMQGCMS.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/InfraestructuraSwfOUTMQGCMS/InfraestructuraSwfOUTMQGCMS.csproj#L53-L59) (+3 project files)	Blocker
-GCMS-FR-21	Reconcile the two lineages, add CI and a README, align the platform matrix, and remove the stray copy	rewrite_recommended	Solution	SwfOUTMQGCMS.slnx (../../SWIFT/Outgoing/SWF_OUT_MQ_GCMS/SwfOUTMQGCMS.slnx#L1-L18)	Minor
+
+
+namespace AplicacionSwfOUTMQGCMS.Enums
+{
+    /// <summary>
+    /// Clase que se utiliza para colocar constantes de manera parametrizada.
+    /// </summary>
+    public class ConstantesServicio
+    {
+        //Constantes de parametrización...
+        public const string ParametrosSistema = "'HORA_OP_INICIO','HORA_OP_FIN','SWF_OUT_GET_MT_BATCH','MQ.SWF_OUT_GCMS.MANAGER_NAME','MQ.SWF_OUT_GCMS.HOST','MQ.SWF_OUT_GCMS.PORT','MQ.SWF_OUT_GCMS.CHANNEL','MQ.SWF_OUT_GCMS.QUEUE_NAME','MAIL_ERROR'";
+        public const string ParametroWsT24MwPassword = "'MQ.SWF_OUT_GCMS.PASSWORD','MQ.SWF_OUT_GCMS.SSL_CIPHERSPEC','MQ.SWF_OUT_GCMS.SSL_KEYREPOSITORY','MQ.SWF_OUT_GCMS.CERTIFICATE_LABEL','MQ.SWF_OUT_GCMS.USER_ID'";
+
+        //Constantes de lógica...
+        public const string TipoOperacion = "SWIFT_OUT";
+        public const string Servicio = "SWF_OUT_MQ_GCMS";
+
+        //Constantes de SQL...
+        public const string UspObtenerOperacionesSwfOutMq = "usp_ObtenerOperacionesSWFOutMq";
+        public const string UspActualizaEstatusEnvioMensajeSwfOutMq = "usp_ActualizaEstatusEnvioMensajeSWFOutMq";
+        public const string UspActualizaEstatusProcesoSwfOutMq = "usp_ActualizaEstatusProcesoSWFOutMq";
+        public const int MaxSpTimeout = 10;
+        public const string EstatusSndng = "SNDNG";
+        public const string EstatusError = "ERROR";
+
+        //Constantes de Emeal...
+        public const string NombreOrigen = "CMS Servicios";
+        public const string Para = "MAIL_TO";
+        public const string Asunto = "Error en MQ SWIFT_OUT";
+        public const string AsuntoTest = "MAIL_SUBJECT";
+        public const string Mensaje = "ERROR durante la inserción del MQ del Swift_OUT_GCMS, error= ";
+        public const string SenderTest = "MAIL_SENDER_TEST";
+
+        //Constantes de configuracion de OUT MQ...
+        public const string ManagerName = "MQ.SWF_OUT_GCMS.MANAGER_NAME";
+        public const string Channel = "MQ.SWF_OUT_GCMS.CHANNEL";
+        public const string QueueName = "MQ.SWF_OUT_GCMS.QUEUE_NAME";
+        public const string Host = "MQ.SWF_OUT_GCMS.HOST";
+        public const string Port = "MQ.SWF_OUT_GCMS.PORT";
+        public const string UserId = "MQ.SWF_OUT_GCMS.USER_ID";
+        public const string Password = "MQ.SWF_OUT_GCMS.PASSWORD";
+        public const string SslCipherSpec = "MQ.SWF_OUT_GCMS.SSL_CIPHERSPEC";
+        public const string SslKeyRepository = "MQ.SWF_OUT_GCMS.SSL_KEYREPOSITORY";
+        public const string CertificateLabel = "MQ.SWF_OUT_GCMS.CERTIFICATE_LABEL";
+        public const string EMailDefault = "MAIL_ERROR";
+        public const string SwfOutGetMtBatch = "SWF_OUT_GET_MT_BATCH";
+
+        //Constantes de mensajes de Error...
+        public const string Application = "Application";
+        public const string MensajeErrorGeneral = "INFO|OnStart|Último fallback: no hacer nada.";
+        public const string MensajeErrorConfiguracion = "INFO|OnStart|Leyendo archivo de configuración.";
+        public const string MensajeTerminacion = "INFO|OnStop|Finalizando Servicio.";
+        public const string MensajeTerminacionExitosa = "INFO|OnStop|Terminación exitosa de bases de datos.";
+        public const string MensajeOperationCanceledException = "ERROR|TerminacionAsync|OperationCanceledException|";
+        public const string MensajeException = "ERROR|TerminacionAsync";
+        public const string MensajeOmitido = "INFO|OnStop|Terminación omitida por inicialización incompleta.";
+
+        public const string MensajeTimer = "ERROR|Realiza_timer|Se presenta exception: ";
+        public const string MensajeParametrizaciones = "ERROR|ParametrizacionesAsync";
+        public const string MensajeError = "ERROR";
+        public const string MensajeOnStart = "OnStart";
+        public const string MensajeElapsed = "ERROR|Elapsed";
+        public const string ErrorHora = "Ocurrio un error al convertir hora";
+        public const string MensajeDiaInhabil = "Hoy es un día inhábil.";
+        public const string MensajeEjecuta = "Ejecuta_Procedimientos";
+        public const string MensajeFueraDeServicio = "El servicio está fuera de horario";
+
+        //Catálogo de mensajes MQ.
+        public const string Codigo2033 = "MQRC_NO_MSG_AVAILABLE: No hay mensajes disponibles en la cola.";
+        public const string Codigo2035 = "MQRC_NOT_AUTHORIZED: El usuario no tiene permisos para esta operación.";
+        public const string Codigo2009 = "MQRC_CONNECTION_BROKEN: La conexión al Queue Manager se perdió.";
+        public const string Codigo2059 = "MQRC_Q_MGR_NOT_AVAILABLE: El Queue Manager no está disponible.";
+        public const string Codigo2085 = "MQRC_UNKNOWN_OBJECT_NAME: El objeto (cola/canal) no existe.";
+        public const string Codigo2063 = "MQRC_SECURITY_ERROR: Error de seguridad en la conexión.";
+        public const string Codigo2381 = "MQRC_KEY_REPOSITORY_ERROR: Problema con el repositorio de claves (SSL/TLS).";
+        public const string Codigo2393 = "MQRC_SSL_INITIALIZATION_ERROR: Error al inicializar SSL.";
+        public const string Codigo2400 = "MQRC_UNSUPPORTED_CIPHER_SUITE: CipherSuite no soportado.";
+        public const string Codigo2538 = "MQRC_HOST_NOT_AVAILABLE: Host remoto no accesible.";
+        public const string Codigo2540 = "MQRC_CHANNEL_NOT_AVAILABLE: Canal no disponible.";
+        public const string CodigoDefault = "Error MQ desconocido. Código:";
+
+        public const string CerticateLabel = "CertificateLabel";
+        public const string MensajeConexionExitosa = "Conexión exitosa a IBM MQ";
+        public const string MensajeConexiónFallida = "Conexión fallida (IsConnected=false)";
+        public const string MensajeConexionMQExitosa = "Conexión a MQ establecida correctamente.";
+        public const string MensajeErrorColaMQ = "Error al cerrar cola MQ";
+        public const string MensajeErrorDescMQ = "Error al deesconectar MQ";
+
+        public const string MensajeHoraInicio = "La hora de inicio es obligatoria";
+        public const string MensajeHoraFin = "La hora de fin es obligatoria";
+        public const string MensajeHoraInicioError = "Error al convertir la hora de inicio:";
+        public const string MensajeHoraFinError = "Error al convertir la hora de fin:";
+        public const string MensajeInfo = "INFO";
+        public const string MensajeOperaciones = "No hay operaciones para procesar.";
+        public const string MensajeWARN = "WARN";
+        public const string MensajeGuardar = "GuardaMensajesOutMQ";
+        public const string MensajeEstabeciendoCnx = "Estableciendo conexión a MQ...";
+
+        public const string MensajeConfiguracionBatch = "El parametro de configuración SWFOUTGETMTBATCH no tiene un valor valido.";
+        public const string MensajeBatch = "No se encontro el parametro de configuración SWFOUTGETMTBATCH.";
+        public const string MensajeErrorEnvioCorreo = "Ocurrio un error en el envio de correo.";
+
+    }
+
+    public class ConstantesParametroSistema
+    {
+        public const string ValorBatchActivo = "1";
+    }
+}
+
+
+using AplicacionSwfOUTMQGCMS.Modelos;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using System.Threading;
+
+namespace AplicacionSwfOUTMQGCMS.Interfaces
+{
+    /// <summary>
+    /// Interfaz para implementar metodos de consulta a la BD InterfacesT24
+    /// </summary>
+    public interface IRepositorioTomi<Tipo>
+    {
+        /// <summary>
+        /// Método para guardar mensajes en MQ.
+        /// </summary>
+        /// <param name="listaOperaciones"></param>
+        /// <returns></returns>
+        Task<bool> GuardaMensajesOutMQ(IEnumerable<OperacionSWF> listaOperaciones, CancellationToken ct);
+        /// <summary>
+        /// Método para recuperar operaciones.
+        /// </summary>
+        /// <returns></returns>
+        Task<IEnumerable<Tipo>> RecuperaOperacionesAsync(CancellationToken ct);
+        /// <summary>
+        /// Método para actualizar estatus de los mensajes
+        /// </summary>
+        /// <param name="estatus"></param>
+        /// <param name="Folio"></param>
+        /// <returns></returns>
+        Task<bool> ActualizaEstatusMensajeOutMQAsync(string Folio, string Estatus, CancellationToken ct);
+        /// <summary>
+        /// Método para actualizar proceso de mensaje.
+        /// </summary>
+        /// <param name="Folio"></param>
+        /// <returns></returns>
+        Task<bool> ActualizaEstatusProcesoSWFOutMqAsync(string Folio, CancellationToken ct);
+    }
+
+}
+
+
+
+﻿namespace AplicacionSwfOUTMQGCMS.Modelos
+{
+    /// <summary>
+    /// Clase para obtener los valores de cada operación.
+    /// </summary>
+    public class OperacionSWF
+    {
+        public string Folio { get; set; }
+        public string Mensaje { get; set; }
+
+    }
+}
+
+
+﻿namespace AplicacionSwfOUTMQGCMS.Modelos
+{
+    /// <summary>
+    /// Clase para manipular la configuración de servidor MQ.
+    /// </summary>
+    public class ConfiguracionMQ
+    {
+        public string MailTo { get; set; } = string.Empty;
+        public string Cert { get; set; } = string.Empty;
+        public string SslPath { get; set; } = string.Empty;
+        public string Ssl { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+        public string User { get; set; } = string.Empty;
+        public int Port { get; set; }
+        public string Host { get; set; } = string.Empty;
+        public string QueueName { get; set; } = string.Empty;
+        public string ChannelName { get; set; } = string.Empty;
+        public string QueueManagerName { get; set; } = string.Empty;        
+    }
+}
+
+
+﻿namespace AplicacionSwfOUTMQGCMS.Enums
+{
+    /// <summary>
+    /// Resultado Operaciones MQ
+    /// </summary>
+    public enum ResultadoOperacionMq
+    {
+        Exitosa,
+        Rechazada,
+        Fallida
+    }
+}
+
+
+using AplicacionSwfOUTMQGCMS.Enums;
+using AplicacionSwfOUTMQGCMS.Interfaces;
+using AplicacionSwfOUTMQGCMS.Modelos;
+using InfraestructuraSwfOUTMQGCMS.Repositorio;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SwfIOUTMQGCMS
+{
+    /// <summary>
+    /// Clase principal del servicio Windows (presentación).
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private Configuracion _configuracionBase;
+
+        protected override string NombreServicioLog => NombreServicio.Swf_OUT_MQ_GCMS.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost() { }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+            _configuracionBase = new Configuracion();
+
+            //Inicializa la obtención de la configuración general y el logging...
+            {
+                ConfiguracionEncriptadaHelper.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.Swf_OUT_MQ_GCMS.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+                _configuracionBase.CorreoParaDefault = ConfiguracionEncriptadaHelper.ObtenerValorGeneral(ConstantesServicio.Para);
+                _configuracionBase.SujetoDefault = ConfiguracionEncriptadaHelper.ObtenerValorGeneral(ConstantesServicio.AsuntoTest);
+                _configuracionBase.CorreoSenderTest = ConfiguracionEncriptadaHelper.ObtenerValorGeneral(ConstantesServicio.SenderTest);
+
+                RutasConfiguracion rutas = new RutasConfiguracion()
+                {
+                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+                };
+                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+                Logging.Write(ConstantesServicio.MensajeErrorConfiguracion);
+            }
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            //Registra los componentes...
+            _containerDI.Register<AplicacionSwfOUTMQGCMS.OperacionServicio>();
+            _containerDI.Register<IRepositorioTomi<OperacionSWF>, RepositorioTomi>();
+            _containerDI.Verify();
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, ct);
+
+                if (!_configuracionBase.Pid.HasValue)
+                {
+                    throw new Exception("PID del proceso no fue configurado.");
+                }
+
+                if (string.IsNullOrWhiteSpace(_configuracionBase.NombreProceso))
+                {
+                    throw new Exception("NombreProceso no fue configurado.");
+                }
+
+                if (string.IsNullOrWhiteSpace(_configuracionBase.NombreDisplay))
+                {
+                    throw new Exception("NombreDisplay no fue configurado.");
+                }
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
+            }
+            catch (OperationCanceledException exc)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeParametrizaciones}|{exc}");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeParametrizaciones}|{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>   
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<AplicacionSwfOUTMQGCMS.OperacionServicio>();
+                    await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeTimer}|{ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog(ConstantesServicio.MensajeTerminacion);
+
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog(ConstantesServicio.MensajeOmitido);
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    Config.EscribirLog(ConstantesServicio.MensajeTerminacionExitosa);
+                }
+            }
+            catch (OperationCanceledException exc)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeOperationCanceledException}|{exc}");
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeException}|{ex}");
+            }
+            finally
+            {
+                _containerDI?.Dispose();
+            }
+        }
+
+    }
+}
+
+
+﻿using MUFG_T24.Comunes;
+using MUFG_T24.ControladorServicios_Utilidades;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.ServiceProcess;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace SwfIOUTMQGCMS
+{
+    internal static class Program
+    {
+        /// <summary>
+        /// The main entry point for the application.
+        /// </summary>
+        static void Main(string[] args)
+        {
+            WindowsServiceProgramRunner.Run(
+                 NombreServicio.Swf_OUT_MQ_GCMS.ToString(),
+                 () => new ServiceHost(),
+                 args
+#if DEBUG
+                 , (service, startupArgs) => ((ServiceHost)service).DebugRun(startupArgs)
+#endif
+                 );
+        }
+    }
+}
+
+
+AplicacionSwfOUTMQGCMS.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{27DD1AB7-038B-44B2-9F06-0364022798B8}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>AplicacionSwfOUTMQGCMS</RootNamespace>
+    <AssemblyName>AplicacionSwfOUTMQGCMS</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, PublicKeyToken=2eed977a6ac043c8, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Enums\ConstantesServicio.cs" />
+    <Compile Include="Enums\ResultadoOperacionMq.cs" />
+    <Compile Include="Interfaces\IOperacionServicio.cs" />
+    <Compile Include="Interfaces\IRepositorioTomi.cs" />
+    <Compile Include="Modelos\ConfiguracionMQ.cs" />
+    <Compile Include="Modelos\OperacionSWF.cs" />
+    <Compile Include="OperacionServicio.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
+
+
+InfraestructuraSwfOUTMQGCMS.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{A5B920A9-F966-4697-9516-E42B5FFB2B88}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>InfraestructuraSwfOUTMQGCMS</RootNamespace>
+    <AssemblyName>InfraestructuraSwfOUTMQGCMS</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="amqmdnet, Version=9.4.0.20, Culture=neutral, PublicKeyToken=dd3cb1c9aae9ec97, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>D:\ServiceCMS\amqmdnet.dll</HintPath>
+    </Reference>
+    <Reference Include="MUFG_T24">
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Configuration" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Messaging\MQErrorHandler.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Repositorio\RepositorioTomi.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\AplicacionSwfOUTMQGCMS\AplicacionSwfOUTMQGCMS.csproj">
+      <Project>{27dd1ab7-038b-44b2-9f06-0364022798b8}</Project>
+      <Name>AplicacionSwfOUTMQGCMS</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
+
+
+SwfOUTMQGCMS.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{6C05C5AE-E675-4138-8DD8-28F5F6287E16}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>SwfOUTMQGCMS</RootNamespace>
+    <AssemblyName>SwfOUTMQGCMS</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup>
+    <StartupObject />
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=1.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Bcl.AsyncInterfaces.1.0.0\lib\net461\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
+    </Reference>
+    <Reference Include="MUFG_T24">
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="SimpleInjector, Version=5.0.0.0, Culture=neutral, PublicKeyToken=984cb50dea722e99, processorArchitecture=MSIL">
+      <HintPath>..\packages\SimpleInjector.5.0.0\lib\net461\SimpleInjector.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Runtime.CompilerServices.Unsafe, Version=4.0.4.1, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Runtime.CompilerServices.Unsafe.4.5.2\lib\netstandard2.0\System.Runtime.CompilerServices.Unsafe.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Threading.Tasks.Extensions.4.5.2\lib\netstandard2.0\System.Threading.Tasks.Extensions.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="ServiceHost.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ServiceHost.Designer.cs">
+      <DependentUpon>ServiceHost.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Program.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="App.config" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\AplicacionSwfOUTMQGCMS\AplicacionSwfOUTMQGCMS.csproj">
+      <Project>{27dd1ab7-038b-44b2-9f06-0364022798b8}</Project>
+      <Name>AplicacionSwfOUTMQGCMS</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\InfraestructuraSwfOUTMQGCMS\InfraestructuraSwfOUTMQGCMS.csproj">
+      <Project>{a5b920a9-f966-4697-9516-e42b5ffb2b88}</Project>
+      <Name>InfraestructuraSwfOUTMQGCMS</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
+
+
+SwfOUTMQGCMS.slnx
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="AplicacionSwfOUTMQGCMS/AplicacionSwfOUTMQGCMS.csproj" Id="27dd1ab7-038b-44b2-9f06-0364022798b8">
+    <Platform Solution="*|x86" Project="x86" />
+  </Project>
+  <Project Path="InfraestructuraSwfOUTMQGCMS/InfraestructuraSwfOUTMQGCMS.csproj" Id="a5b920a9-f966-4697-9516-e42b5ffb2b88">
+    <Platform Solution="*|x86" Project="x86" />
+  </Project>
+  <Project Path="PruebasUnitarias/PruebasUnitarias.csproj" Id="950ba7a5-8b5d-42d6-b353-14c174810b9c">
+    <Platform Solution="*|x86" Project="x86" />
+  </Project>
+  <Project Path="SwfIOUTMQGCMS/SwfOUTMQGCMS.csproj" Id="6c05c5ae-e675-4138-8dd8-28f5f6287e16">
+    <Platform Solution="*|x86" Project="x86" />
+  </Project>
+</Solution>
+
 
