@@ -678,3 +678,95 @@ Private Function BeneficiariosCMS_A_TOMI(ByRef valoresFormato() As Object) As Bo
     Return False
     '---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 End Function
+
+Private Function GeneraAlertasBeneficiarios(ByRef valoresFormato() As Object) As Boolean
+    Dim lrsDatos As DbDataReader
+    Dim laListaPalabrasRestringidas As ArrayList
+    Dim laListaPalabrasPermitidas As ArrayList
+    Dim strSQL As String = String.Empty
+    Dim strAlerta1 As String = String.Empty
+    Dim strAlerta2 As String = String.Empty
+    Dim strAlertaFin As String = String.Empty
+
+    Try
+        strSQL = "SELECT Palabra FROM tb_spid_entidades_restringidas"
+        laListaPalabrasRestringidas = New ArrayList()
+        lrsDatos = goTOMI_Database.Execute_Query(strSQL)
+        If Not IsNothing(lrsDatos) Then
+            Do While lrsDatos.Read
+                laListaPalabrasRestringidas.Add(lrsDatos.Item(0))
+            Loop
+            lrsDatos.Close()
+            lrsDatos = Nothing
+        End If
+
+        strSQL = "SELECT Palabra FROM tb_spid_entidades_permitidas"
+        laListaPalabrasPermitidas = New ArrayList()
+        lrsDatos = goTOMI_Database.Execute_Query(strSQL)
+        If Not IsNothing(lrsDatos) Then
+            Do While lrsDatos.Read
+                laListaPalabrasPermitidas.Add(lrsDatos.Item(0))
+            Loop
+            lrsDatos.Close()
+            lrsDatos = Nothing
+        End If
+
+
+        For Each strPalabra As String In laListaPalabrasRestringidas
+            If texto_BESS(valoresFormato(7)).ToString.ToUpper.Contains(strPalabra) Or strPalabra.Contains(texto_BESS(valoresFormato(7)).ToString.ToUpper) Then
+                write_Log("INFO|GeneraAlertasBeneficiarios|Se encontró coincidencia con: " & texto_BESS(valoresFormato(7)))
+                strAlerta1 += strPalabra & "|"
+            End If
+
+            If texto_BESS(valoresFormato(8)).ToString.ToUpper.Contains(strPalabra) Or strPalabra.Contains(texto_BESS(valoresFormato(8)).ToString.ToUpper) Then
+                write_Log("INFO|GeneraAlertasBeneficiarios|Se encontró coincidencia con: " & texto_BESS(valoresFormato(8)))
+                strAlerta1 += strPalabra & "|"
+            End If
+
+            If texto_BESS(valoresFormato(9)).ToString.ToUpper <> "" Then
+                If texto_BESS(valoresFormato(9)).ToString.ToUpper.Contains(strPalabra) Or strPalabra.Contains(texto_BESS(valoresFormato(9)).ToString.ToUpper) Then
+                    write_Log("INFO|GeneraAlertasBeneficiarios|Se encontró coincidencia con: " & texto_BESS(valoresFormato(9)))
+                    strAlerta1 += strPalabra & "|"
+                End If
+            End If
+
+            If texto_BESS(valoresFormato(10)).ToString.ToUpper <> "" Then
+                If texto_BESS(valoresFormato(10)).ToString.ToUpper.Contains(strPalabra) Or strPalabra.Contains(texto_BESS(valoresFormato(10)).ToString.ToUpper) Then
+                    write_Log("INFO|GeneraAlertasBeneficiarios|Se encontró coincidencia con: " & texto_BESS(valoresFormato(10)))
+                    strAlerta1 += strPalabra & "|"
+                End If
+            End If
+        Next
+
+        For Each strPalabra As String In laListaPalabrasPermitidas
+            If Not texto_BESS(valoresFormato(8)).ToString.ToUpper.Contains(strPalabra) Then
+                strAlerta2 = "Beneficiario no es una empresa, posible persona fisica." & "|"
+            Else
+                write_Log("INFO|GeneraAlertasBeneficiarios|Se encontró coincidencia con " & strPalabra & " por lo que el nombre del beneficiario " & valoresFormato(8) & " sí corresponde a una empresa.")
+                strAlerta2 = ""
+                Exit For
+            End If
+        Next
+
+        If strAlerta2 <> "" Then
+            write_Log(strAlerta2)
+            strAlertaFin += strAlerta2
+        End If
+
+        If strAlerta1 <> "" Then
+            write_Log(strAlerta1)
+            strAlertaFin += "Coincidencia en lista restringida por: |" & strAlerta1
+        End If
+
+        If strAlertaFin <> "" Then
+            strSQL = "INSERT INTO tbl_beneficiarios_alertas (ID_SOLICITUD_DOCUMENTO, ALERTA, FECHA_ALERTA) VALUES(" & valoresFormato(0) & "," & textoSQL(strAlertaFin) & ", GETDATE())"
+            goTOMI_Database.Execute_Command(strSQL)
+        Else
+            strSQL = "INSERT INTO tbl_beneficiarios_alertas (ID_SOLICITUD_DOCUMENTO, ALERTA, FECHA_ALERTA) VALUES(" & valoresFormato(0) & "," & textoSQL("Sin Alerta") & ", GETDATE())"
+            goTOMI_Database.Execute_Command(strSQL)
+        End If
+
+    Catch ex As Exception
+        write_Log("ERROR|GeneraAlertasBeneficiarios|Ocurre exception: strSQL= " & strSQL & "|" & ex.ToString)
+    End Try
+End Function
