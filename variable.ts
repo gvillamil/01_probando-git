@@ -1,64 +1,34 @@
-Private Sub Actualiza_Email()
-    Dim lrsDatos As DbDataReader
-    Dim liResultado As Integer
-    Dim lsUsuario As String, lsNewEmail As String, lsmMgCMS As String, lsSubject As String
-    Dim lsMensaje As String
+Hello Ayano-san / All,
+Below are our GIS west and MFT east findings:
 
-    Try
-        'Iniciamos variables
-        lsUsuario = ""
-        lsNewEmail = ""
-        lsmMgCMS = ""
-        lsSubject = ""
 
-        ' Buscamos los usuarios con email pendidnte de actualizar
-        lrsDatos = goCMS_Database.Execute_Query("select usuario, new_mail, mensaje, asunto from solicitudes_usuario_mails where estatus = 'CAPTURADO'")
+Below is the manual only Get BP launch results, which found your 12 source files (with global * wildcard) and  picked-up from your /RECV folder. Only 4 were successful end-to-end and 8 failed to complete with logged error message, which indicated as  “Invalid Data Length” !
 
-        If Not IsNothing(lrsDatos) Then
-            Dim dT As New DataTable
-            dT.Load(lrsDatos)
-            lrsDatos.Close()
-            lrsDatos = Nothing
+Image_1
 
-            For Each row As DataRow In dT.Rows
-                lsUsuario = row.Item(0)
-                lsNewEmail = row.Item(1)
-                lsmMgCMS = row.Item(2)
-                lsSubject = row.Item(3)
+I updated the partner consumer mailbox setting with RecordFormat=Undefined (as most likely had varying data length records) and then replayed the 8 failed files which then also picked-up and routed downstream completely. 
 
-                write_Log("INFO|Actualiza_Email|Procesando Email de usuario: " & lsUsuario)
+Image 2
 
-                'Actualizamos el Email
-                If lsUsuario <> "" Then
-                    liResultado = goTOMI_Database.Execute_Command("UPDATE tb_hd_usuarios_cms set SATM04EMA = '" & lsNewEmail & "' where SATM04LOG  = '" & lsUsuario & "'")
-                    liResultado = goTOMI_Database.Execute_Command("UPDATE Tomser.dbo.satm004usuarios_cms set SATM04EMA = '" & lsNewEmail & "' where SATM04LOG  = '" & lsUsuario & "'")
-                End If
-                'Se manda el email de notificacion
-                ' Mensaje HTML
-                lsMensaje = "<html>" & vbNewLine & _
-                            "<head>" & vbNewLine & _
-                            "<style type='text/css'>" & vbNewLine & _
-                            ".titulo_general { font-family: sans-serif; font-size:16px; color: #FF1010; font-weight:bold; text-decoration:underline; }" & vbNewLine & _
-                            ".titulo_tabla   { font-family: sans-serif; font-size:14px; color: #0000FF; font-weight:bold; text-decoration:none; }" & vbNewLine & _
-                            ".header_tabla   { font-family: sans-serif; font-size:12px; background-color:#F1F1F1; color: #2010FF; text-decoration:none; }" & vbNewLine & _
-                            ".dato_tabla     { font-family: sans-serif; font-size:12px; color: #2050FF; text-decoration:none; }" & vbNewLine & _
-                            ".Nota           { font-family: sans-serif; font-size:12px; color: #A0A0A0; text-decoration:none; }" & vbNewLine & _
-                            ".NotaOmitir     { font-family: sans-serif; font-size:14px; color: #FF0000; text-decoration:none; }" & vbNewLine & _
-                            "table           { border: thin solid #E0E0E0 }" & vbNewLine & _
-                            "</style>" & vbNewLine & _
-                            "</head>" & vbNewLine & _
-                            "<body>" & lsmMgCMS &
-                            "</body>" & vbNewLine & _
-                            "</html>"
+These below 28 were subsequently and mysteriously re-delivered after I had gone offline, not by automation, as the every 30-min batch launch schedule was not yet built nor enabled.  My guess is that GISUAT was refreshed and recycled and selective files had been re-processed momentarily, as it wasn’t an infinite loop and just briefly repetitive.
+NOTE: Of the 12 files, only 7 selectively repeated 4 times each !
 
-                ' Destinatarios
-                Envia_Email(New String() {"avisos_cms@mx.mufg.jp", "Avisos MUFG Bank México"}, lsNewEmail, Nothing, Nothing, lsSubject, lsMensaje)
+Imgae 3
 
-                'Actualizamos la tabla control como PROCESADO
-                liResultado = goCMS_Database.Execute_Command("UPDATE solicitudes_usuario_mails SET estatus = 'PROCESADO' WHERE usuario = '" & lsUsuario & "'")
-            Next
-        End If
-    Catch lexActualizaEmail As Exception
-        write_Log("ERROR|Actualiza_Email|Se presenta exception: " & lexActualizaEmail.ToString)
-    End Try
-End Sub
+Next day, after I noticed above brief test host partial repeat anomaly, I informed my GIS co-worker to also investigate, double-check and make sure wouldn’t re-occur again.  Just 1 file was re-played and issue didn’t repeat and not re-produced again since.
+
+Image 4
+
+I then completed the downstream portion on MFT east, to push the files to their Mexico_GPH new mailbox and channel. Plus, applied their Mexico Authorized User key, for them to perform their own SFTP Get…, which they successfully performed and picked-up the same 41 total files, as well.
+
+Image 5
+
+As Mexico stated, they then processed above files and generated below 40 Acknowledgement returned files, back to MFT east, whom auto-forwarded the same to GIS west.  Once Oracle DB Admin completes GISUAT DB currently happening maintenance, I will provide the remaining evidence that GISUAT also attempted SFTP Put… of the same 40 files, back to GPH test host, which should show in their logs, as well.
+
+An unusual happening that I noticed, is that GIS only sent GPH, 12 ack files back successfully and 28 failed, which map to the error duplicate ones.  My guess is that GPH /SEND folder is not allowed to overwrite duplicate file names; therefore, they failed.  Maybe it’s by their design, to reject them or maybe it’s a missing permission !
+
+Once GISUAT Oracle DB maintenance applied and rebooted, I will gather tomorrow or later today and show that final screenshot, as well !
+
+Image 6
+
+Regards,
