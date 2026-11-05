@@ -1,14 +1,14 @@
-Private Sub Actualiza_Clientes()
+Private Sub Actualiza_Cuentas()
     Dim lrsDatos As DbDataReader
     Dim laListaFolios As ArrayList
     Dim lsFolio As String
     Dim liResultado As Integer
-    Dim lsRFC As String, lsNombre As String, lsTipo As String, lsNumCteT24 As String
+    Dim liCliente As Integer, lsTipoMoneda As String, lsNombreCuenta As String, liCliente_Alt As Integer, lbNomina As Boolean
 
     Try
         ' Buscamos las solicitudes
         laListaFolios = New ArrayList()
-        lrsDatos = goTOMI_Database.Execute_Query("SELECT satm02cod FROM tomser.dbo.satm002clientes WHERE satm02int='SI' AND satm02rep=1 ORDER BY satm02cod")
+        lrsDatos = goTOMI_Database.Execute_Query("SELECT DISTINCT satm03cta FROM tomser.dbo.satm003cuentas WHERE satm03rep=1")
         If Not IsNothing(lrsDatos) Then
             Do While lrsDatos.Read
                 laListaFolios.Add(lrsDatos.Item(0))
@@ -19,35 +19,37 @@ Private Sub Actualiza_Clientes()
 
         ' Analizamos las solicitudes
         For Each lsFolio In laListaFolios
-            write_Log("INFO|Actualiza_Clientes|Procesando Cliente: " & lsFolio)
+            write_Log("INFO|Actualiza_Cuentas|Procesando Cuenta: " & lsFolio)
 
             ' Inicio de variables
-            lsRFC = ""
-            lsNombre = ""
-            lsTipo = ""
-            lsNumCteT24 = ""
+            liCliente = 0
+            lsTipoMoneda = ""
+            lsNombreCuenta = ""
+            liCliente_Alt = 0
+            lbNomina = False
 
-            liResultado = goCMS_Database.Execute_Command("DELETE FROM cliente WHERE id_cliente=" & lsFolio)
-            lrsDatos = goTOMI_Database.Execute_Query("SELECT satm02rfc,satm02nom,satm02tip,satm02cdl FROM tomser.dbo.satm002clientes WHERE satm02cod=" & lsFolio)
+            liResultado = goCMS_Database.Execute_Command("DELETE FROM cuenta WHERE id_cuenta=" & lsFolio)
+            lrsDatos = goTOMI_Database.Execute_Query("SELECT satm02cod,satm03abr,satm03nom,satm03id,ISNULL(nomina,0) AS nomina FROM tomser.dbo.satm003cuentas WHERE satm03cta=" & lsFolio)
             If Not IsNothing(lrsDatos) Then
                 Do While lrsDatos.Read
-                    lsRFC = lrsDatos.Item(0)
-                    lsNombre = lrsDatos.Item(1)
-                    lsTipo = lrsDatos.Item(2)
-                    lsNumCteT24 = lrsDatos.Item(3)
+                    liCliente = lrsDatos.Item(0)
+                    lsTipoMoneda = lrsDatos.Item(1)
+                    lsNombreCuenta = lrsDatos.Item(2)
+                    liCliente_Alt = lrsDatos.Item(3)
+                    lbNomina = lrsDatos.Item(4)
                 Loop
                 lrsDatos.Close()
                 lrsDatos = Nothing
             End If
-            liResultado = goCMS_Database.Execute_Command("INSERT INTO cliente (id_cliente,rfc,razonsocial,tipocliente,id_cte_T24) VALUES (" & lsFolio & ",'" & lsRFC & "','" & lsNombre & "','" & lsTipo & "'," & lsNumCteT24 & ")")
-            liResultado = goTOMI_Database.Execute_Command("UPDATE tomser.dbo.satm002clientes SET satm02rep=0 WHERE satm02cod=" & lsFolio)
-            liResultado = goTOMI_Database.Execute_Command("UPDATE tb_hd_clientes SET satm02rep=0 WHERE satm02cod=" & lsFolio)
+            liResultado = goCMS_Database.Execute_Command("INSERT INTO cuenta (id_cuenta,id_cliente,tipomoneda,nombredelacuenta,id_cuenta_alt,nomina) VALUES (" & lsFolio & "," & liCliente & ",'" & lsTipoMoneda & "','" & lsNombreCuenta & "'," & liCliente_Alt & "," & IIf(lbNomina, 1, 0) & ")")
+            liResultado = goTOMI_Database.Execute_Command("UPDATE tomser.dbo.satm003cuentas SET satm03rep=0 WHERE satm03cta=" & lsFolio)
+            liResultado = goTOMI_Database.Execute_Command("UPDATE tb_hd_cuentas SET satm03rep=0 WHERE satm03cta=" & lsFolio)
 
             ' Log
-            write_Log("INFO|Actualiza_Clientes|Se termina procesamiento Cliente: " & lsFolio)
+            write_Log("INFO|Actualiza_Cuentas|Se termina procesamiento Cuenta: " & lsFolio)
         Next
         laListaFolios.Clear()
-    Catch lexActualizaClientes As Exception
-        write_Log("ERROR|Actualiza_Clientes|Se presenta exception: " & lexActualizaClientes.ToString)
+    Catch lexActualizaCuentas As Exception
+        write_Log("ERROR|Actualiza_Cuentas|Se presenta exception: " & lexActualizaCuentas.ToString)
     End Try
 End Sub
