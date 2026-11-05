@@ -1,55 +1,64 @@
-Private Sub Actualiza_Cuentas()
+Private Sub Actualiza_Email()
     Dim lrsDatos As DbDataReader
-    Dim laListaFolios As ArrayList
-    Dim lsFolio As String
     Dim liResultado As Integer
-    Dim liCliente As Integer, lsTipoMoneda As String, lsNombreCuenta As String, liCliente_Alt As Integer, lbNomina As Boolean
+    Dim lsUsuario As String, lsNewEmail As String, lsmMgCMS As String, lsSubject As String
+    Dim lsMensaje As String
 
     Try
-        ' Buscamos las solicitudes
-        laListaFolios = New ArrayList()
-        lrsDatos = goTOMI_Database.Execute_Query("SELECT DISTINCT satm03cta FROM tomser.dbo.satm003cuentas WHERE satm03rep=1")
+        'Iniciamos variables
+        lsUsuario = ""
+        lsNewEmail = ""
+        lsmMgCMS = ""
+        lsSubject = ""
+
+        ' Buscamos los usuarios con email pendidnte de actualizar
+        lrsDatos = goCMS_Database.Execute_Query("select usuario, new_mail, mensaje, asunto from solicitudes_usuario_mails where estatus = 'CAPTURADO'")
+
         If Not IsNothing(lrsDatos) Then
-            Do While lrsDatos.Read
-                laListaFolios.Add(lrsDatos.Item(0))
-            Loop
+            Dim dT As New DataTable
+            dT.Load(lrsDatos)
             lrsDatos.Close()
             lrsDatos = Nothing
+
+            For Each row As DataRow In dT.Rows
+                lsUsuario = row.Item(0)
+                lsNewEmail = row.Item(1)
+                lsmMgCMS = row.Item(2)
+                lsSubject = row.Item(3)
+
+                write_Log("INFO|Actualiza_Email|Procesando Email de usuario: " & lsUsuario)
+
+                'Actualizamos el Email
+                If lsUsuario <> "" Then
+                    liResultado = goTOMI_Database.Execute_Command("UPDATE tb_hd_usuarios_cms set SATM04EMA = '" & lsNewEmail & "' where SATM04LOG  = '" & lsUsuario & "'")
+                    liResultado = goTOMI_Database.Execute_Command("UPDATE Tomser.dbo.satm004usuarios_cms set SATM04EMA = '" & lsNewEmail & "' where SATM04LOG  = '" & lsUsuario & "'")
+                End If
+                'Se manda el email de notificacion
+                ' Mensaje HTML
+                lsMensaje = "<html>" & vbNewLine & _
+                            "<head>" & vbNewLine & _
+                            "<style type='text/css'>" & vbNewLine & _
+                            ".titulo_general { font-family: sans-serif; font-size:16px; color: #FF1010; font-weight:bold; text-decoration:underline; }" & vbNewLine & _
+                            ".titulo_tabla   { font-family: sans-serif; font-size:14px; color: #0000FF; font-weight:bold; text-decoration:none; }" & vbNewLine & _
+                            ".header_tabla   { font-family: sans-serif; font-size:12px; background-color:#F1F1F1; color: #2010FF; text-decoration:none; }" & vbNewLine & _
+                            ".dato_tabla     { font-family: sans-serif; font-size:12px; color: #2050FF; text-decoration:none; }" & vbNewLine & _
+                            ".Nota           { font-family: sans-serif; font-size:12px; color: #A0A0A0; text-decoration:none; }" & vbNewLine & _
+                            ".NotaOmitir     { font-family: sans-serif; font-size:14px; color: #FF0000; text-decoration:none; }" & vbNewLine & _
+                            "table           { border: thin solid #E0E0E0 }" & vbNewLine & _
+                            "</style>" & vbNewLine & _
+                            "</head>" & vbNewLine & _
+                            "<body>" & lsmMgCMS &
+                            "</body>" & vbNewLine & _
+                            "</html>"
+
+                ' Destinatarios
+                Envia_Email(New String() {"avisos_cms@mx.mufg.jp", "Avisos MUFG Bank México"}, lsNewEmail, Nothing, Nothing, lsSubject, lsMensaje)
+
+                'Actualizamos la tabla control como PROCESADO
+                liResultado = goCMS_Database.Execute_Command("UPDATE solicitudes_usuario_mails SET estatus = 'PROCESADO' WHERE usuario = '" & lsUsuario & "'")
+            Next
         End If
-
-        ' Analizamos las solicitudes
-        For Each lsFolio In laListaFolios
-            write_Log("INFO|Actualiza_Cuentas|Procesando Cuenta: " & lsFolio)
-
-            ' Inicio de variables
-            liCliente = 0
-            lsTipoMoneda = ""
-            lsNombreCuenta = ""
-            liCliente_Alt = 0
-            lbNomina = False
-
-            liResultado = goCMS_Database.Execute_Command("DELETE FROM cuenta WHERE id_cuenta=" & lsFolio)
-            lrsDatos = goTOMI_Database.Execute_Query("SELECT satm02cod,satm03abr,satm03nom,satm03id,ISNULL(nomina,0) AS nomina FROM tomser.dbo.satm003cuentas WHERE satm03cta=" & lsFolio)
-            If Not IsNothing(lrsDatos) Then
-                Do While lrsDatos.Read
-                    liCliente = lrsDatos.Item(0)
-                    lsTipoMoneda = lrsDatos.Item(1)
-                    lsNombreCuenta = lrsDatos.Item(2)
-                    liCliente_Alt = lrsDatos.Item(3)
-                    lbNomina = lrsDatos.Item(4)
-                Loop
-                lrsDatos.Close()
-                lrsDatos = Nothing
-            End If
-            liResultado = goCMS_Database.Execute_Command("INSERT INTO cuenta (id_cuenta,id_cliente,tipomoneda,nombredelacuenta,id_cuenta_alt,nomina) VALUES (" & lsFolio & "," & liCliente & ",'" & lsTipoMoneda & "','" & lsNombreCuenta & "'," & liCliente_Alt & "," & IIf(lbNomina, 1, 0) & ")")
-            liResultado = goTOMI_Database.Execute_Command("UPDATE tomser.dbo.satm003cuentas SET satm03rep=0 WHERE satm03cta=" & lsFolio)
-            liResultado = goTOMI_Database.Execute_Command("UPDATE tb_hd_cuentas SET satm03rep=0 WHERE satm03cta=" & lsFolio)
-
-            ' Log
-            write_Log("INFO|Actualiza_Cuentas|Se termina procesamiento Cuenta: " & lsFolio)
-        Next
-        laListaFolios.Clear()
-    Catch lexActualizaCuentas As Exception
-        write_Log("ERROR|Actualiza_Cuentas|Se presenta exception: " & lexActualizaCuentas.ToString)
+    Catch lexActualizaEmail As Exception
+        write_Log("ERROR|Actualiza_Email|Se presenta exception: " & lexActualizaEmail.ToString)
     End Try
 End Sub
