@@ -1,2 +1,4 @@
 <ProjectGuid>{33593B4E-D8AB-4AA5-B4A6-A0CC9CBF0EF0}</ProjectGuid>
-   
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+ 
