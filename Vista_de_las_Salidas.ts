@@ -1,3 +1,245 @@
+MUFG_T24.csproj
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{33593B4E-D8AB-4AA5-B4A6-A0CC9CBF0EF0}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>MUFG_T24</RootNamespace>
+    
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup>
+    <SignAssembly>true</SignAssembly>
+  </PropertyGroup>
+  <PropertyGroup>
+    <AssemblyOriginatorKeyFile>MUFG_T24.dll.pfx</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Configuration" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Management" />
+    <Reference Include="System.Numerics" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.ServiceModel" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+    <PackageReference Include="MySql.Data" Version="8.0.33" />
+    <PackageReference Include="Oracle.ManagedDataAccess" Version="23.26.300" />
+    <PackageReference Include="System.Buffers" Version="4.6.1" />
+    <PackageReference Include="System.Collections.Immutable" Version="10.0.3" />
+    <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="6.0.2" />
+    <PackageReference Include="System.Formats.Asn1" Version="8.0.1" />
+    <PackageReference Include="System.Memory" Version="4.6.3" />
+    <PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.1.2" />
+    <PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.0" />
+    <PackageReference Include="System.ValueTuple" Version="4.5.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Aplicacion\ControlIO\SistemaArchivos.cs" />
+    <Compile Include="Aplicacion\Conversiones\ConversionConfiguracion.cs" />
+    <Compile Include="Aplicacion\Conversiones\ConversionesComunes.cs" />
+    <Compile Include="Aplicacion\SAT\ControlSAT.cs" />
+    <Compile Include="Core\Constantes\ConstantesCaracteres.cs" />
+    <Compile Include="Core\Constantes\ConstantesClaveAviso.cs" />
+    <Compile Include="Core\Constantes\ConstantesArchivoSAT.cs" />
+    <Compile Include="Core\Constantes\ConstantesMonedas.cs" />
+    <Compile Include="Core\Constantes\ConstantesSwiftTipoHeader.cs" />
+    <Compile Include="Core\Constantes\ConstantesSwiftEtiqueta.cs" />
+    <Compile Include="Core\Constantes\ConstantesEstatusPlan.cs" />
+    <Compile Include="Core\Constantes\ConstantesParametrosSistema.cs" />
+    <Compile Include="Core\Constantes\ConstantesProcedimientosMUFG.cs" />
+    <Compile Include="Core\Constantes\ConstantesSistema.cs" />
+    <Compile Include="Core\Constantes\ConstantesTablasTombin.cs" />
+    <Compile Include="Core\Constantes\ConstantesServicios.cs" />
+    <Compile Include="Core\Constantes\ConstantesTiposMensajeMT.cs" />
+    <Compile Include="Core\Constantes\EstatusSwiftT24.cs" />
+    <Compile Include="Core\Constantes\EsquemaColumnas.cs" />
+    <Compile Include="Core\Constantes\TipoOperacion.cs" />
+    <Compile Include="Core\Constantes\EnumTablas.cs" />
+    <Compile Include="Core\Constantes\EnumParametrosGenerales.cs" />
+    <Compile Include="Core\Constantes\EnumNombreSp.cs" />
+    <Compile Include="Core\Constantes\NombreServicio.cs" />
+    <Compile Include="Core\Constantes\BasedatosProveedor.cs" />
+    <Compile Include="Core\Constantes\NombreBasedatos.cs" />
+    <Compile Include="Core\Constantes\TipoSerializacion.cs" />
+    <Compile Include="Core\Constantes\EncodingEnum.cs" />
+    <Compile Include="Core\Constantes\Estatus.cs" />
+    <Compile Include="Core\Constantes\Moneda.cs" />
+    <Compile Include="Core\Constantes\EstatusOperacionesIntercambioT24.cs" />
+    <Compile Include="Core\Constantes\DatosGenerales.cs" />
+    <Compile Include="Core\Estructura\WindowsTcpStringServiceHostBase.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Core\Interfaces\ControlIO\ISistemaArchivos.cs" />
+    <Compile Include="Core\Modelos\Logging\LoggerOptions.cs" />
+    <Compile Include="Infraestructura\Html\HtmlHelper.cs" />
+    <Compile Include="Infraestructura\Logging\Logger.cs" />
+    <Compile Include="Infraestructura\Repositorios\T24\T24MwEnd2End.cs" />
+    <Compile Include="Infraestructura\Repositorios\T24\T24MwForex.cs" />
+    <Compile Include="Infraestructura\Repositorios\T24\T24MwOfsTrx.cs" />
+    <Compile Include="Infraestructura\Repositorios\T24\T24MwSpid.cs" />
+    <Compile Include="Infraestructura\Repositorios\T24\T24MwSwift.cs" />
+    <Compile Include="Infraestructura\Repositorios\T24\T24MwVistas.cs" />
+    <Compile Include="Infraestructura\Repositorios\T24\T24MwOperaciones.cs" />
+    <Compile Include="Infraestructura\Alertas\Alertas.cs" />
+    <Compile Include="Infraestructura\XML\XmlHelper.cs" />
+    <Compile Include="Legacy\BasedatosProveedor.cs" />
+    <Compile Include="Legacy\CompatibilidadNamespaces.cs" />
+    <Compile Include="Legacy\Comunes.cs" />
+    <Compile Include="Legacy\Config.cs" />
+    <Compile Include="Legacy\BaseDatosHelper.cs" />
+    <Compile Include="Legacy\ConversionHelper.cs" />
+    <Compile Include="Infraestructura\Correo\CorreoHelper.cs" />
+    <Compile Include="Legacy\CryptoHelper.cs" />
+    <Compile Include="Core\Modelos\Configuracion\RutasConfiguracion.cs" />
+    <Compile Include="Core\Modelos\DBs\StoredProcedureResult.cs" />
+    <Compile Include="Core\Modelos\DBs\ResultadoOperacionServicio.cs" />
+    <Compile Include="Core\Modelos\DBs\OperacionNoExitosaException.cs" />
+    <Compile Include="Core\Modelos\WS\WsMapearRegistro.cs" />
+    <Compile Include="Infraestructura\Repositorios\DBs\ConexionBasedatosFactory.cs" />
+    <Compile Include="Infraestructura\Repositorios\DBs\ConexionMySql.cs" />
+    <Compile Include="Infraestructura\Repositorios\DBs\ConexionOracle.cs" />
+    <Compile Include="Infraestructura\Repositorios\DBs\ConexionSqlServer.cs" />
+    <Compile Include="Infraestructura\Repositorios\DBs\WsDatabase.cs" />
+    <Compile Include="Aplicacion\Control\ControlServicio.cs" />
+    <Compile Include="Aplicacion\Control\Parametrizacion.cs" />
+    <Compile Include="Legacy\ConexionT24Mw.cs" />
+    <Compile Include="Infraestructura\Repositorios\DBs\RepositorioMaestro.cs" />
+    <Compile Include="Legacy\LecturaConfguracionGeneral.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Legacy\ConfiguracionEncriptadaHelper.cs" />
+    <Compile Include="Core\Modelos\Configuracion\Configuracion.cs" />
+    <Compile Include="Core\Interfaces\Conexion\IBasedatosConexion.cs" />
+    <Compile Include="Aplicacion\ControladorServicios\ControladorServicios.cs" />
+    <Compile Include="Core\Estructura\WindowsServiceHostBase.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Core\Estructura\WindowsTcpServiceHostBase.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Core\Estructura\WindowsTcpPaqueteServiceHostBase.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Core\Estructura\WindowsServiceDespachador.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Core\Estructura\WindowsServiceProgramRunner.cs" />
+    <Compile Include="Core\Interfaces\OrquestacionServicios\IControladorServicios.cs" />
+    <Compile Include="Core\Configuracion\ObtencionConfguracionGeneral.cs" />
+    <Compile Include="Infraestructura\Seguridad\Encriptacion.cs" />
+    <Compile Include="Legacy\ConstantesGenerales.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\ColMonedaDto.cs" />
+    <Compile Include="Core\DTOs\Inicializacion\DiasNoHabilesDto.cs" />
+    <Compile Include="Core\DTOs\Inicializacion\FechaSistemaDto.cs" />
+    <Compile Include="Core\DTOs\Parametrizacion\ParametroDTO.cs" />
+    <Compile Include="Core\DTOs\T24\T24MwVersionConfigDto.cs" />
+    <Compile Include="Core\DTOs\T24\T24MwVersionDefaultDto.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\ResultadoVacioDto.cs" />
+    <Compile Include="Core\DTOs\Inicializacion\EstadoHorarioOperacion.cs" />
+    <Compile Include="Core\DTOs\Inicializacion\ObtenerPuertosDto.cs" />
+    <Compile Include="Core\Interfaces\Alertas\IAlertas.cs" />
+    <Compile Include="Core\Interfaces\Logging\ILogger.cs" />
+    <Compile Include="Core\Interfaces\Parametrizacion\IControlServicio.cs" />
+    <Compile Include="Core\Interfaces\Seguridad\IEncriptacion.cs" />
+    <Compile Include="Core\Interfaces\Parametrizacion\IOperacionServicio.cs" />
+    <Compile Include="Core\Interfaces\Parametrizacion\IParametrizacion.cs" />
+    <Compile Include="Infraestructura\Logging\FileLogger.cs" />
+    <Compile Include="Infraestructura\Logging\Logging.cs" />
+    <Compile Include="Core\DTOs\Notificacion\AlertaDTO.cs" />
+    <Compile Include="Core\Serializacion\Calypso\CalypsoMwRespuesta.cs" />
+    <Compile Include="Core\Serializacion\Calypso\CalypsoMwSolicitud.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\CampoGeneral.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\CuentaClienteT24.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\EsClienteSpidValidoResultado.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\IntercambioEntidad.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\LegalEntity.cs" />
+    <Compile Include="Core\DTOs\Notificacion\MensajeCorreo.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\MensajesSwfT24Entidad.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\MwT24TrxDetalle.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\MwT24TrxMaestro.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\OperacionesEntidad.cs" />
+    <Compile Include="Core\DTOs\Parametrizacion\ProcesoDTO.cs" />
+    <Compile Include="Core\DTOs\Parametrizacion\PuertoServicioDTO.cs" />
+    <Compile Include="Core\Modelos\Configuracion\ServicioConfiguracionSettings.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\SolicitudesForexEntidad.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\SpidValidacionEntidad.cs" />
+    <Compile Include="Core\DTOs\ContratoTCP\ContratoTCP.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\ValidacionForexResultado.cs" />
+    <Compile Include="Core\DTOs\Aplicacion\MW_Tipo_operacion.cs" />
+    <Compile Include="Aplicacion\CEP\Sellado.cs" />
+    <Compile Include="Aplicacion\SSR2026\SwiftStandardReleaseSanitize.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="App.config" />
+    <None Include="MUFG_T24.dll.pfx" />
+    <None Include="Oracle.DataAccess.Common.Configuration.Section.xsd">
+      <SubType>Designer</SubType>
+    </None>
+    <None Include="Oracle.ManagedDataAccess.Client.Configuration.Section.xsd">
+      <SubType>Designer</SubType>
+    </None>
+  </ItemGroup>
+  <ItemGroup />
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
+
+  
 AssemblyInfo.cs
 using System.Reflection;
 using System.Runtime.CompilerServices;
