@@ -1,596 +1,4085 @@
-ActualizaEstatus Recommendations
-ActualizaEstatus - Architecture & Code Quality Recommendations
-Solution: ActualizaEstatus.sln (../../General/ActualizaEstatus/ActualizaEstatus.sln)
-Compared against: LoansApp Architecture Patterns and Coding Practices (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR Review / Severity Checklist (../BaseLine_Docs/code_review.md).
-See also: _ORCHESTRATION.md (./_ORCHESTRATION.md) for the portfolio methodology, template, and standing findings, and the review tracker _ActualizaEstatus_FreshReview_Progress.md (./_ActualizaEstatus_FreshReview_Progress.md) (every candidate, correction, and scan behind this report).
-1. Solution Overview (low/no-dependency -> high dependency)
-Tier	Project	Kind	Path
-External	MUFG_T24 (shared library)	.NET Framework 4.8 class library built from another repository; referenced as a loose DLL (D:\ServiceCMS\MUFG_T24.dll), not as a project	MUFG_T24.csproj (../../General/MUFGT24_BTMUM_64/MUFG_T24/MUFG_T24.csproj)
-External	DBMDW (database project)	SQL project that defines the stored procedures this service calls (folders Bot = CMS, IT24 = TOMI, SPEI); the source of truth named by GEN-13	General/ActualizaEstatus (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus)
-0	Aplicacion	.NET Framework 4.8 class library (assembly AplicacionActualizaEstatus, x86): orchestration, 37 operation classes, one shared service class, DTOs, interfaces, and the generated T24 reversal proxy	AplicacionActualizaEstatus.csproj (../../General/ActualizaEstatus/Aplicacion/AplicacionActualizaEstatus.csproj)
-1	Infraestructura	.NET Framework 4.8 class library (x86): six repositories over the shared RepositorioMaestro, and the three SQL scripts	InfraestructuraActualizaEstatus.csproj (../../General/ActualizaEstatus/Infraestructura/InfraestructuraActualizaEstatus.csproj)
-2	ActualizaEstatus	.NET Framework 4.8 Windows Service host (Exe): SimpleInjector composition and the TCP package entry point	ActualizaEstatus.csproj (../../General/ActualizaEstatus/ActualizaEstatus/ActualizaEstatus.csproj)
-2	PruebasUnitarias	MSTest project (x86), MSTest 2.2.10 only, no mocking library	PruebasUnitarias.csproj (../../General/ActualizaEstatus/PruebasUnitarias/PruebasUnitarias.csproj)
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Servicios;
+using Infraestructura.Repositorio;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Aplicacion.SSR2026;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 
-What this solution actually does: ActualizaEstatus is the status-reconciliation worker of the CMS payment platform. It is not timer-driven: it is a request-driven TCP "package" server (ServiceHost.cs:27 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L27)) that receives a package made of one operation type and a list of folios, and for each folio runs a multi-phase state machine (OperacionServicio.cs:45-257 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L45-L257)). A phase is selected by the "last process alias" stored in the TOMI database (DameUltimoProceso); the operation class then (1) reads the TOMI record of the operation, (2) asks the downstream rail (SPEI, SPID, BBVA, SWIFT, TEF) for its final status through stored procedures, (3) writes the result back to the TOMI format tables, to the CMS format tables (Bot), and to the SPEI database, (4) advances the work-plan row in tb_srv_plan_trabajo_maestro (AUTORIZACION -> rail -> TERMINANDO -> PROCESADA/RECHAZADA), and (5) for a rejected, cancelled, or returned FXD or SPID payment, reverses the funds transfer in T24 through a SOAP web service (ServicioGeneral.cs:1418-1503 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1418-L1503)). The host maps 46 operation types (ServiceHost.Composicion.cs:18-107 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L18-L107)) onto 37 operation classes: ENT (receipts), FXD, FXI, FXT, MFX, MD (Mercado de Dinero), NOM, PaP (payment-by-batch masters), SAT, SER, SPID, TAX, TEF, TMD, CNT, each with Local, GPH, and H2H variants. Because every write that changes what a customer or a bank sees is made here, a silent failure is the dominant risk of this service, and most findings below are about exactly that: calls that cannot succeed, results that are discarded, and defaults that look like success.
-2. Scope & Methodology Note
-This is a fresh Phase 3 review after the portfolio reset dated 2026-10-07. No earlier report or tracker for this solution exists on disk (the Phase 0 and Phase 1 metadata that listed 124 files, "no linked test project", and an appsettings.json is stale and was not used as evidence), so there is no reconciliation table. The source was read first; the SQL contract was then checked against the database project.
-Scope item	Result
-Repository state	Clean branch CodeReview at commit 6f59857d4dd2f265846cf11b9f8e8de89baa3531 (2026-09-14, "CodeReview HMN fixes"), identical to origin/CodeReview; no stash; git status was empty at the start and again at the end of the review
-Git-tracked scope	121/121 files, 31,097/31,097 lines accounted (a manifest of line counts and encodings was generated first and reconciled file by file at the end): 120 files / 23,756 lines were read in full with no sampling (a numbered copy of every file was read), and 1 generated file (Reference.cs, 7,341 lines) received a structural scan only
-Authored C# scope	93/93 files, 12,392/12,392 lines read in full: host 5 files / 365 lines, Aplicacion 79 files / 10,466 lines (ServicioGeneral 1,602, OperacionServicio 284, ServicioBase 27, 37 operation classes 7,570, and 39 enum, interface, model, and DTO files 983), Infraestructura 7 files / 1,286 lines, tests 2 files / 275 lines
-SQL scope	3 scripts / 8,964 lines read in full: TOMI 6,274 (99 ALTER PROCEDURE), CMS 2,498 (38), SPEI 192 (1). A script verified that 65 of the 138 procedures follow one boilerplate (TRY/CATCH, THROW, XACT_ABORT) so the boilerplate was stripped for reading and the other 73 were printed in full
-Generated code and metadata	Reference.cs (7,341 lines) is <auto-generated>: structure, types, generator versions, and hand-edit markers were scanned; the 12 metadata files beside it (.svcmap, .wsdl, 2 .svcinfo, 2 .xsd, 6 .datasource; 1,210 lines) were read in full
-Other tracked text	12 files / 1,190 lines: .gitattributes, .gitignore, ActualizaEstatus.sln, four .csproj, two packages.config, App.config, app.config, README.md (the default GitLab template, no project content)
-Large-review threshold	Reached (31,097 lines): a persistent tracker with a batch plan, the manifest, and every finding was kept on disk
-Database-project context	StoredProcedures/MWD_DB (branch develop, commit f64ecf2, 2026-09-02; two untracked folders unrelated to this service): the 145 procedure files of DBMDW/General/ActualizaEstatus (Bot 37, IT24 107, SPEI 1) were parsed for names and parameter lists, and every file behind a finding was read. They are not tracked by this solution and were not read line by line. Platform procedures named sp_InterfaceTOMI_* and usp_comun_* are not in the project and could not be inspected
-Shared-library context	General/MUFGT24_BTMUM_64 (clean CR3rdround at d1e49a0, 2026-10-07): the query adapter, alert writer, host base, logger, and conversion helpers were read to see what each call actually returns or throws
-Requirements basis	No JIRA/ADO story or acceptance criteria were supplied; this is a baseline architecture and code-quality audit, not a change-specific PR review
-Executable validation	Build, tests, and SQL could not run: dotnet, modern msbuild, vstest.console, nuget, vswhere, and SQL Server are absent; D:\ServiceCMS and the NuGet packages are absent. Nothing was executed, so every runtime statement below is derived from source and is worded as expected behavior. A real Service Control Manager start and a run of the scripts against a scratch database were not performed
+namespace ActualizaEstatus
 
-The full read was supplemented with focused scans, used only as cross-checks (all case-sensitive, over Aplicacion):
-• Contract pass: a script compared the parameter names of every ProcedimientoAlmacenado.sp_* call site with the declared parameters of the database project: 264 call sites, 224 agree, 27 do not, 13 name a procedure the project does not define (details in AE-FR-2).
-• Result-discard pass: 218 statements that call EjecutarSP or EjecutaSPTransaccion start with a bare await (result discarded) against 45 that assign the result; none returns or tests it (AE-FR-3).
-• Template pass: 164 new ProcesoDTO { ... Excepcion = new Exception("") } blocks (81 IniciarProceso and 83 TerminarProceso calls), 323 Config.EscribirLog calls (254 INFO|, 52 ERROR|, none WARN| or CRITICO|), 80 throw new Exception(, 49 catch (Exception, 7 new AlertaDTO.
-• Safety pass: zero .Result, .Wait(), Task.Delay, ConfigureAwait, and zero `CancellationToken` in Aplicacion (AE-FR-7); two DateTime.Now; no SQL text built in C# (the dynamic SQL is inside the stored procedures).
-• Project pass: the Compile items of all four projects equal the tracked .cs files (5/5, 80/80, 7/7, 2/2); six absolute D:\ServiceCMS hint paths (AE-FR-5).
-• History pass: git log -S dated the configuration regression of AE-FR-1 to commit 7c9821a (2026-09-02) and the stale scripts of AE-FR-31 to the commits listed there.
-False-positive checks were resolved as follows:
-• A null parameter value is not omitted from a call: the shared adapter converts a null input value to DBNull before execution (RepositorioMaestro.cs:285 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L285), RepositorioMaestro.cs:780-793 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L780-L793)), so branches that pass a null reason or code send SQL NULL.
-• ConsultasBDTomi.BuscarEstatusPago never returns null (it returns a default object, ConsultasBDTomi.cs:402-407 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L402-L407)), so ValidaEstatus_BBVA does not hit a NullReferenceException at the pago.Stage switch; the real defect is that "no row" and "query failed" look like "still pending" (AE-FR-4).
-• Responde_Salida_TEF ignores the int.TryParse result (ServicioGeneral.cs:1284-1285 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1284-L1285)) but its repository returns a null result string for no row or failure, so the false success needs a non-numeric first element; it is latent and not filed.
-• SalidaStatusSPIDDTO is used (ServicioGeneral.cs:811 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L811)) and is not dead code.
-• The host dereferences _configuracionBase.Pid.Value (ServiceHost.cs:104 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L104), ServiceHost.cs:106 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L106)) and every ProcesoDTO casts (int)_Configuracion.Pid; the shared start-up validates the process identity before the listener starts, so no nullable-PID finding (GEN-8) is filed.
-• The database-project procedures do not declare the @RowsAffected output parameter that the in-solution scripts require, so the C# binder (which sends only the dictionary keys) is compatible with the project and incompatible with the scripts (AE-FR-31).
-Open questions for the owners
-These cannot be answered from source and are listed instead of being assumed:
-1. Is the deployed InterfacesT24 and Bot schema built from the database project (DBMDW) or from the three scripts in Infraestructura/Scripts? Several findings flip from "cannot work" to "works" for one of the two sources.
-2. Do the CMS procedures MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado and MUFG_MX2_TEF_ActualizaFormatoRechazadoCms exist in the live Bot database? The project exported both as "No se encontro el SP".
-3. Are the operation types CNT, ENT_COAS, FXT, FXT_Local, FXT_H2H, MFX, SAT, TEF_GPH, TEF_H2H, and TMD in production use? If they are, they have failed since 2026-09-02 (AE-FR-1).
-4. Is APLICAREVERSOFT idempotent in T24 (a second call for an already reversed FT), what does its per-record RESPONSE mean, and is the endpoint in WS_REVERSA_ENDPOINT HTTP or HTTPS (AE-FR-11, AE-FR-12, AE-FR-13)?
-5. Which date is the business date: the server calendar date or the TOMI/T24 date read by usp_ObtenerFechaSistema (AE-FR-14)?
-6. Which unit does TamanoMaximoArchivoLogKB carry, and which HORA_LECTURA_* values are stored (hh:mm? overnight?) (AE-FR-9, AE-FR-34)?
-7. Is the "FXD" and "SPID" operation-type test that decides whether T24 is reversed intentional for the _GPH, _H2H, and _Local variants (AE-FR-13)?
-Cross-solution leads (not findings of this solution)
-GEN-13 already names the pattern of AE-FR-2; this review adds the first instance where the database project itself contains procedures that cannot execute (AE-FR-32) and two "not found" placeholder files, which belong to the database project's own review. AE-FR-6 (GEN-14) is a defect of the shared library and is recorded here because it decides whether this host can start.
-3. What's Already Good
-Good area	Evidence and value
-Scoped, verified composition root	The host registers repositories, factories, and a per-package scoped configuration clone in SimpleInjector, calls Verify() before start-up completes, and opens an async scope for every package (ServiceHost.cs:69-92 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L69-L92), ServiceHost.cs:127-138 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L127-L138)).
-Request-driven, bounded concurrency	The service is not a timer: work arrives as a TCP package and concurrency is bounded by LimiteConcurrencia ?? 5 (ServiceHost.cs:119-121 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L119-L121)), which suits a reconciliation worker driven by a dispatcher.
-Fresh application service per operation	The factory returns a new ServicioGeneral for every operation, so its mutable dicParametros field is not shared across concurrent folios (ServiceHost.cs:87 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L87), ServicioGeneral.cs:17-49 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L17-L49)).
-Per-folio isolation and finalization	One folio's failure is caught, logged, and counted without stopping the package; per-folio logging scopes tag every line; the execution flag is cleared from a finally block with its own try/catch (OperacionServicio.cs:186-219 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L186-L219), OperacionServicio.cs:243-253 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L243-L253)).
-Resumable phases	The phase is a persisted alias read from the database, and each phase is bracketed by IniciarProceso and TerminarProceso, so a package that fails or is interrupted resumes at the same phase on the next call (Servicio_FXD.cs:55-160 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L55-L160)).
-Guarded work-plan transitions	The work-plan procedures change a row only from the expected states (for example cve_estatus IN ('AUTORIZACION','T24')), so repeating a poll or a retried package cannot move a closed row backwards (PaP_SPID plan procedure (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/038%20SP%20usp_PaP_SPID_ActualizaPlanTrabajoMaestro.sql#L13-L41)).
-Secret masked in the log	The T24 middleware password is logged as asterisks (OperacionServicio.cs:106-109 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L106-L109)); the other parameters are logged in clear (AE-FR-26).
-Stored procedures with named parameters only	No SQL text is built in C#: every call goes through a stored procedure with by-name parameters, and the one interpolated value is the parameter-name list built from an enum (ConsultasBDTomi.cs:72-91 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L72-L91), ConsultasBDTomi.cs:503-562 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L503-L562)).
-Defensive handling of list results	Every list result is read with ?.FirstOrDefault() and a null check before use (ServicioGeneral.cs:253-258 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L253-L258), ServicioGeneral.cs:653-656 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L653-L656), ServicioGeneral.cs:938-941 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L938-L941)); the reversal client maps exceptions to a result object instead of throwing (ServicioGeneral.cs:1494-1501 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1494-L1501)).
-Async hygiene	Zero .Result, .Wait(), Task.Delay, and async void in the application and repositories.
-Project and repository hygiene	The Compile items of the four projects equal the tracked .cs files; .gitignore excludes bin/, obj/, packages/, *.pfx, and logs; no binary, certificate, or secret is tracked.
-Test seam	The orchestrator is constructor-injected and a hand-written fake already drives seven tests, so the seam for the missing tests exists (ACTUALIZA_ESTATUS_UT.cs:45-135 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L45-L135)).
-
-4. Findings by Project (low/no-dependency -> high dependency)
-Finding Summary
-Category	Blocker	Major	Minor	Total
-MustChange/rewrite	5	21	0	26
-rewrite_recommended	0	2	5	7
-NiceToRewrite_ifTimePermits	0	0	2	2
-Total	5	23	7	35
-
-Suggested fix order: first confirm the two findings that decide whether the service runs at all, AE-FR-6 (service name assigned in OnStart, a shared-library change) and AE-FR-1 (ten operation classes that fail on every call, a few lines each); then AE-FR-5 (reproducible builds); then AE-FR-2, AE-FR-3, and AE-FR-4 as one piece of work ("make the writes real and visible": reconcile the contract with the database project, check every write result, stop turning failures into default values); then the money paths AE-FR-11, AE-FR-12, and AE-FR-13; then the family findings AE-FR-14 to AE-FR-21; and the tests of AE-FR-35 alongside each fix, starting with one test per operation class.
-4.1 Solution-wide and cross-project findings
-MustChange / Rewrite
-AE-FR-1 - Ten of the 37 operation classes are built without ConfiguracionServicio and fail on every call (Blocker)
-Category: MustChange/rewrite Priority: Blocker
-Evidence: ServicioBase.cs:15-25 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioBase.cs#L15-L25), ServiceHost.Composicion.cs:26-31 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L26-L31), ServiceHost.Composicion.cs:36-37 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L36-L37), ServiceHost.Composicion.cs:42-43 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L42-L43), ServiceHost.Composicion.cs:50-51 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L50-L51), ServiceHost.Composicion.cs:62-63 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L62-L63), ServiceHost.Composicion.cs:78-79 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L78-L79), ServiceHost.Composicion.cs:84-85 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L84-L85), ServiceHost.Composicion.cs:88-89 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L88-L89)
-Code block (csharp)
-// Servicio_FXT.cs:36-41 - the constructor never receives or assigns the configuration
-public Servicio_FXT(OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCMS)
 {
-    _Operacion = operacion; _IParametrosOperaciones = parametros; _IOperacionesCms = operacionesCMS;
-}
-// Servicio_FXT.cs:65-73 - the first thing the phase does is dereference it
-await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO() {
-    NombreProceso = _Configuracion.NombreProceso,      // _Configuracion is null here
-    Servicio = _Configuracion.NombreServicio,
-    PId = (int)_Configuracion.Pid, ... });
-_Configuracion is a protected field of ServicioBase with no initializer (ServicioBase.cs:20 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioBase.cs#L20)). Ten classes never assign it, and the host builds them with two or three arguments and no ConfiguracionServicio, while the other 27 classes receive it:
-Class	Constructor	Built at	First dereference of the null field
-Servicio_CNT	Servicio_CNT.cs:23 (../../General/ActualizaEstatus/Aplicacion/Servicios/CNT/Servicio_CNT.cs#L23)	ServiceHost.Composicion.cs:50-51 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L50-L51)	Servicio_CNT.cs:61 (../../General/ActualizaEstatus/Aplicacion/Servicios/CNT/Servicio_CNT.cs#L61), Servicio_CNT.cs:80 (../../General/ActualizaEstatus/Aplicacion/Servicios/CNT/Servicio_CNT.cs#L80)
-Servicio_ENT_COAS	Servicio_ENT_COAS.cs:30 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L30)	ServiceHost.Composicion.cs:42-43 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L42-L43)	Servicio_ENT_COAS.cs:56 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L56), Servicio_ENT_COAS.cs:71 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L71)
-Servicio_FXT	Servicio_FXT.cs:36 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT.cs#L36)	ServiceHost.Composicion.cs:26-27 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L26-L27)	Servicio_FXT.cs:69 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT.cs#L69), Servicio_FXT.cs:134 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT.cs#L134)
-Servicio_FXTLocal	Servicio_FXTLocal.cs:31 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXTLocal.cs#L31)	ServiceHost.Composicion.cs:36-37 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L36-L37)	Servicio_FXTLocal.cs:64 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXTLocal.cs#L64), Servicio_FXTLocal.cs:114 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXTLocal.cs#L114)
-Servicio_FXT_H2H	Servicio_FXT_H2H.cs:31 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT_H2H.cs#L31)	ServiceHost.Composicion.cs:84-85 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L84-L85)	Servicio_FXT_H2H.cs:64 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT_H2H.cs#L64), Servicio_FXT_H2H.cs:112 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT_H2H.cs#L112)
-Servicio_MFX	Servicio_MFX.cs:37 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L37)	ServiceHost.Composicion.cs:30-31 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L30-L31)	Servicio_MFX.cs:74 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L74), Servicio_MFX.cs:160 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L160)
-Servicio_SAT	Servicio_SAT.cs:36 (../../General/ActualizaEstatus/Aplicacion/Servicios/SAT/Servicio_SAT.cs#L36)	ServiceHost.Composicion.cs:28-29 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L28-L29)	Servicio_SAT.cs:70 (../../General/ActualizaEstatus/Aplicacion/Servicios/SAT/Servicio_SAT.cs#L70), Servicio_SAT.cs:150 (../../General/ActualizaEstatus/Aplicacion/Servicios/SAT/Servicio_SAT.cs#L150)
-Servicio_TEF_GPH	Servicio_TEF_GPH.cs:33 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_GPH.cs#L33)	ServiceHost.Composicion.cs:78-79 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L78-L79)	Servicio_TEF_GPH.cs:73 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_GPH.cs#L73), Servicio_TEF_GPH.cs:132 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_GPH.cs#L132)
-Servicio_TEF_H2H	Servicio_TEF_H2H.cs:33 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_H2H.cs#L33)	ServiceHost.Composicion.cs:88-89 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L88-L89)	Servicio_TEF_H2H.cs:73 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_H2H.cs#L73), Servicio_TEF_H2H.cs:132 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_H2H.cs#L132)
-Servicio_TMD	Servicio_TMD.cs:36 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L36)	ServiceHost.Composicion.cs:62-63 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L62-L63)	Servicio_TMD.cs:77 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L77), Servicio_TMD.cs:131 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L131)
-
-The NullReferenceException is thrown inside each class's try, logged, and the method returns false, so the orchestrator counts the folio as Error (OperacionServicio.cs:207-211 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L207-L211)) and the work-plan row stays in the same phase on every package. Servicio_ENT_COAS reads _Configuracion.strFechayyyyMMdd before it tests the alias (Servicio_ENT_COAS.cs:56 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L56)), so it fails on every folio; the other nine fail in their only phase (ESTATUS_TERMINADA or ESTATUS_TERMINADA_CMS); Servicio_SAT calls TerminarProceso outside its alias guard (Servicio_SAT.cs:150 (../../General/ActualizaEstatus/Aplicacion/Servicios/SAT/Servicio_SAT.cs#L150)), so it fails for any alias.
-History (executed `git log -S`, read-only): for each of the ten files the pickaxe -S"_Configuracion.NombreProceso" returns a single commit, 7c9821a (2026-09-02, "CodeReview changes"). Before it, the same blocks filled the process fields from NombreServicio.ActualizaEstatus.ToString() and Process.GetCurrentProcess().Id (the diffs of Servicio_FXT.cs and Servicio_TMD.cs show it); that commit switched them to _Configuracion and re-indented the host's new Servicio_FXT(operacion, ..., _IOperacionesCMS) lines without passing the configuration. The last commit (6f59857, 2026-09-14) moved the switch to ServiceHost.Composicion.cs and touched these classes only for using aliases and comparison order. The regression is therefore 11 days old at HEAD and was not caught because no test builds an operation class (AE-FR-35) and every failure surfaces only as a counted false (AE-FR-3).
-Recommended change: pass Resolver<ConfiguracionServicio>() to all ten constructors (the ten classes already inherit ServicioBase, so the smallest fix is a protected constructor ServicioBase(ConfiguracionServicio configuracion, ...) that every class must call, which turns a missing argument into a compile error), and add one smoke test per operation type that runs the first phase against a fake IParametrosOperaciones and asserts a true result. The longer-term fix is AE-FR-24.
-Code block (csharp)
-protected ServicioBase(ConfiguracionServicio configuracion, IFabricaServicioGeneral fabrica = null)
+        /// <summary>
+        /// Clase principal del servicio Windows (presentación).
+        /// </summary>
+        public partial class ServiceHost : WindowsTcpPaqueteServiceHostBase
 {
-    _Configuracion = configuracion ?? throw new ArgumentNullException(nameof(configuracion));
-    _fabricaServicioGeneral = fabrica;
-}
-Benefit: ten operation types (CNT, ENT_COAS, FXT and its Local and H2H variants, MFX, SAT, TEF_GPH, TEF_H2H, TMD) start completing again, and the same mistake cannot compile in the future.
-Suggested JIRA: AE-FR-1 (Blocker, MustChange/rewrite).
-AE-FR-2 - Stored-procedure calls and the database project disagree: 27 call sites do not match the declared parameters and 13 name a procedure that is not defined (Blocker)
-Category: MustChange/rewrite Priority: Blocker
-Evidence: ProcedimientoAlmacenado.cs:2-177 (../../General/ActualizaEstatus/Aplicacion/Enums/ProcedimientoAlmacenado.cs#L2-L177), ServicioGeneral.cs:184-190 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L184-L190), ServicioGeneral.cs:267-288 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L267-L288), ServicioGeneral.cs:352-355 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L352-L355), ServicioGeneral.cs:387-392 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L387-L392), ServicioGeneral.cs:699-703 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L699-L703), ServicioGeneral.cs:798-869 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L798-L869), ServicioGeneral.cs:961-970 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L961-L970), DB/IT24/098 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/098%20SP%20usp_Comunes_ActualizaEstatusInterno_SPID.sql#L1-L8), DB/Bot/035 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/035%20SP%20MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado.sql#L1), DB/Bot/007 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/007%20SP%20MUFG_MX2_TEF_ActualizaFormatoRechazadoCms.sql#L1)
-The service calls every procedure by a string constant and a Dictionary<string, object> whose keys become the parameter names (ConsultasBDTomi.cs:503-562 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L503-L562)); nothing ties the keys to the declarations. A script compared all 264 call sites that use a ProcedimientoAlmacenado constant with the parameter lists of the 145 procedure files in the database project (parameter names compared case-insensitively, as SQL Server does): 224 agree, 27 do not, and 13 name a procedure the project does not define. SQL Server reports a missing required parameter as error 201, an undeclared parameter as 8144, and a missing procedure as 2812; the shared adapter turns each into Exito = false without a log line (AE-FR-3).
-C# call site	Procedure (database project)	Problem
-ServicioGeneral.cs:184-190 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L184-L190)	usp_ActualizaEstatuInternoSpei	key estatus, declared @estatusinterno (SPEI CL/RL/CN/RB status)
-ServicioGeneral.cs:267-273 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L267-L273)	MUFG_MX2_Comunes_ActualizaCmsFormato	key foio (typo), declared @folio (accepted SPEI CMS update)
-ServicioGeneral.cs:279-288 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L279-L288)	MUFG_MX2_Insertar_T24Formato, ..._PaP_detalle	key ft, declared @sft
-ServicioGeneral.cs:352-355 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L352-L355), ServicioGeneral.cs:440-444 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L440-L444)	usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI	keys strfolio/strtablatomi, declared @folio/@tablatomi
-ServicioGeneral.cs:387-392 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L387-L392), ServicioGeneral.cs:990-994 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L990-L994), ServicioGeneral.cs:1067-1072 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1067-L1072)	ssp_Consultar_Cat_Razon_Rechazo(@clave, @tipopago)	keys strclave/strtipopago/strkarpay, strClave/strTipoPago, and an extra KarPay; only ServicioGeneral.cs:307-311 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L307-L311) fits
-ServicioGeneral.cs:699-703 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L699-L703)	usp_Comunes_ActualizaFormatoRechazadoTomi_BBVA(@tablatomi, @folio)	extra key strrazonrechazo
-ServicioGeneral.cs:798-802 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L798-L802), ServicioGeneral.cs:835-841 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L835-L841), ServicioGeneral.cs:846-853 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L846-L853), ServicioGeneral.cs:863-869 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L863-L869), Servicio_ENT_SPID.cs:234 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L234)	usp_Comunes_ActualizaEstatusInterno_SPID	none of the five shapes fits: the declared name is the typo @etatusinterno, and @cdclave is required
-ServicioGeneral.cs:961-965 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L961-L965), ServicioGeneral.cs:967-971 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L967-L971)	MUFG_MX2_Insertar_T24Formato_SPID, ..._SPID_PaP	key strFolio, declared @folio
-Servicio_ENT_SPEI.cs:184 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L184)	usp_ENT_SPEI_ActualizaPlanTrabajoMaestro	only folio of three required (AE-FR-17)
-Servicio_FXI.cs:214 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L214)	MUFG_MX2_FXI_ActualizaFormatoAceptadoCms	key lsft; the project has two files creating this procedure, Bot/017 with @sft and Bot/037 with @lsft
-Servicio_FXI.cs:218 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L218), Servicio_FXI_H2H.cs:217 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_H2H.cs#L217)	usp_FXI_ActualizaTombinDetalle(@folio, @opcion), usp_FXI_H2H_ActualizaTombinNF(@folio, @tipo_operacion, @opcion)	only folio
-Servicio_MFX.cs:136 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L136), Servicio_PaP_FXT.cs:137 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L137), Servicio_PaP_TEF.cs:130 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L130)	..._MFX/PaP_FXT/PaP_TEF_ActualizaFormatoRechazadoCms(@folio, @razonrechazo)	pass only folio or {folio, sft}: the reason is missing
-Servicio_NOM_FXD.cs:217-220 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L217-L220)	MUFG_MX2_NOM_FXD_InsertarFormatoCms	key "@sft" becomes @@sft
-Servicio_TEF.cs:106 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF.cs#L106), Servicio_TEF.cs:119 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF.cs#L119)	MUFG_MX2_ActualizaFormatoAceptadoCms(@folio, @sft) (the TEF accepted procedure)	only folio: the TEF CMS update fails in both branches
-Undefined (13 sites)		
-ServicioGeneral.cs:1006 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1006), ServicioGeneral.cs:1019 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1019), ServicioGeneral.cs:1102 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1102), ServicioGeneral.cs:1114 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1114), ServicioGeneral.cs:1138 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1138), Servicio_ENT_SPID.cs:265 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L265)	MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado	the project file Bot/035 contains only the comment "No se encontro el SP": every SPID rejection or devolution CMS write
-Servicio_TMD.cs:91 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L91)	usp_TMD_ActualizaFormatoAceptadoCms	defined only in the stale script (AE-FR-31)
-Servicio_PaP_FXD.cs:198 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L198), Servicio_PaP_FXD.cs:210 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L210)	usp_PaP_FXD_ActualizaFormatoCms	no IT24 definition (the CMS twin is MUFG_MX2_PaP_FXD_ActualizaFormatoCms)
-Servicio_ENT_SPID.cs:214 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L214)	ssp_ENT_SPID_ConsultarOperacionDevuelta	defined only in the stale script
-ServicioGeneral.cs:146 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L146), ServicioGeneral.cs:1338 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1338), ServicioGeneral.cs:1395 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1395)	sp_InterfaceTOMI_* platform procedures	not in the project (12 such constants; GEN-13 lead: confirm the live names)
+    private SimpleInjector.Container _containerDI;
+    private Configuracion _configuracionBase;
+    private ConfiguracionServicio _configuracionServicio;
 
-Net effect (expected, not executed): the 224 calls that agree are mostly the work-plan updates and the TOMI status queries, while the CMS and TOMI format writes are the ones that disagree. Several flows therefore end with the work-plan row advanced or closed while the CMS format and the TOMI record keep their old status: an accepted SPEI (LQ) fails both CMS writes and then moves the plan (ServicioGeneral.cs:267-300 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L267-L300)); a SPEI CN/CL/RB can never start, because the reason lookup fails and the branch throws before the reversal (ServicioGeneral.cs:387-396 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L387-L396)); a SPID CN/CL/RB tolerates the failed lookup, reverses the payment in T24, and then fails both CMS and TOMI updates (AE-FR-13); no SPID internal status is ever written; and the TEF CMS update never happens. The same procedures are also named in cross-family ways (sp_ConsultarTombinNF_NOM_FXD points at ssp_PaP_SPID_ConsultarTombinNF, sp_ActualizaTombinDetalle_PaP_FXT at usp_PaP_FXD_ActualizaTombinDetalle, ProcedimientoAlmacenado.cs:58 (../../General/ActualizaEstatus/Aplicacion/Enums/ProcedimientoAlmacenado.cs#L58), ProcedimientoAlmacenado.cs:62 (../../General/ActualizaEstatus/Aplicacion/Enums/ProcedimientoAlmacenado.cs#L62)), and 18 of the 158 constants are not dbo.-qualified.
-This is the standing candidate GEN-13, confirmed against the SQL project and not against a deployed database (open question 1). It is rated Blocker because the writes that fail are the service's whole purpose and none of the failures is visible (AE-FR-3).
-Recommended change: (1) decide the single source of truth (the database project, per GEN-13) and bring the 27 call sites and 13 constants in line with it; (2) put each procedure's parameter names in one typed place (a small parameter class or factory per procedure) instead of re-typing dictionary keys at 264 sites; (3) add the pipeline checks GEN-13 recommends: every ProcedimientoAlmacenado constant must exist in sys.procedures and every key must be a declared parameter, plus a smoke test that executes each procedure the service calls against a scratch database; (4) obtain or recreate the three procedures that are missing in Bot and IT24 (MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado, the TEF rejected procedure, usp_PaP_FXD_ActualizaFormatoCms or its IT24 equivalent).
-Code block (csharp)
-// one declaration per procedure; the C# names are checked against sys.parameters by a test
-internal static class CmsInsertarT24FormatoSpid
+    protected override string NombreServicioLog => NombreServicio.ActualizaEstatus.ToString();
+    protected override bool InicializacionCompleta => _containerDI != null && _configuracionBase != null;
+
+    /// <summary>
+    /// Constructor.
+    /// </summary>
+    public ServiceHost() { }
+
+    /// <summary>
+    /// Realiza la obtención de la configuración del servicio 
+    /// y la inyección de dependencias.
+    /// </summary>
+    protected override void Inicializacion(string[] args, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+        _configuracionBase = new Configuracion();
+        _configuracionServicio = new ConfiguracionServicio();
+
+        //Inicializa la obtención de la configuración general y las rutas del log...
+        {
+            ConfiguracionEncriptadaHelper.Inicializar();
+            ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.ActualizaEstatus.ToString());
+            _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+            _configuracionBase.RutaArchivoConfiguracion = $@"{EnumRutasGenerales.Path_Log_CMS}\{NombreServicio.ActualizaEstatus.ToString()}\";
+            _configuracionBase.PathLog = servicioMainConfiguracion.Log + servicioMainConfiguracion.NombreServicio;
+            _configuracionBase.configuracion = servicioMainConfiguracion.configuracion;
+            _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+            _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+            _configuracionBase.LimiteConcurrencia = servicioMainConfiguracion.LimiteConcurrencia;
+
+            Logging.Init(_configuracionBase.PathLog, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+        }
+
+        //Realiza la configuracion del contenedor DI...
+        _containerDI = new SimpleInjector.Container();
+        _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+        _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+        _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+        _containerDI.Register<IControlServicio, ControlServicio>();
+        _containerDI.Register<SwiftStandardReleaseSanitize>();
+        _containerDI.Register<MUFG_T24.Interfaces_utilidades.IParametrizacion, MUFG_T24.Inicializacion_utilidades.Parametrizacion>();
+
+        //Registra los componentes del servicio...
+        _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+        _containerDI.Register<ConfiguracionServicio>(() => _configuracionServicio.Clone(), Lifestyle.Scoped);
+
+        _containerDI.Register<IParametrosOperaciones, ConsultasBDTomi>(Lifestyle.Transient);
+        _containerDI.Register<IOperacionesCms, ConsultasBDCms>(Lifestyle.Transient);
+        _containerDI.Register<IOperacionesSpei, ConsultasBDSpei>(Lifestyle.Transient);
+        _containerDI.Register<IOperacionesSpid, ConsultasBDSpid>(Lifestyle.Transient);
+        _containerDI.Register<IOperacionesTef, ConsultasBDTef>(Lifestyle.Transient);
+        _containerDI.Register<IOperacionesSpei2, ConsultasBDSpei2>(Lifestyle.Transient);
+        _containerDI.Register<IFabricaServicioGeneral, FabricaServicioGeneral>(Lifestyle.Transient);
+        _containerDI.Register<IFabricaServiciosOperacion>(() => new FabricaServiciosOperacion(ProcesarOperacionAsync), Lifestyle.Transient);
+        _containerDI.Register<Aplicacion.Interfaces.IOperacionServicio, OperacionServicio>(Lifestyle.Transient);
+
+
+        _containerDI.Verify();
+    }
+
+    /// <summary>
+    /// Realiza la obtención inicial de parámetros comunes.
+    /// </summary>
+    protected override async Task ParametrizacionesAsync(CancellationToken ct)
+    {
+        IParametrizacion parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+        _configuracionBase = await parametrizacion.ObtenerProcesoActualAsync(_configuracionBase).ConfigureAwait(false);
+
+        IControlServicio controlServicio = _containerDI.GetInstance<IControlServicio>();
+        await controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio).ConfigureAwait(false);
+
+        _configuracionBase.PuertoTCP = await parametrizacion.ObtenerPuertos(_configuracionBase.NombreServicio, _configuracionBase.Pid.Value).ConfigureAwait(false);
+
+        {
+            _configuracionServicio.NombreServicio = _configuracionBase.NombreServicio;
+            _configuracionServicio.TimerInterval = _configuracionBase.TimerInterval;
+            _configuracionServicio.Pid = _configuracionBase.Pid;
+            _configuracionServicio.NombreDisplay = _configuracionBase.NombreDisplay;
+            _configuracionServicio.FechaSistema = _configuracionBase.FechaSistema;
+            _configuracionServicio.NombreProceso = _configuracionBase.NombreProceso;
+            _configuracionServicio.AliasProceso = "";
+            _configuracionBase.AliasProceso = "";
+        }
+
+        ConfigurarTcpListener(
+            ConversionesComunes.ParseEnteroRequerido(_configuracionBase.PuertoTCP, nameof(_configuracionBase.PuertoTCP)),
+            _configuracionBase.LimiteConcurrencia ?? 5);
+    }
+
+    /// <summary>
+    /// Procesa la petición recibida.
+    /// </summary>
+    protected override async Task<RespuestaResumenDto> ProcesarPaqueteAsync(SolicitudPaqueteDto paquete, string[] operaciones, CancellationToken token)
+    {
+        using (AsyncScopedLifestyle.BeginScope(_containerDI))
+        {
+            string[] operacionesNormalizadas = operaciones ?? Array.Empty<string>();
+            var _operacionServicio = _containerDI.GetInstance<Aplicacion.Interfaces.IOperacionServicio>();
+            RespuestaResumenDto resumen = await _operacionServicio
+                .EjecutaProcedimientosAsync(paquete.Tipo, operacionesNormalizadas);
+
+            return resumen;
+        }
+    }
+
+    /// <summary>
+    /// Realiza ciertas operaciones antes de finalizar el servicio.
+    /// </summary>
+    protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+    {
+        using (AsyncScopedLifestyle.BeginScope(_containerDI))
+        {
+            IControlServicio controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+            await controlServicio.EsperarTareaActivaAsync(startupTask, "ParametrizacionInicial", waitCt).ConfigureAwait(false);
+            await controlServicio.EsperarTareaActivaAsync(runningTask, "ProcesamientoActivo", waitCt).ConfigureAwait(false);
+
+            await EsperarClientesActivosAsync(cleanupCt).ConfigureAwait(false);
+
+            Configuracion configuracionBase = _containerDI.GetInstance<Configuracion>();
+
+            await controlServicio.MarcarPuertoEnUsoAsync(null, null, null, configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+            await controlServicio.ActualizaTerminacion(configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Especifica los recursos a liberar al finalizar el servicio.
+    /// </summary>
+    protected override void LiberarRecursosTerminacion() => _containerDI?.Dispose();
+
+}
+}
+
+
+using Aplicacion.DTOs;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Servicios;
+using System;
+using System.Threading.Tasks;
+using ConstantesOperacion = Aplicacion.Enums.ConstantesServicios;
+
+namespace ActualizaEstatus
 {
-    public const string Procedure = "dbo.MUFG_MX2_Insertar_T24Formato_SPID";
-    public static Dictionary<string, object> Params(string folio, string sft) =>
-        new Dictionary<string, object> { ["folio"] = folio, ["sft"] = sft };
+    public partial class ServiceHost
+    {
+        private T Resolver<T>() where T : class
+        {
+            return _containerDI.GetInstance<T>();
+        }
+
+        private async Task<bool> ProcesarOperacionAsync(string tipoOperacion, OperacionDTO operacion)
+        {
+            switch (tipoOperacion)
+            {
+                case ConstantesOperacion.OperacionFXD:
+                    return await new Servicio_FXD(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_FXD();
+                case ConstantesOperacion.OperacionFXI:
+                    return await new Servicio_FXI(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionFXI();
+                case ConstantesOperacion.OperacionFXT:
+                    return await new Servicio_FXT(operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>()).ProcesarOperacionFXT();
+                case ConstantesOperacion.OperacionSAT:
+                    return await new Servicio_SAT(operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>()).ProcesarOperacionSAT();
+                case ConstantesOperacion.OperacionMFX:
+                    return await new Servicio_MFX(operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>()).ProcesarOperacionMFX();
+                case ConstantesOperacion.OperacionFXDLocal:
+                    return await new Servicio_FXDLocal(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionServicio_FXDLocal();
+                case ConstantesOperacion.OperacionFXILocal:
+                    return await new Servicio_FXILocal(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionServicio_FXILocal();
+                case ConstantesOperacion.OperacionFXTLocal:
+                    return await new Servicio_FXTLocal(operacion, Resolver<IParametrosOperaciones>()).ProcesarOperacionServicio_FXTLocal();
+                case ConstantesOperacion.OperacionENTSPEI:
+                    return await new Servicio_ENT_SPEI(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesSpei>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionENT_SPEI();
+                case ConstantesOperacion.OperacionENTSPEI2:
+                    return await new Servicio_ENT_SPEI2(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesSpei2>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionENT_SPEI2();
+                case ConstantesOperacion.OperacionENTCOAS:
+                    return await new Servicio_ENT_COAS(operacion, Resolver<IParametrosOperaciones>()).ProcesarOperacionENT_COAS();
+                case ConstantesOperacion.OperacionENTSPID:
+                    return await new Servicio_ENT_SPID(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesSpid>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionENT_SPID();
+                case ConstantesOperacion.OperacionSPIDLocal:
+                    return await new Servicio_SPIDLocal(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionServicio_SPIDLocal();
+                case ConstantesOperacion.OperacionSPID:
+                    return await new Servicio_SPID(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionServicio_SPID();
+                case ConstantesOperacion.OperacionCNT:
+                    return await new Servicio_CNT(operacion, Resolver<IParametrosOperaciones>()).ProcesarOperacionServicio_CNT();
+                case ConstantesOperacion.OperacionNOMFXD:
+                    return await new Servicio_NOM_FXD(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_NOM_FXD();
+                case ConstantesOperacion.OperacionPaPFXD:
+                    return await new Servicio_PaP_FXD(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_PaP_FXD();
+                case ConstantesOperacion.OperacionPaPFXI:
+                    return await new Servicio_PaP_FXI(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_PaP_FXI();
+                case ConstantesOperacion.OperacionPaPFXT:
+                    return await new Servicio_PaP_FXT(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_PaP_FXT();
+                case ConstantesOperacion.OperacionPaPSPID:
+                    return await new Servicio_PaP_SPID(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_PaP_SPID();
+                case ConstantesOperacion.OperacionTMD:
+                    return await new Servicio_TMD(operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>()).ProcesarOperacionTMD();
+                case ConstantesOperacion.OperacionTEF:
+                    return await new Servicio_TEF(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>()).ProcesarOperacionTEF();
+                case ConstantesOperacion.OperacionPaPTEF:
+                    return await new Servicio_PaP_TEF(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesCms>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_PaP_TEF();
+                case ConstantesOperacion.OperacionENTTEF:
+                    return await new Servicio_ENT_TEF(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IOperacionesTef>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionENT_TEF();
+                case ConstantesOperacion.OperacionFXDGPH:
+                    return await new Servicio_FXD_GPH(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_FXD();
+                case ConstantesOperacion.OperacionFXIGPH:
+                    return await new Servicio_FXI_GPH(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_FXI_GPH();
+                case ConstantesOperacion.OperacionFXTGPH:
+                    return await new Servicio_FXT_GPH(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>()).ProcesarOperacion_FXT_GPH();
+                case ConstantesOperacion.OperacionSPIDGPH:
+                    return await new Servicio_SPID_GPH(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionServicio_SPID_GPH();
+                case ConstantesOperacion.OperacionTEFGPH:
+                    return await new Servicio_TEF_GPH(operacion, Resolver<IParametrosOperaciones>()).ProcesarOperacion_TEF_GPH();
+                case ConstantesOperacion.OperacionFXDH2H:
+                    return await new Servicio_FXD_H2H(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_FXD_H2H();
+                case ConstantesOperacion.OperacionFXIH2H:
+                    return await new Servicio_FXI_H2H(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacion_FXI_H2H();
+                case ConstantesOperacion.OperacionFXTH2H:
+                    return await new Servicio_FXT_H2H(operacion, Resolver<IParametrosOperaciones>()).ProcesarOperacion_FXT_H2H();
+                case ConstantesOperacion.OperacionSPIDH2H:
+                    return await new Servicio_SPID_H2H(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionServicio_SPID_H2H();
+                case ConstantesOperacion.OperacionTEFH2H:
+                    return await new Servicio_TEF_H2H(operacion, Resolver<IParametrosOperaciones>()).ProcesarOperacion_TEF_H2H();
+                case ConstantesOperacion.OperacionSER:
+                    return await new Servicio_SER(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionSER();
+                case ConstantesOperacion.OperacionTAX:
+                    return await new Servicio_TAX(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionTAX();
+                case ConstantesOperacion.OperacionMDUNKNOW:
+                case ConstantesOperacion.OperacionMDT24:
+                case ConstantesOperacion.OperacionMDSPEIE:
+                case ConstantesOperacion.OperacionMDSPEIS:
+                case ConstantesOperacion.OperacionMDSPIDE:
+                case ConstantesOperacion.OperacionMDSPIDS:
+                case ConstantesOperacion.OperacionMDMT103S:
+                case ConstantesOperacion.OperacionMDMT202S:
+                case ConstantesOperacion.OperacionMDMT210S:
+                case ConstantesOperacion.OperacionMDMT300S:
+                    return await new Servicio_MercadoDinero(Resolver<ConfiguracionServicio>(), operacion, Resolver<IParametrosOperaciones>(), Resolver<IFabricaServicioGeneral>()).ProcesarOperacionMercadoDinero();
+                default:
+                    throw new Exception($"Tipo de operación desconocida: {tipoOperacion}");
+            }
+        }
+    }
 }
-Benefit: every status write either reaches the database or fails a test before release, and the CMS format, the TOMI record, and the work plan can no longer drift apart silently.
-Suggested JIRA: AE-FR-2 (Blocker, MustChange/rewrite).
-AE-FR-3 - Every status and work-plan write is fire-and-forget, and a SQL failure leaves no log line (Blocker)
-Category: MustChange/rewrite Priority: Blocker
-Evidence: ConsultasBDTomi.cs:536-562 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L536-L562), ConsultasBDCms.cs:34-71 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDCms.cs#L34-L71), ConsultasBDSpei.cs:36-73 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpei.cs#L36-L73), ConsultasBDSpid.cs:42-73 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpid.cs#L42-L73), RepositorioMaestro.cs:385-390 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L390), RepositorioMaestro.cs:641-654 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L641-L654), RepositorioMaestro.cs:668-671 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L668-L671), ServicioGeneral.cs:113-130 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L113-L130), OperacionServicio.cs:201-206 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L201-L206), Servicio_PaP_FXI.cs:217-220 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L217-L220)
-Code block (csharp)
-// ConsultasBDTomi.cs:536-562 - returns result.Exito, but nobody reads it
-public async Task<bool> EjecutarSP(string SPNombre, Dictionary<string, object> Parametros) { ... return result.Exito; ... }
-// ServicioGeneral.cs:125-130 - 218 statements like this one in Aplicacion
-await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaEstatusProcesadoSPEI, new Dictionary<string, object>() { ... });
-Three layers combine so that a failed write cannot be seen:
-1. The shared adapter catches a SqlException (missing procedure, missing or undeclared parameter, deadlock, timeout, syntax error), sets Exito = false, and neither logs nor throws (RepositorioMaestro.cs:385-390 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L390)); the "no rows affected" warning is skipped when Exito is already false (RepositorioMaestro.cs:641-654 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L641-L654)); the strict validation is off by default (RepositorioMaestro.cs:668-671 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L668-L671)). This is the standing finding GEN-11.
-2. The repositories return the value as a Boolean (EjecutarSP) or as the rows (EjecutaSPTransaccion, which returns new object() or null and never reads Exito).
-3. The callers discard it: 218 call statements in Aplicacion start with a bare await against 45 that assign the result, and none returns it or tests it (ServicioGeneral 50, Servicio_PaP_FXI 13, Servicio_PaP_TEF 12, Servicio_PaP_FXT 12, Servicio_NOM_FXD 10, Servicio_FXI 8, and between 2 and 7 in each other class). The one exception in the whole solution is Servicio_PaP_FXI (Servicio_PaP_FXI.cs:217-220 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L217-L220)), which throws when the work-plan write returns false; it shows the intended pattern.
-A wrong parameter name (AE-FR-2), a missing procedure, a deadlock, or a timeout therefore changes nothing in the database while the folio is logged "Se termina procesamiento" and counted Ok (OperacionServicio.cs:201-206 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L201-L206)). For a service whose only job is to update statuses, a silent no-op is the worst failure mode, and GEN-9 (discarded Boolean state updates) and GEN-11 both land here.
-Recommended change: make the write helpers return a typed result and fail loudly by default: pass validarAfectacion: true for status writes whose procedures return rows or an affected count (the strict mode is already in the shared adapter, RepositorioMaestro.cs:668-690 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L668-L690)), log MensajeError on every false result, and have the operation classes throw (or return a failed outcome) when a write that the next phase depends on returns false. The simplest first step is one extension method used at all 218 sites:
-Code block (csharp)
-internal static async Task EjecutarSPObligatorio(this IParametrosOperaciones db, string sp, Dictionary<string, object> p)
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
 {
-    if (!await db.EjecutarSP(sp, p).ConfigureAwait(false))
-        throw new InvalidOperationException($"El procedimiento {sp} no se ejecuto correctamente.");
+    /// <summary>
+    /// Clase principal de OperacionServicio.
+    /// </summary>
+    public class OperacionServicio : IOperacionServicio
+    {
+        private readonly ConfiguracionServicio _configuracion;
+        private readonly IParametrosOperaciones _IparametrosOperaciones;
+        private readonly IFabricaServiciosOperacion _fabricaServiciosOperacion;
+
+        /// <summary>
+        /// Constructor de OperacionServicio.
+        /// Inicializa las dependencias necesarias para la ejecución de operaciones,
+        /// consulta de parámetros y procesamiento de los distintos tipos de transacciones.
+        /// </summary>
+        /// <param name="configuracion">Configuración general del servicio.</param>
+        /// <param name="iparametrosoperaciones">Parámetros requeridos durante la ejecución.</param>
+        /// <param name="fabricaServiciosOperacion">Fábrica para resolver y ejecutar servicios por tipo de operación.</param>
+        public OperacionServicio(ConfiguracionServicio configuracion, IParametrosOperaciones iparametrosoperaciones, IFabricaServiciosOperacion fabricaServiciosOperacion)
+        {
+            _configuracion = configuracion;
+            _IparametrosOperaciones = iparametrosoperaciones;
+            _fabricaServiciosOperacion = fabricaServiciosOperacion;
+        }
+
+        /// <summary>
+        /// Procedimiento para la ejecución de las operaciones
+        /// </summary>
+        /// <returns></returns>
+        public async Task<RespuestaResumenDto> EjecutaProcedimientosAsync(string tipoOperacion = null, string[] folios = null)
+        {
+            RespuestaResumenDto resumen = new RespuestaResumenDto(folios != null? folios.Length: 0);
+
+            string contextoTipoOperacion = tipoOperacion;
+            string contextoFolio = null;
+
+            using (Logging.BeginWorkerScope())
+            using (Logging.BeginOperacionScope(contextoTipoOperacion, null))
+            {
+
+            //Actualiza el proceso que se está ejecutando
+
+            await _IparametrosOperaciones.MarcarServicioEnEjecucion(_configuracion.NombreServicio);
+
+            //Obtiene los parametros del Sistema
+
+            Dictionary<string, string> dicParametrosSistema = await _IparametrosOperaciones.parametrosSistema();
+
+
+            //Validar los horarios de operación
+            TimeSpan timeHoraSistema = new TimeSpan(9, 0, 0);
+            bool boHoraInicioOperacion = false;
+
+            _configuracion.strFechayyyyMMdd = DateTime.Now.ToString("yyyyMMdd");
+
+            // Carga los parametros de configuración para el inicio de las operaciones
+            foreach (var paramSistema in dicParametrosSistema)
+            {
+                if (!Enum.TryParse(paramSistema.Key, out ParametrosSistema parametro)) continue;
+
+                switch (parametro)
+                {
+                    case ParametrosSistema.HORA_LECTURA_INICIO:
+                        _configuracion.StrHoraLecturaInicio = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_LECTURA_INICIO.ToString());
+                        Config.EscribirLog(string.Format("INFO|obtenerParametrosSistema|Hora de inicio de lectura '{0}'. ", paramSistema.Value));
+                        break;
+
+                    case ParametrosSistema.HORA_LECTURA_FIN:
+                        _configuracion.StrHoraLecturaFin = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_LECTURA_FIN.ToString());
+                        Config.EscribirLog(string.Format("INFO|obtenerParametrosSistema|Hora de Finalización de lectura '{0}'. ", paramSistema.Value));
+                        break;
+
+                    case ParametrosSistema.SPEI_SERVIDOR_1:
+                        _configuracion.StrNombreSPEI1 = paramSistema.Value;
+                        Config.EscribirLog(string.Format("INFO|obtenerParametrosSistema|Servidor 1 de SPEI activo '{0}'. ", paramSistema.Value));
+                        break;
+
+                    case ParametrosSistema.SPEI_SERVIDOR_2:
+                        _configuracion.StrNombreSPEI2 = paramSistema.Value;
+                        Config.EscribirLog(string.Format("INFO|obtenerParametrosSistema|Servidor 2 de SPEI activo '{0}'. ", paramSistema.Value));
+                        break;
+
+                    case ParametrosSistema.WST24_MW_COMPANY:
+                        _configuracion.StrCompanyName = paramSistema.Value;
+                        Config.EscribirLog(string.Format("INFO|obtenerParametrosSistema|WST24_MW_COMPANY '{0}'. ", paramSistema.Value));
+                        break;
+                    case ParametrosSistema.WST24_MW_USERNAME_REG:
+                        _configuracion.StrUserNameReg = paramSistema.Value;
+                        Config.EscribirLog(string.Format("INFO|obtenerParametrosSistema|WST24_MW_USERNAME_REG '{0}'. ", paramSistema.Value));
+                        break;
+                    case ParametrosSistema.WST24_MW_PASS_REG:
+                        _configuracion.StrPasswdReg = paramSistema.Value;
+                        Config.EscribirLog(string.Format("INFO|obtenerParametrosSistema|WST24_MW_PASS_REG ***********"));
+                        break;
+                    case ParametrosSistema.WS_REVERSA_ENDPOINT:
+                        _configuracion.UriReversa = paramSistema.Value;
+                        Config.EscribirLog($"INFO|UriReversa:{paramSistema.Value}");
+                        break;
+
+                    }
+            }
+
+            //Validar los parámetros y enviar excepciones si alguno no es válido
+            if (_configuracion.StrHoraLecturaInicio == null)
+                throw new Exception("No se especifica la hora de inicio de operaciones");
+
+            if (_configuracion.StrHoraLecturaFin == null)
+                throw new Exception("No se especifica la hora de finalización de operaciones");
+
+            // Validar si está en Horario de Operación
+            boHoraInicioOperacion = (timeHoraSistema >= _configuracion.StrHoraLecturaInicio && timeHoraSistema <= _configuracion.StrHoraLecturaFin);
+            Config.EscribirLog(String.Format("INFO|Ejecuta_procedimientos|{0} horario de operaciones, HoraSistema= '{1}'.",(boHoraInicioOperacion ? "Inicio" : "Fin"),timeHoraSistema.ToString()));
+
+            //Recuperar los Datos de las Operaciones a Procesar
+
+            List<OperacionDTO> operaciones = new List<OperacionDTO>();
+
+            foreach (string folio in folios ?? Array.Empty<string>())
+            {
+                operaciones.Add(new OperacionDTO
+                {
+                    StrFolio = folio,
+                    StrTipoOperacion = tipoOperacion
+                });
+            }
+
+                // Obtencion de la fecha del sistema
+                var fechaActual = DateTime.Now;
+                _configuracion.StrFechaSistema = new TimeSpan(fechaActual.Hour, fechaActual.Minute, 0);
+
+            if (_configuracion.StrFechaSistema >= _configuracion.StrHoraLecturaInicio && _configuracion.StrFechaSistema <= _configuracion.StrHoraLecturaFin) // Inicio Horario
+            {
+                if (!_configuracion.BHorarioLectura)
+                {
+                    _configuracion.BHorarioLectura = true;
+                    Config.EscribirLog($"INFO|Ejecuta_Procedimientos| Inicio horario de operaciones, HoraSistema='{timeHoraSistema:hh\\:mm}'.", NombreServicio.Entradas.ToString());
+                }
+            }
+            else // Termina Horario
+            {
+                if (_configuracion.BHorarioLectura)
+                {
+                    _configuracion.BHorarioLectura = false;
+                    Config.EscribirLog($"INFO|Ejecuta_Procedimientos| Termina horario de operaciones, HoraSistema='{timeHoraSistema:hh\\:mm}'.", NombreServicio.Entradas.ToString());
+                }
+            }
+
+            if (!_configuracion.BHorarioLectura) // Fuera de Horario
+            {
+                Config.EscribirLog($"INFO|Ejecuta_Procedimientos| El Servicio esta fuera de Horario.", NombreServicio.Entradas.ToString());
+                // Inserto la alarma
+                _IparametrosOperaciones.EnviaAlerta(new AlertaDTO()
+                {
+                    TipoOPeracion = null,
+                    Folio = null,
+                    Servicio = _configuracion.NombreServicio,
+                    ClaveAviso = ConstantesClaveAviso.Critico,
+                    Descipcion = "Error en ejecuta_procedimientos",
+                    PId = (int)_configuracion.Pid,
+                    NombreProceso = _configuracion.NombreServicio,
+                    Exception = new Exception("El servicio '" + _configuracion.NombreServicio + "' está fuera de horario.")
+                });
+            }
+
+            // Ejecutar procedimientos de Acuerdo al Tipo de Operación
+
+            bool bResultadoOperacion = false;
+
+                try
+                {
+                    foreach (OperacionDTO operacion in operaciones)
+                    {
+                        
+                        contextoTipoOperacion = operacion?.StrTipoOperacion;
+                        contextoFolio = operacion?.StrFolio;
+
+                        using (Logging.BeginOperacionScope(contextoTipoOperacion, contextoFolio))
+                        {
+                            try
+                            {
+                                resumen.Procesadas++;
+                                operacion.PId = (int)_configuracion.Pid;
+                                operacion.StrServicio = ConstantesServicios.NombreServicio;
+                                bResultadoOperacion = await _fabricaServiciosOperacion.ProcesarAsync(contextoTipoOperacion, operacion);
+
+                                if (bResultadoOperacion)
+                                {
+                                    resumen.Ok++;
+
+                                    Config.EscribirLog(String.Format("INFO|Ejecuta_Procedimientos|Se termina procesamiento de folio: {0}", contextoFolio));
+                                }
+                                else
+                                {
+                                    resumen.Error++;
+                                    Config.EscribirLog(String.Format("ERROR|Ejecuta_Procedimientos|Error en la ejecución del folio: {0}", contextoFolio));
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                resumen.Error++;
+                                Config.EscribirLog(String.Format("ERROR|Ejecuta_Procedimientos|Se presenta excepcion para folio {0}: {1}", contextoFolio, ex));
+                                continue;
+                            }
+                        }
+                        
+                    }
+
+
+                }
+                catch (Exception ex)
+                {
+                    using (Logging.BeginOperacionScope(contextoTipoOperacion, contextoFolio))
+                    {
+                        Config.EscribirLog(String.Format("ERROR|Ejecuta_Procedimientos|Se presenta excepcion: {0}", ex.ToString()));
+                        _IparametrosOperaciones.EnviaAlerta(new AlertaDTO()
+                        {
+                            TipoOPeracion = null,
+                            Folio = null,
+                            Servicio = _configuracion.NombreServicio,
+                            ClaveAviso = ConstantesClaveAviso.Critico,
+                            Descipcion = "Error en ejecuta_procedimientos",
+                            PId = (int)_configuracion.Pid,
+                            NombreProceso = _configuracion.NombreServicio,
+                            Exception = ex
+                        });
+                    }
+                }
+                finally 
+                {
+                    try
+                    {
+                        await _IparametrosOperaciones.MarcarServicioEnFinalizacion(_configuracion.NombreServicio);
+                    }
+                    catch (Exception ex) 
+                    {
+                        Config.EscribirLog($"ERROR|No fue posible marcar el servicio en finalización: {ex}");
+                    }
+                }
+
+            return resumen;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene el puerto configurado para el servicio.
+        /// </summary>
+        /// <returns>
+        /// Puerto de escucha configurado.
+        /// </returns>
+        public Task<string> ObtenerPuertoEscucha() => _IparametrosOperaciones.obtenerPuertoEscucha();
+    }
+
+    /// <summary>
+    /// Fábrica para crear y ejecutar servicios por tipo de operación.
+    /// </summary>
+    public class FabricaServiciosOperacion : IFabricaServiciosOperacion
+    {
+        private readonly ProcesadorOperacion _procesadorOperacion;
+
+        public FabricaServiciosOperacion(ProcesadorOperacion procesadorOperacion)
+        {
+            _procesadorOperacion = procesadorOperacion;
+        }
+
+        public Task<bool> ProcesarAsync(string tipoOperacion, OperacionDTO operacion) =>
+            _procesadorOperacion(tipoOperacion, operacion);
+    }
+
 }
-The exception then reaches the per-class catch, which logs it with the folio and returns false (the folio is counted Error, not Ok), and the phase is retried on the next package because the alias did not advance.
-Benefit: a failed status write is logged with its procedure name and counted as an error instead of success, the alias no longer advances over a write that did not happen, and AE-FR-2 defects become visible in the first test run.
-Suggested JIRA: AE-FR-3 (Blocker, MustChange/rewrite).
-AE-FR-4 - Read adapters turn "no row" and "the query failed" into default objects, which produces false success and misleading errors (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ConsultasBDTef.cs:79-128 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTef.cs#L79-L128), ConsultasBDTomi.cs:172-177 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L172-L177), ConsultasBDTomi.cs:212-217 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L212-L217), ConsultasBDTomi.cs:272-278 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L272-L278), ConsultasBDTomi.cs:373-378 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L373-L378), ConsultasBDTomi.cs:402-407 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L402-L407), ConsultasBDSpei.cs:105-116 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpei.cs#L105-L116), ServicioGeneral.cs:104-106 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L104-L106), ServicioGeneral.cs:1574-1593 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1574-L1593)
-Code block (csharp)
-// ConsultasBDTef.cs:113-127 (same shape in 11 TOMI methods and in the SPEI and TEF repositories)
-if (resp?.Data == null) { return new SalidaTefDTO(); }
-return resp.Data.FirstOrDefault() ?? new SalidaTefDTO();
-...
-catch (Exception ex) { Config.EscribirLog($"ERROR|Responde_Entrada_Tef|{ex}"); return new SalidaTefDTO(); }
-Eleven TOMI methods (EjecutarSPValidaEstatusBBVA, EjecutarSPValidaEstatusSPEI, EjecutarSPValidaEstatusAdicionalSPEI, EjecutarSPSPEIStatus, Responde_Salida_Tef, Responde_Entrada_Tef, BuscarEstatusPago, EjecutaSPTefRecibidad, EjecutaSPSPSPEI_Estatus_Recibidas, ConsultaErroresBBVA, ObtenerFolioMestro) and the SPEI and TEF repositories return ?? new X() for no row and new X() from their catch. The null guards in the callers are therefore unreachable (ServicioGeneral.cs:104-106 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L104-L106)), and the default object looks like a valid answer:
-• A failed TEF receipt update is reported as success. SalidaTefDTO.op_error defaults to 0, which is the success code, so Responde_Entrada_TEF builds "0|0" and returns true (ServicioGeneral.cs:1579-1585 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1579-L1585)).
-• An empty SPEI status ends in `BResultado = true`. When SPEI returns nothing or the query fails, ValidaEstatusSPEI continues with an empty SalidaEstatusSPEIDTO and returns success with a null status (ServicioGeneral.cs:139-198 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L139-L198)).
-• An empty BBVA or SPEI TOMI row ends in a misleading error. Nf_estatus == null and Nf_fecha_ejecucion == 0 end in "La fecha de operacion es distinta a la del sistema" (ServicioGeneral.cs:136-137 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L136-L137)), and an empty payment row (Stage == null) is read as "still pending".
-• Configuration and phase reads degrade silently. parametrosSistema() ignores Exito, so a failure yields an empty dictionary: the HORA_LECTURA_* window becomes [00:00, 00:00] and UriReversa stays null (ConsultasBDTomi.cs:72-91 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L72-L91)); DameUltimoProceso returns "" for no row or a failure (ConsultasBDTomi.cs:98-123 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L98-L123)), which the operation classes read as "nothing to do" and return false; DameFolioMaestro, Dame_Estatus_Swift, and ValidaEstatusAdicional_SPID return "" from their catch (ServicioGeneral.cs:1216-1229 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1216-L1229), ServicioGeneral.cs:1195-1199 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1195-L1199), ServicioGeneral.cs:1547-1551 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1547-L1551)), so "no data" and "the query failed" are indistinguishable for their callers (AE-FR-15, AE-FR-19).
-Recommended change: return a tri-state result (Found, NotFound, Failed with the exception), or return null for no row and let a failure propagate to the per-folio catch; remove every ?? new X() and every catch { return new X(); }; and make the callers treat Failed as an error with an alert. For Responde_Entrada_TEF, treat respuesta == null and an unparsed op_error as failure instead of defaulting to 0.
-Benefit: the folio is reported by what actually happened, a failed TEF receipt update is no longer counted as success, and an outage is distinguishable from "nothing to do".
-Suggested JIRA: AE-FR-4 (Major, MustChange/rewrite).
-AE-FR-5 - Replace the machine-specific D:\ServiceCMS references and declare the dependency closure (Blocker)
-Category: MustChange/rewrite Priority: Blocker
-Evidence: ActualizaEstatus.csproj:91-94 (../../General/ActualizaEstatus/ActualizaEstatus/ActualizaEstatus.csproj#L91-L94), ActualizaEstatus.csproj:98-101 (../../General/ActualizaEstatus/ActualizaEstatus/ActualizaEstatus.csproj#L98-L101), AplicacionActualizaEstatus.csproj:52-59 (../../General/ActualizaEstatus/Aplicacion/AplicacionActualizaEstatus.csproj#L52-L59), InfraestructuraActualizaEstatus.csproj:52-55 (../../General/ActualizaEstatus/Infraestructura/InfraestructuraActualizaEstatus.csproj#L52-L55), PruebasUnitarias.csproj:50-52 (../../General/ActualizaEstatus/PruebasUnitarias/PruebasUnitarias.csproj#L50-L52), ActualizaEstatus.csproj:62-128 (../../General/ActualizaEstatus/ActualizaEstatus/ActualizaEstatus.csproj#L62-L128)
-Six references in four projects bind MUFG_T24.dll and SimpleInjector.dll through absolute D:\ServiceCMS\... hint paths: the host (MUFG_T24, SimpleInjector), Aplicacion (both), Infraestructura (MUFG_T24), and the tests (MUFG_T24). A clean checkout cannot build unless a machine has that folder, nothing records which version of the shared library the service was built against, and there is no nuget.config or package feed. SimpleInjector is not declared in the host's packages.config either, so the absolute path is the only thing that binds it. The host additionally references 20 NuGet packages (Microsoft.Extensions.Configuration.* 10.0.3, System.Text.Json 10.0.3, Newtonsoft.Json 13.0.4, and their closure) that no .cs file of this solution uses; MUFG_T24 itself uses System.Text.Json (WindowsTcpPaqueteServiceHostBase.cs:9 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpPaqueteServiceHostBase.cs#L9)), so some are probably its runtime dependencies and the closure should be declared deliberately rather than inherited by accident. This is the standing finding GEN-1; build and tests could not run here for this reason.
-Recommended change: publish MUFG_T24 as a versioned package (or add it as a project/submodule reference), reference SimpleInjector from NuGet, drop the absolute paths, record the library version in the build, and keep only the packages that the closure of MUFG_T24 really needs.
-Benefit: reproducible builds and tests on any machine and in a pipeline, and a recorded shared-library version per deployment.
-Suggested JIRA: AE-FR-5 (Blocker, MustChange/rewrite).
-AE-FR-6 - The shared host base assigns ServiceName inside OnStart, so this host is expected to stop right after it starts (Blocker)
-Category: MustChange/rewrite Priority: Blocker
-Evidence: WindowsServiceHostBase.cs:95-108 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L95-L108), WindowsServiceHostBase.cs:392-402 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L392-L402), WindowsTcpServiceHostBase.cs:15 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpServiceHostBase.cs#L15), WindowsTcpPaqueteServiceHostBase.cs:18 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsTcpPaqueteServiceHostBase.cs#L18), ServiceHost.cs:27 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L27), ServiceHost.cs:33 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L33), ServiceHost.cs:39 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L39), ServiceHost.Designer.cs:4-25 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Designer.cs#L4-L25)
-The host derives from WindowsTcpPaqueteServiceHostBase, which derives from WindowsTcpServiceHostBase, which derives from WindowsServiceHostBase; none of the two TCP classes overrides OnStart, so the inherited method runs ServiceName = NombreServicioLog; inside OnStart (WindowsServiceHostBase.cs:95-99 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L95-L99)). The host never sets a name earlier: its constructor is empty (ServiceHost.cs:39 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L39)) and the designer file has no InitializeComponent(). In .NET Framework the ServiceBase.ServiceName setter throws InvalidOperationException once the service has been registered with the Service Control Manager, even for the same value; OnStart catches it and HandleStartupFailure sets ExitCode = 1 and schedules Stop(). The standing candidate GEN-14 (established by IL inspection and an executed reflection reproduction on .NET Framework 4.8.1 during the ControladorServicios review, CS-FR-1) therefore applies: this host is expected to stop right after it starts when run as a Windows service, without running ParametrizacionesAsync or opening its TCP listener, while a DEBUG console run is expected to work.
-Not verified: a real Service Control Manager start was not performed here, and the audit workstation has no copy of the Release build; this is an expectation derived from the shared code and from the reproduction recorded in GEN-14. Check first (minutes): start the Release build on a test server and look for an Application Event Log entry Error en OnStart containing Cannot change service name when the service is running; a service that stays running means the finding was not reproduced and should be downgraded.
-Recommended change (shared library, internal, no public signature change): assign the name once in the runner before ServiceBase.Run or the debug runner, delete the assignment from OnStart, and add a smoke test that starts the Release build for 60 seconds and asserts the Running status (the centralized fix of GEN-14).
-Benefit: the host starts under the Service Control Manager, and a start-up failure can no longer look like a normal start followed by a stop.
-Suggested JIRA: AE-FR-6 (Blocker, MustChange/rewrite).
-AE-FR-7 - No cancellation reaches any database call, so a stop request cannot interrupt a package (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ServiceHost.cs:127-138 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L127-L138), ServiceHost.cs:143-159 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L143-L159), IOperacionServicio.cs:14-29 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IOperacionServicio.cs#L14-L29), IParametrosOperaciones.cs:12-47 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IParametrosOperaciones.cs#L12-L47), OperacionServicio.cs:45-47 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L45-L47)
-ProcesarPaqueteAsync receives a CancellationToken token and never passes it on (ServiceHost.cs:127-134 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L127-L134)); none of the 35 methods of the seven application interfaces (IOperacionServicio 2, IParametrosOperaciones 22, IOperacionesCms 1, IOperacionesSpei 4, IOperacionesSpei2 1, IOperacionesSpid 3, IOperacionesTef 2) accepts a token, and Aplicacion contains no CancellationToken at all. A stop request can only wait: shutdown relies on EsperarClientesActivosAsync(cleanupCt) (ServiceHost.cs:152 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L152)), so a package that is in the middle of a long folio list (each folio is several sequential database and SOAP calls, AE-FR-13) runs to completion or until the cleanup token expires, and a shutdown that expires mid-package leaves folios between two writes (AE-FR-3).
-Recommended change: add CancellationToken to IOperacionServicio.EjecutaProcedimientosAsync and to the operation entry points, check it between folios and between phases, pass it to the repositories (the shared adapter already accepts one), and treat cancellation as "stop before the next folio" rather than as an error.
-Benefit: the service stops at a folio boundary within the shutdown budget instead of in the middle of a multi-write sequence.
-Suggested JIRA: AE-FR-7 (Major, MustChange/rewrite).
-AE-FR-8 - Failures raise no alert, and the alerts that exist are incomplete and fire-and-forget (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: OperacionServicio.cs:163-178 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L163-L178), OperacionServicio.cs:213-218 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L213-L218), OperacionServicio.cs:225-242 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L225-L242), ServicioGeneral.cs:207-212 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L207-L212), ServicioGeneral.cs:495-500 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L495-L500), ServicioGeneral.cs:748-751 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L748-L751), ConsultasBDTomi.cs:52 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L52), Alertas.cs:99-175 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Alertas/Alertas.cs#L99-L175)
-The solution creates seven alerts (new AlertaDTO) for a service that handles payment status:
-• No alert per failed folio. The per-folio catch in the orchestrator logs and counts the error but raises nothing (OperacionServicio.cs:213-218 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L213-L218)); each of the 37 operation classes catches its own exceptions, logs, and returns false with no alert; the BBVA validation catch logs only (ServicioGeneral.cs:748-751 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L748-L751)). A payment stuck in a phase raises no signal.
-• The alerts that exist are incomplete. The four alerting catch blocks of ServicioGeneral send Folio, TipoOPeracion, and NombreProceso only: no ClaveAviso, Descipcion, Servicio, PId, or Exception (ServicioGeneral.cs:207-212 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L207-L212), ServicioGeneral.cs:495-500 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L495-L500), ServicioGeneral.cs:606-611 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L606-L611), ServicioGeneral.cs:884-889 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L884-L889), ServicioGeneral.cs:1164-1169 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1164-L1169)). The shared writer inserts them with a null severity and a null exception without validation (Alertas.cs:144-155 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Alertas/Alertas.cs#L144-L155)); whether the alert procedure accepts a null @cveError was not checked.
-• Delivery is fire-and-forget. EnviaAlerta is alerta.InsertarAlerta(alertaDto) with the returned Task<bool> dropped (ConsultasBDTomi.cs:52 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L52)): a failed insert is neither awaited nor observed, its Exito is never read, and the shared writer's own rethrow of the original exception (Alertas.cs:164-175 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Alertas/Alertas.cs#L164-L175)) lands in an unobserved task.
-• The one frequent alert is noise. The out-of-window alert fires for every package and processing continues anyway (AE-FR-9).
-Recommended change: raise one alert per failed folio and phase with ClaveAviso, Descipcion, Servicio, PId, and the exception (build the DTO in one helper so the five copies cannot drift), await the insert (or queue it) and log a failed delivery, and rate-limit the out-of-window alert to one per window transition.
-Benefit: a payment that cannot advance becomes visible to operations, and an alert that fails to insert is itself logged.
-Suggested JIRA: AE-FR-8 (Major, MustChange/rewrite).
-4.2 Aplicacion (Tier 0)
-MustChange / Rewrite
-AE-FR-9 - The schedule window is dead or misleading: it neither gates the work nor stays quiet (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: OperacionServicio.cs:66 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L66), OperacionServicio.cs:78-86 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L78-L86), OperacionServicio.cs:119-127 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L119-L127), OperacionServicio.cs:143-178 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L143-L178), ConfiguracionServicio.cs:12-16 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L12-L16), ServiceHost.cs:78-79 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L78-L79), ConversionHelper.cs:1339-1348 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConversionHelper.cs#L1339-L1348), ACTUALIZA_ESTATUS_UT.cs:118-135 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L118-L135)
-The orchestrator copies a reading-window block from another service (the parameters are HORA_LECTURA_INICIO and HORA_LECTURA_FIN, and three log lines still pass NombreServicio.Entradas, OperacionServicio.cs:151 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L151), OperacionServicio.cs:159 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L159), OperacionServicio.cs:165 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L165)), and the block has five problems:
-• The validation is unreachable. StrHoraLecturaInicio and StrHoraLecturaFin are non-nullable TimeSpan members, so the == null tests that throw "No se especifica la hora ..." can never be true (OperacionServicio.cs:119-123 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L119-L123); compiler warning CS0472). A missing HORA_LECTURA_* row, or a failed parameter read (AE-FR-4), leaves 00:00:00 and the window becomes [00:00, 00:00].
-• It neither gates nor stays quiet. Outside the window the code logs, inserts a CRITICO alert ("Error en ejecuta_procedimientos"), and then continues: there is no return or throw, so every folio of the package is processed anyway (OperacionServicio.cs:163-178 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L163-L178)). Every out-of-window package therefore creates an alert row and still does its work (the GEN-10 pattern, with the test at ACTUALIZA_ESTATUS_UT.cs:118-135 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L118-L135) pinning that behavior).
-• The logged time is a constant. timeHoraSistema is hard-coded to 09:00:00 (OperacionServicio.cs:66 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L66)); it feeds boHoraInicioOperacion, whose only use is the word "Inicio" or "Fin" in a log line, and is the "HoraSistema" printed on three log lines (OperacionServicio.cs:126-127 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L126-L127)); the real time is the minute-truncated StrFechaSistema (OperacionServicio.cs:143-144 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L143-L144)).
-• Transitions cannot be detected. The configuration is a fresh scoped clone per package (ServiceHost.cs:78-79 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L78-L79)), so BHorarioLectura always starts false: "Inicio horario" is logged on every in-window package and "Termina horario" never.
-• The comparison is fragile. The shared parser ConversionHelper.ParseTimeSpanRequerido accepts a bare number such as 0600 as 600 days (ConversionHelper.cs:1339-1348 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConversionHelper.cs#L1339-L1348); the same behavior is recorded as CS-FR-5 in ControladorServicios_Recommendations.md (./ControladorServicios_Recommendations.md)), the check is inclusive at minute resolution, and it cannot express an overnight window.
-Recommended change: decide what the window is for. If it must gate a request-driven service, return early (without an alert per package, or alert once per transition from persisted state); if it does not, delete the block, the hard-coded time, and the two HORA_LECTURA_* parameters it reads. In both cases parse the values strictly (exact hh:mm format), read the time once from the injected clock, and remove the NombreServicio.Entradas residue.
-Benefit: the window means one thing, out-of-window packages stop creating alert noise or stop doing work, and the logs show the real time.
-Suggested JIRA: AE-FR-9 (Major, MustChange/rewrite).
-AE-FR-10 - The execution flag is set before validation and is a single per-service flag toggled by concurrent packages (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: OperacionServicio.cs:58 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L58), OperacionServicio.cs:62-123 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L62-L123), OperacionServicio.cs:174 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L174), OperacionServicio.cs:243-253 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L243-L253), ServiceHost.cs:119-121 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L119-L121), ConsultasBDTomi.cs:59-66 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L59-L66)
-MarcarServicioEnEjecucion runs at the top of the method (OperacionServicio.cs:58 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L58)), but MarcarServicioEnFinalizacion is reached only from the finally of the later try that wraps the folio loop (OperacionServicio.cs:243-253 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L243-L253)). Any exception between the two (the parameter query, ParseTimeSpanRequerido rejecting a malformed HORA_LECTURA_* value at lines 79 and 84, or the (int)Pid cast at line 174) escapes the method with the database flag still "en ejecucion" and propagates to the host (GEN-7, partial: the finalization exists but covers only the loop). Separately, the flag is keyed by the service name and toggled by every package while the listener runs up to LimiteConcurrencia ?? 5 packages concurrently (ServiceHost.cs:119-121 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L119-L121)): the first package to finish marks the service as finalized while the others are still running (the same pattern as LEC-FR-45 in Lectura_Recommendations.md (./Lectura_Recommendations.md)). The shared ActualizaEJecucion throws when its procedure fails and ActualizaTerminacion returns Exito = false without throwing, as recorded in CS-FR-6 of the ControladorServicios report.
-Recommended change: put the whole body between the mark and the finalization in one try/finally; mark "in execution" after the parameters are validated; and either count active packages (finalize when the count reaches zero) or drop the per-package flag and keep the service-level one in the host.
-Benefit: the flag matches reality after a failure, and concurrent packages no longer finalize each other.
-Suggested JIRA: AE-FR-10 (Major, MustChange/rewrite).
-AE-FR-11 - The T24 reversal sends the service account's user name and password in clear text (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ServicioGeneral.cs:1421-1437 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1421-L1437), OperacionServicio.cs:102-112 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L102-L112), ConfiguracionServicio.cs:31 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L31), services1.xsd:736-742 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/services1.xsd#L736-L742), configuration91.svcinfo:75-77 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/configuration91.svcinfo#L75-L77), T24WebServicesImplService.wsdl:75 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/T24WebServicesImplService.wsdl#L75), Reference.svcmap:22 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.svcmap#L22)
-Code block (csharp)
-var wsReverseFTRef = new wsReverseFT.T24WebServicesImplClient(new BasicHttpBinding(), new EndpointAddress(endpointWebService));
-var wrc = new wsReverseFT.webRequestCommon { company = _Configuracion.StrCompanyName,
-                                              password = _Configuracion.StrPasswdReg,
-                                              userName = _Configuracion.StrUserNameReg };
-A default BasicHttpBinding uses BasicHttpSecurityMode.None, which WCF does not combine with an https address (the same default and the resulting ArgumentException were reproduced on .NET Framework 4.8.1 during the Despachador review, _Despachador_FreshReview_Progress.md (./_Despachador_FreshReview_Progress.md)), so the call is HTTP by construction. The generated schema carries the T24 userName and password as plain string elements of the SOAP body (services1.xsd:736-742 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/services1.xsd#L736-L742)); the generated artifacts all point at http://10.97.38.163:8085/FT.RETORNO.REV/services (Reference.svcmap:22 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.svcmap#L22), T24WebServicesImplService.wsdl:75 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/T24WebServicesImplService.wsdl#L75), configuration91.svcinfo:115 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/configuration91.svcinfo#L115)), and the model keeps the password in an ordinary string property (ConfiguracionServicio.cs:31 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L31)). The user name and endpoint are logged at INFO on every package (AE-FR-26).
-Not verified: the live endpoint is the database parameter WS_REVERSA_ENDPOINT, whose value is not in the repository, so the generated address shows the design default and not necessarily the production transport (open question 4). This is the same family as the plaintext T24 SOAP findings recorded in the Lectura and Despachador reviews.
-Recommended change: call the endpoint over HTTPS with certificate validation (BasicHttpBinding(BasicHttpSecurityMode.Transport), or TransportWithMessageCredential), take the endpoint and security mode from per-environment configuration, fetch the credential just before the call and clear it afterwards, stop logging the user name and endpoint, and give the T24 account only the rights the reversal needs.
-Benefit: the T24 credential of the service account is no longer readable on the network or in a trace.
-Suggested JIRA: AE-FR-11 (Major, MustChange/rewrite).
-AE-FR-12 - The reversal client is never closed, is built outside the try, and its answer is judged only by the envelope (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ServicioGeneral.cs:1418-1503 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1418-L1503), ServicioGeneral.cs:1600 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1600), services1.xsd:787-810 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/services1.xsd#L787-L810), services1.xsd:9-29 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/services1.xsd#L9-L29), Reference.cs:7264 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.cs#L7264), configuration91.svcinfo:33-38 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/configuration91.svcinfo#L33-L38)
-• The client is leaked. wsReverseFTRef is never Close()d, Abort()ed, or disposed: not after a success, not after a failed status (ServicioGeneral.cs:1484 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1484)), and not in the catch (ServicioGeneral.cs:1494-1501 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1494-L1501)); a ClientBase<T> owns a channel factory, so each reversal is expected to leave one behind until finalization (grep: no Close or Abort anywhere in the solution).
-• Construction is outside the `try`. The endpoint lookup and the client construction run before the try (ServicioGeneral.cs:1421-1424 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1421-L1424)), so a missing UriReversa throws to the caller instead of being mapped to a failed result, and a blank string passes the != null test (ServicioGeneral.cs:1600 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1600)) and fails inside EndpointAddress.
-• Success is the envelope only. The method decides on Status.successIndicator == Success and on the absence of the text "No records were found..." (ServicioGeneral.cs:1481 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1481)). The operation is an enquiry that returns a list of MUFGEFTREVRECORDType records, each with an ID and a RESPONSE text (services1.xsd:805-810 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/services1.xsd#L805-L810), services1.xsd:9-29 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/services1.xsd#L9-L29)); the service never reads them, so a record-level failure inside an envelope marked Success would count as reversed (open question 4).
-• Default quotas. new BasicHttpBinding() keeps the 65,536-byte message and buffer limits and the one-minute send timeout (the generated snapshot shows the same maxBufferSize, configuration91.svcinfo:33-38 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/configuration91.svcinfo#L33-L38)), so a large reply is expected to become an exception that is reported as a failed reversal and retried (AE-FR-13).
-Recommended change: wrap the call so that the client is always closed or aborted, build it inside the try, read the per-record RESPONSE, and set the binding quotas and timeouts explicitly.
-Code block (csharp)
-var client = new wsReverseFT.T24WebServicesImplClient(binding, new EndpointAddress(endpoint));
-try { response = await client.APLICAREVERSOFTAsync(req); client.Close(); }
-catch { client.Abort(); throw; }
-Benefit: no leaked channel factory per reversal, a configuration error becomes a failed result instead of an escaping exception, and a record-level T24 failure is no longer counted as a reversal.
-Suggested JIRA: AE-FR-12 (Major, MustChange/rewrite).
-AE-FR-13 - The T24 reversal runs first, and the writes after it are neither atomic nor idempotent (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ServicioGeneral.cs:400-421 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L400-L421), ServicioGeneral.cs:427-456 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L427-L456), ServicioGeneral.cs:1078-1126 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1078-L1126), ServicioGeneral.cs:1481 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1481), ServicioGeneral.cs:1494-1501 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1494-L1501)
-For a rejected, cancelled, or returned (CN, CL, RB) payment the SPEI path (FXD, ServicioGeneral.cs:400-421 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L400-L421)) and the SPID path (SPID, ServicioGeneral.cs:1078-1097 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1078-L1097)) call the T24 reversal first and only then update CMS, TOMI, and the work plan (ServicioGeneral.cs:427-456 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L427-L456), ServicioGeneral.cs:1102-1126 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1102-L1126)), with no transaction, no compensation, and no record of the reversal itself:
-• bCorrecto is false for a failed status, for any exception (including a timeout after T24 has already applied the reversal, ServicioGeneral.cs:1494-1501 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1494-L1501)), and for the text "No records were found that matched the selection criteria" (ServicioGeneral.cs:1481 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1481)). A retry of an already reversed FT therefore lands in the "reverso fallido" branch, which writes work-plan option 7 (SPEI) or 13 (SPID) and returns false (ServicioGeneral.cs:412-419 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L412-L419), ServicioGeneral.cs:1089-1096 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1089-L1096)) although the money was returned. Nothing checks the FT state before reversing.
-• Combined with AE-FR-2, AE-FR-3, and AE-FR-32 (expected, not executed): the SPID CN/CL/RB branch tolerates a failed reason lookup, reverses the payment in T24, and then calls a CMS procedure that has no definition in the project and a TOMI procedure whose dynamic text cannot execute as written; both results are discarded and the method returns true (ServicioGeneral.cs:1067-1126 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1067-L1126), ServicioGeneral.cs:1156-1158 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1156-L1158)), so the state machine closes the phase. The money is expected to be back in the account while CMS and TOMI still show the original payment state, and nothing in the logs says so.
-• Which variants reverse is decided by an exact type test: "FXD" on the SPEI side (ServicioGeneral.cs:400 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L400)) and OperacionSPID on the SPID side (ServicioGeneral.cs:1078 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1078)), so FXD_GPH, FXD_H2H, FXD_Local, SPID_GPH, and the other variants never reach the reversal (open question 7).
-• The failure is logged at INFO, and the SPID success branch logs "Error al reversar el pago" (ServicioGeneral.cs:1083 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1083)).
-Recommended change: persist a "reversal applied" marker (a work-plan state or a column) before any other write and have the retry read it; treat "No records were found" as success only after the FT is proven to be in the reversed state; order the steps as intent, reversal, result; move the TOMI and work-plan writes of one folio into one stored procedure with a transaction; and make the type test a data-driven attribute of the operation instead of a string literal in two methods.
-Benefit: a payment is reversed exactly once, a retry converges to the same final state, and a failure between the reversal and the CMS or TOMI write can be repaired instead of repeated.
-Suggested JIRA: AE-FR-13 (Major, MustChange/rewrite).
-AE-FR-14 - SPEI, SPID, and BBVA status validation has dead branches, writes before it validates, and compares against the wrong business date (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: OperacionServicio.cs:69 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L69), ServicioGeneral.cs:122-137 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L122-L137), ServicioGeneral.cs:144-154 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L144-L154), ServicioGeneral.cs:566 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L566), ServicioGeneral.cs:600-614 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L600-L614), ServicioGeneral.cs:807-829 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L807-L829), ServicioGeneral.cs:993-998 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L993-L998), ServicioGeneral.cs:1070-1075 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1070-L1075), DB/IT24/094 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/094%20SP%20ssp_Consultar_Errores_BBVA.sql#L1-L7)
-• Wrong business date. The orchestrator sets strFechayyyyMMdd from the server clock (OperacionServicio.cs:69 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L69)) and the three validators compare it with the operation's execution date (ServicioGeneral.cs:136 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L136), ServicioGeneral.cs:566 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L566), ServicioGeneral.cs:807 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L807)). An operation whose business date differs from the server date (weekend or holiday processing, just after midnight, a T24 date ahead of the server) throws "La fecha de operacion es distinta a la del sistema", alerts, and returns false. The database business date (usp_ObtenerFechaSistema) is read at start-up and copied into the configuration (ServiceHost.cs:113 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L113)) but never used (open question 5). In ValidaEstatusSPEI the CONP/CONF status write (ServicioGeneral.cs:122-132 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L122-L132)) runs before this check, so a state change is persisted and the call then fails.
-• Dead branches. if (string.IsNullOrEmpty(StrCadenaRegreso)) can never be true because the string is built with two pipes (ServicioGeneral.cs:144 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L144), ServicioGeneral.cs:154 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L154); the SPID twin at ServicioGeneral.cs:822-829 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L822-L829)); the results of ValidaEstatusAdicional_SPID and EjecutarSPValidaEstatusAdicionalSPEI are discarded (ServicioGeneral.cs:154 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L154), ServicioGeneral.cs:194 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L194), ServicioGeneral.cs:829 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L829), ServicioGeneral.cs:873 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L873)), so the "additional validation" has no observable effect; the string is built only to be split again to read an element that is already known.
-• BBVA pending is an error. A payment stage that is neither SUCC nor DECL falls through to return false after logging "Se termina Procesamiento" (ServicioGeneral.cs:600-614 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L600-L614)), so a still-pending payment is counted as an error (AE-FR-15).
-• BBVA reason is generic. ConsultaErroresBBVA() takes no folio and ssp_Consultar_Errores_BBVA returns the single active Error_Code = 'DEFAULT' row (DB/IT24/094 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/094%20SP%20ssp_Consultar_Errores_BBVA.sql#L1-L7)), so every BBVA rejection written to CMS and TOMI carries the same message and id, never the payment's own error; the CMS procedure takes the reason as VARCHAR(18) (DB/Bot/030 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/030%20SP%20MUFG_MX2_Comunes_ActualizaFormatoRechazadoCms_BBVA.sql#L2-L22)), which truncates a longer text when the RPC value is converted.
-• SPID twin drift. The SPID branches look up the reason with tipoPago = EstatusSPEI ("SPEI") although the message says SPID (ServicioGeneral.cs:993-998 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L993-L998), ServicioGeneral.cs:1070-1075 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1070-L1075)); a missing reason is tolerated in the SPID CN/CL/RB branch (razonRechazo?.Codigo) while the SPEI twin throws (ServicioGeneral.cs:395-396 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L395-L396)); the RECC branches pass a null reason and code (ServicioGeneral.cs:468-475 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L468-L475), ServicioGeneral.cs:1138-1145 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1138-L1145)).
-Recommended change: compare against the database business date, read once per package; run every validation before the first write; delete the two dead branches or implement them; return a pending outcome (AE-FR-15); look up the BBVA reason by the payment's own error code; and make the SPEI and SPID reason lookups one shared method with the rail as a parameter and one explicit rule for a missing reason.
-Benefit: operations on a non-calendar business date are processed, a failed validation does not leave a half-written state, and the rejection reasons shown to customers are the real ones.
-Suggested JIRA: AE-FR-14 (Major, MustChange/rewrite).
-AE-FR-15 - The outcome model has two states, so "pending" is success in some families and an error in others (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: OperacionServicio.cs:199-211 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L199-L211), Servicio_FXD.cs:122-139 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L122-L139), Servicio_FXI.cs:182-184 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L182-L184), Servicio_FXILocal.cs:178-179 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXILocal.cs#L178-L179), Servicio_FXI_GPH.cs:189-190 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_GPH.cs#L189-L190), Servicio_FXT.cs:93-144 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT.cs#L93-L144), Servicio_MercadoDinero.cs:120 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L120), Servicio_MercadoDinero.cs:179 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L179)
-Every class returns a Boolean that the orchestrator turns into Ok or Error; there is no third state. The result is inconsistent across families:
-• FXD, FXT, ENT, and MercadoDinero return true when the downstream rail has not finished, so a folio that is still waiting is logged "Se termina procesamiento" and counted Ok (Servicio_FXD.cs:122-139 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L122-L139) and its three variants).
-• The four FXI classes return false while SWIFT has not released the message (Servicio_FXI.cs:182-184 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L182-L184) and its three variants), so a normal wait is counted Error and logged "ERROR|Ejecuta_Procedimientos|Error en la ejecucion del folio"; Dame_Estatus_Swift returns "" when the database read fails, so an outage is indistinguishable from "waiting for SWIFT" and repeats forever without an alert (AE-FR-4).
-• A phase alias that matches none of a class's phases falls through to return true (counted Ok, nothing done), and the FXT classes run TerminarProceso even when the TOMI status is neither PROC nor RECC because there is no else (Servicio_FXT.cs:93-144 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXT.cs#L93-L144)).
-• The FXI and MercadoDinero polls rewrite the work-plan state on every call (Servicio_FXI.cs:146-148 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L146-L148), Servicio_MercadoDinero.cs:120 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L120), Servicio_MercadoDinero.cs:179 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L179)).
-The dashboard values Procesadas, Ok, and Error that the dispatcher receives therefore mean different things per operation type.
-Recommended change: return a typed outcome (Advanced, Pending, Failed) from every operation, count the three separately in RespuestaResumenDto, reserve Error for real failures, and make an unknown alias a logged Pending or Failed with the alias in the message.
-Benefit: the package summary distinguishes progress, waiting, and failure, and monitoring can alert on the failures only.
-Suggested JIRA: AE-FR-15 (Major, MustChange/rewrite).
-AE-FR-16 - The FXI family has an inverted wait condition, a phase that never closes, a throw while waiting, and a premature TOMI read (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Servicio_FXI_GPH.cs:103-109 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_GPH.cs#L103-L109), Servicio_FXI_H2H.cs:100-106 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_H2H.cs#L100-L106), Servicio_FXI.cs:105-106 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L105-L106), Servicio_FXILocal.cs:99-100 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXILocal.cs#L99-L100), Servicio_PaP_FXI.cs:106-115 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L106-L115), Servicio_FXILocal.cs:136-183 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXILocal.cs#L136-L183), Servicio_PaP_FXI.cs:169-172 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L169-L172), Servicio_PaP_FXI.cs:236-282 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L236-L282), Servicio_FXI.cs:80-84 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L80-L84)
-• Inverted condition. In VALIDA_ESTATUS_TOMI, FXI, FXI_Local, and PaP_FXI wait while the TOMI status is not final (if (!(PROC || AUAB || RECC)) return true;), whereas FXI_GPH and FXI_H2H do switch (Nf_estatus) { case PROC: case AUAB: case RECC: return true; }, which waits when the status is final (Servicio_FXI_GPH.cs:103-109 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_GPH.cs#L103-L109), Servicio_FXI_H2H.cs:100-106 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_H2H.cs#L100-L106)). The alias and the log text are identical ("Confirmando el estatus de la operacion en TOMI"), so a GPH or H2H operation with a final TOMI status writes work-plan option 1 and returns true on every call without TerminarProceso and is expected never to leave this phase (needs functional confirmation).
-• A phase that never closes. Servicio_FXILocal nests the TerminarProceso and the alias refresh inside the non-RECC branch (Servicio_FXILocal.cs:136-183 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXILocal.cs#L136-L183)), so for RECC nothing closes SWIFT_ESTATUS; FXI, FXI_GPH, and FXI_H2H close it.
-• A throw while waiting. Servicio_PaP_FXI throws for every SWIFT status other than PROC (Servicio_PaP_FXI.cs:169-172 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L169-L172)), so an unreleased message (empty status, or a failed read turned into "") raises an error with a stack trace on every poll where the FXI classes wait; its final phase handles PROC and RECC only (Servicio_PaP_FXI.cs:236-282 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L236-L282)) although the first phase accepts AUAB, so an AUAB operation closes without a CMS or TOMI update.
-• A premature read. The FXI classes read the TOMI record before testing the alias (Servicio_FXI.cs:80-84 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L80-L84)), so a missing or failed read throws even when the current phase needs no TOMI data.
-Recommended change: extract one FXI phase template (the four classes differ only in tables and procedure names), correct the GPH and H2H orientation, give the RECC branch of FXILocal the same closing step as its siblings, make the wait a Pending outcome (AE-FR-15), and read TOMI only in the phases that use it; add one test per phase and variant.
-Benefit: FXI operations of every variant leave VALIDA_ESTATUS_TOMI and SWIFT_ESTATUS, and waiting for SWIFT no longer produces errors.
-Suggested JIRA: AE-FR-16 (Major, MustChange/rewrite).
-AE-FR-17 - The ENT_* receipt handlers use the wrong key, match only the first row, or force success (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Servicio_ENT_SPEI.cs:77 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L77), Servicio_ENT_SPEI.cs:95 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L95), Servicio_ENT_SPEI.cs:160-184 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L160-L184), Servicio_ENT_SPEI2.cs:103 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI2.cs#L103), Servicio_ENT_COAS.cs:56-97 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L56-L97), Servicio_ENT_TEF.cs:75-106 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_TEF.cs#L75-L106), Servicio_ENT_SPID.cs:202-283 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L202-L283), SPEI script:26-29 (../../General/ActualizaEstatus/Infraestructura/Scripts/Actua%C3%B1izaEstatus_StoredProcedures_SPEI.sql#L26-L29)
-• ENT_SPEI uses the wrong key. It selects the record by Op_clave (Servicio_ENT_SPEI.cs:77 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L77)) but guards the response with Op_folio (Servicio_ENT_SPEI.cs:95 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L95)); ENT_SPEI2 correctly uses Op_clave (Servicio_ENT_SPEI2.cs:103 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI2.cs#L103)). In the SPEI database op_clave is numeric(18,0) and opfolio numeric(5,0) (SPEI script:26-29 (../../General/ActualizaEstatus/Infraestructura/Scripts/Actua%C3%B1izaEstatus_StoredProcedures_SPEI.sql#L26-L29)), so they normally differ and the response is skipped while bProcesado (initialized true) lets the phase close. The class also reassigns dicParametros to {folio} (Servicio_ENT_SPEI.cs:160 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L160)), so the second work-plan call (Servicio_ENT_SPEI.cs:184 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L184)) omits tipo_operacion and opcion, which the procedure requires (AE-FR-2); ENT_SPEI2 keeps the full dictionary and sets opcion = 2.
-• ENT_COAS matches the first row only. The date-wide ssp_ENT_COAS_ConsultarBmxPagDia result is reduced to its first row and compared with the folio (Servicio_ENT_COAS.cs:59-60 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L59-L60), Servicio_ENT_COAS.cs:78 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L78)); SPEI, SPEI2, and SPID filter the list by folio. A non-first folio is skipped silently and the phase is closed (Servicio_ENT_COAS.cs:86-97 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L86-L97)). The procedure it would call also overflows (AE-FR-32), and the class is one of the ten of AE-FR-1.
-• ENT_TEF forces success. It discards the Boolean of Responde_Entrada_TEF and sets bProcesado = true (Servicio_ENT_TEF.cs:104-105 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_TEF.cs#L104-L105)), hard-codes CausaDevolucion = 0, and matches only the first row that the date-wide EjecutaSPTefRecibidad returns (Servicio_ENT_TEF.cs:75-76 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_TEF.cs#L75-L76)), so only one TEF receipt per date can ever match; with AE-FR-4 a receipt can be closed without any update.
-• Silent skip and repeated date-wide runs. When the date-wide list has no entry for the folio, ENT_SPEI, ENT_SPID, ENT_COAS, and ENT_TEF skip the response, call TerminarProceso, and advance the state (ENT_SPEI2 throws, Servicio_ENT_SPEI2.cs:87-88 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI2.cs#L87-L88)); the date-wide procedure, documented as "actualiza y obtiene", runs for every folio of the package and before the alias is tested.
-• ENT_SPID devolutions. ProcesarDevolucionEntSpid takes LastOrDefault() of an unordered result (Servicio_ENT_SPID.cs:215 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L215)), converts a false response into success after writing work-plan option 2 (Servicio_ENT_SPID.cs:160-166 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L160-L166)), looks up the reason with TipoPago = "SPID" (Servicio_ENT_SPID.cs:247 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L247)) while the SPID twin in ServicioGeneral uses "SPEI" (AE-FR-14), runs six sequential writes across TOMI and CMS with no transaction and every result discarded, and uses a literal table name (Servicio_ENT_SPID.cs:311 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPID.cs#L311)).
-Recommended change: filter the date-wide list by folio in all four handlers, treat an absent folio as a failure (not a skip), check the Boolean of every response before advancing, use Op_clave in ENT_SPEI, keep the full dictionary for the second plan call, and run the date-wide procedure once per package.
-Benefit: each receipt is answered once and only when it was matched, and a missing receipt is visible instead of being closed.
-Suggested JIRA: AE-FR-17 (Major, MustChange/rewrite).
-AE-FR-18 - The TEF handlers mark a rejected TEF as accepted, ignore the response, and hard-code the cause (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Servicio_TEF.cs:106 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF.cs#L106), Servicio_TEF.cs:114-142 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF.cs#L114-L142), Servicio_TEF_GPH.cs:110-122 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_GPH.cs#L110-L122), Servicio_TEF_H2H.cs:110-122 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF_H2H.cs#L110-L122), Servicio_PaP_TEF.cs:130 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L130), Servicio_PaP_TEF.cs:144-151 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L144-L151), ProcedimientoAlmacenado.cs:144-145 (../../General/ActualizaEstatus/Aplicacion/Enums/ProcedimientoAlmacenado.cs#L144-L145), DB/Bot/006 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/006%20SP%20MUFG_MX2_ActualizaFormatoAceptadoCms.sql#L12-L17), DB/Bot/007 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/007%20SP%20MUFG_MX2_TEF_ActualizaFormatoRechazadoCms.sql#L1)
-• The rejected path calls the accepted procedure. The RECC branch of Servicio_TEF executes sp_ActualizaFormatoAceptadoCms_TEF (Servicio_TEF.cs:119 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF.cs#L119)), although sp_ActualizaFormatoRechazadoCms_TEF exists (ProcedimientoAlmacenado.cs:145 (../../General/ActualizaEstatus/Aplicacion/Enums/ProcedimientoAlmacenado.cs#L145)) and is what the other families use for rejection. The accepted procedure (tbl_tef_formato set to APBT, DB/Bot/006 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/006%20SP%20MUFG_MX2_ActualizaFormatoAceptadoCms.sql#L12-L17)) would have marked a rejected TEF accepted in CMS. Today it cannot succeed because it requires @sft and the call passes only folio (AE-FR-2), and the rejected counterpart is a "No se encontro el SP" placeholder in the project (DB/Bot/007 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/007%20SP%20MUFG_MX2_TEF_ActualizaFormatoRechazadoCms.sql#L1)); the CMS format of a TEF is therefore not updated in either branch.
-• The response outcome is ignored. Responde_Salida_Tef is called and its result discarded in Servicio_TEF (Servicio_TEF.cs:133 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF.cs#L133)), Servicio_TEF_GPH, Servicio_TEF_H2H, and Servicio_PaP_TEF (Servicio_PaP_TEF.cs:144-151 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L144-L151)); the cause is the constant "1" (CausaDevolucionUno); and the call runs through the TOMI repository (sp_InterfaceTOMI_TEF_Cambia_Estatus_Enviadas, a platform procedure that is not in the project). When the TEF-side response fails, the TOMI and work-plan status still move to "rejected".
-• Servicio_TEF_GPH and Servicio_TEF_H2H have no CMS repository and never update CMS; whether that is intended was not confirmed, and both classes are among the ten of AE-FR-1.
-Recommended change: call the rejected procedure (create it in Bot if it does not exist), pass sft and the reason, check the result of the TEF response before moving the plan, and derive the cause from the data instead of a constant.
-Benefit: a rejected TEF is recorded as rejected in CMS, and the TEF counterparty and the platform stay consistent.
-Suggested JIRA: AE-FR-18 (Major, MustChange/rewrite).
-AE-FR-19 - PaP master consolidation closes the master with the wrong option, treats an unapproved master as approved, and does not check an empty master folio (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Servicio_PaP_SPID.cs:174-215 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L174-L215), Servicio_PaP_FXD.cs:171-211 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L171-L211), Servicio_NOM_FXD.cs:168-224 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L168-L224), Servicio_PaP_FXI.cs:289-326 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L289-L326), Servicio_PaP_FXT.cs:153-186 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L153-L186), Servicio_PaP_TEF.cs:166-205 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L166-L205), ServicioGeneral.cs:1216-1229 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1216-L1229), DB/IT24/038 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/038%20SP%20usp_PaP_SPID_ActualizaPlanTrabajoMaestro.sql#L23-L41), DB/Bot/010 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/010%20SP%20MUFG_MX2_PaP_FXD_ActualizaFormatoCms.sql#L15-L33)
-• Wrong plan option for the master. Servicio_PaP_SPID closes the approved master with dicParametros2["opcion"] = 2 (Servicio_PaP_SPID.cs:202-205 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L202-L205)). In the procedure, option 2 sets TERMINANDO for folio = @folio while the status is SPID, and option 3 sets PROCESADA for folio = 0 AND folio_maestro = @folio (DB/IT24/038 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/038%20SP%20usp_PaP_SPID_ActualizaPlanTrabajoMaestro.sql#L23-L41)). Its siblings use the master option (Servicio_PaP_FXD option 3 at Servicio_PaP_FXD.cs:200 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L200), PaP_FXI option 6, PaP_TEF and PaP_FXT option 4, NOM_FXD option 5). With option 2 and the master folio the master plan row is not moved to PROCESADA. All other families' options (1 to 6) were checked against the procedure semantics and agree.
-• An unapproved master is written as approved. NOM_FXD, PaP_FXI, PaP_FXT, PaP_SPID, and PaP_TEF set opcion = 2 in the not-approved branch; Servicio_PaP_FXD leaves opcion = 1 (Servicio_PaP_FXD.cs:205-211 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L205-L211)). In the CMS procedure option 1 sets estatus = 'APBT' and "Formato aceptado" together with the counters, and option 2 sets only the counters (DB/Bot/010 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/010%20SP%20MUFG_MX2_PaP_FXD_ActualizaFormatoCms.sql#L15-L33)), so the not-approved path of PaP_FXD marks a master with pending items as accepted.
-• An empty master folio is not checked. DameFolioMaestro returns "" for no row or a failure (ServicioGeneral.cs:1216-1229 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1216-L1229)) and six classes use it without a guard (Servicio_NOM_FXD.cs:181-185 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L181-L185), Servicio_PaP_FXD.cs:171-177 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L171-L177), Servicio_PaP_FXI.cs:289-293 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXI.cs#L289-L293), Servicio_PaP_FXT.cs:153-155 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L153-L155), Servicio_PaP_SPID.cs:174-178 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L174-L178), Servicio_PaP_TEF.cs:166-168 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L166-L168)): the master query returns nothing, bAprobado is false, the not-approved branch still writes CMS and TOMI with folio "", and TerminarProceso closes the detail. datoPap?.Procesados and ?.Devueltos are boxed as null and sent as SQL NULL, and bAprobado is also true for a master with zero detail rows (0 + 0 == 0).
-• Other drift in the family. PaP_FXT overwrites the sFT argument with the rejection reason (Servicio_PaP_FXT.cs:135 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L135)); PaP_TEF discards the Responde_Salida_TEF result and hard-codes cause 1 (Servicio_PaP_TEF.cs:144-151 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L144-L151)); PaP_FXT and PaP_TEF always call TerminarProceso; NOM_FXD writes plan options 3 and 4 back to back before the CMS step and 5 after it (Servicio_NOM_FXD.cs:168-174 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L168-L174), Servicio_NOM_FXD.cs:210 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L210)).
-Recommended change: one shared "close master" routine used by NOM_FXD and the five PaP classes, with the plan option and the CMS and TOMI procedures as parameters; fail when the master folio is empty or the master has no detail rows; use option 2 of the CMS and TOMI procedures for every not-approved master; and check each write.
-Benefit: a master is closed once, with the right plan state, and only when every detail is done.
-Suggested JIRA: AE-FR-19 (Major, MustChange/rewrite).
-AE-FR-20 - The PaP, FXD, and NOM families write to the wrong database or pass the wrong argument (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Servicio_PaP_FXT.cs:177 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L177), Servicio_PaP_FXT.cs:189 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L189), Servicio_PaP_FXD.cs:198 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L198), Servicio_PaP_SPID.cs:200 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L200), Servicio_PaP_TEF.cs:189-191 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L189-L191), Servicio_PaP_TEF.cs:207-209 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L207-L209), Servicio_FXD.cs:161 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L161), Servicio_FXDLocal.cs:164 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXDLocal.cs#L164), Servicio_FXD_GPH.cs:167 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_GPH.cs#L167), Servicio_FXD_H2H.cs:161 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_H2H.cs#L161), Servicio_PaP_SPID.cs:170 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L170), Servicio_NOM_FXD.cs:217-220 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L217-L220), ServicioGeneral.cs:276-290 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L276-L290)
-• A TOMI procedure on the CMS connection. Servicio_PaP_FXT runs sp_ActualizaFormatoTomi_PaP_FXT through _IOperacionesCms.EjecutaSPTransaccion (Servicio_PaP_FXT.cs:177 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L177), Servicio_PaP_FXT.cs:189 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L189)), while PaP_FXD and PaP_SPID call their ...FormatoTomi... procedures through the TOMI repository (Servicio_PaP_FXD.cs:198 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L198), Servicio_PaP_SPID.cs:200 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L200)). The call cannot find the procedure on the CMS database, and the TOMI master format of PaP_FXT is never updated.
-• One constant on both databases. Servicio_PaP_TEF executes sp_ActualizarFormatoCms_DetalleMaestro_PaP_TEF through the CMS repository and through TOMI (Servicio_PaP_TEF.cs:189-191 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L189-L191), Servicio_PaP_TEF.cs:207-209 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_TEF.cs#L207-L209)); PaP_FXI has separate CMS and TOMI constants. One of the two calls cannot find the procedure.
-• Wrong or missing `BaseCMS`. The four FXD classes pass null as the CMS table (Servicio_FXD.cs:161 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L161), Servicio_FXDLocal.cs:164 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXDLocal.cs#L164), Servicio_FXD_GPH.cs:167 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_GPH.cs#L167), Servicio_FXD_H2H.cs:161 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_H2H.cs#L161)); Servicio_PaP_SPID passes the TOMI table (Servicio_PaP_SPID.cs:170 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L170)); the SPID family uses three different conventions (TbSpidFormat, TbFormatPtPs, the TOMI table). In ServicioGeneral that argument becomes the tablacms parameter and the selector of the format insert (ServicioGeneral.cs:276-290 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L276-L290)), so with null or a TOMI table the switch (BaseCMS) matches nothing and the T24 format insert is skipped; only PaP_FXD and NOM_FXD pass a CMS table name.
-• An invalid parameter name. Servicio_NOM_FXD builds {"@sFT", string.Empty} and the CMS repository prepends @, giving @@sFT (Servicio_NOM_FXD.cs:217-220 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L217-L220), ConsultasBDCms.cs:51-54 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDCms.cs#L51-L54)), so the CMS format row of an approved payroll master is never inserted.
-Recommended change: give each procedure one constant that names its database (Cms. or Tomi.), make the repository for that database the only way to call it (a CMS procedure cannot be passed to the TOMI repository), pass the real CMS table to Actualiza_CMS_origen_SPEI and _SPID, and remove the @ prefix from the key.
-Benefit: each write reaches the database that owns the table, and the T24 format rows are inserted.
-Suggested JIRA: AE-FR-20 (Major, MustChange/rewrite).
-AE-FR-21 - MercadoDinero, TMD, MFX, FXD, and TAX carry smaller defects that leave an operation open or closed wrongly (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Servicio_MercadoDinero.cs:57 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L57), Servicio_MercadoDinero.cs:123-156 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L123-L156), Servicio_TMD.cs:89-124 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L89-L124), Servicio_MFX.cs:119-150 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L119-L150), Servicio_FXD_H2H.cs:104-138 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_H2H.cs#L104-L138), Servicio_FXD.cs:136-158 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L136-L158), Servicio_TAX.cs:120 (../../General/ActualizaEstatus/Aplicacion/Servicios/TAX/Servicio_TAX.cs#L120), Servicio_SER.cs:121 (../../General/ActualizaEstatus/Aplicacion/Servicios/SER/Servicio_SER.cs#L121), DB/IT24/008 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/008%20SP%20usp_TMD_ActualizaPlanTrabajoMaestro.sql#L12-L45)
-• MercadoDinero: a dead branch. stsSPEI is initialized to string.Empty and never assigned (Servicio_MercadoDinero.cs:57 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L57); the status is in resultadoSpei.StrSPey, lines 123-125), so the "terminate for local rejection CL/RL" branch (Servicio_MercadoDinero.cs:142-156 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L142-L156)) can never run and an MD_SPEI_S local rejection stays open; bProcesado = false at line 88 is dead. All ten MD_* types share this class.
-• TMD tolerates a missing TOMI row. It reads datoTomi?. (Servicio_TMD.cs:89-95 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L89-L95), Servicio_TMD.cs:104-110 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L104-L110)) where the other families throw "No se encontro el registro en TOMI", and writes work-plan option 3 unconditionally (Servicio_TMD.cs:122-124 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L122-L124)). The TMD options are 1 PROCESADA, 2 RECHAZADA, and 3 TERMINANDO only from T24 (DB/IT24/008 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/008%20SP%20usp_TMD_ActualizaPlanTrabajoMaestro.sql#L12-L45)), so after options 1 or 2 the unconditional option 3 is a no-op, but with no TOMI row the plan moves T24 to TERMINANDO and the phase closes without any CMS update. The class is one of the ten of AE-FR-1.
-• MFX. It throws for any status other than CONP, CONF, PROC, or RECC (Servicio_MFX.cs:149-150 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L149-L150)), logs "FXT.procesaOperacion" (Servicio_MFX.cs:167 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L167)), and uses the differently spelled CMS constants ..._MXF and ..._MFX (Servicio_MFX.cs:119 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L119), Servicio_MFX.cs:136 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L136)); the rejected one needs a reason that the call does not pass (AE-FR-2). It is also one of the ten of AE-FR-1.
-• FXD: a missing refresh and an early "terminated". Servicio_FXD_H2H ends the SPEI phase without refreshing the alias (Servicio_FXD_H2H.cs:104-138 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_H2H.cs#L104-L138); FXD, Local, and GPH have it), so the ESTATUS_TERMINADA phase cannot run in the same invocation and the operation needs another package to progress. All four FXD classes write work-plan option 2 ("TERMINANDO") before the CMS update and TerminarProceso (Servicio_FXD.cs:156-158 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L156-L158) and its variants): when the CMS step fails and throws, the plan already says it is terminating.
-• TAX. It passes _Operacion.StrEstatusOperacion, which is never assigned, as the operation type of ValidaEstatus_BBVA (Servicio_TAX.cs:120 (../../General/ActualizaEstatus/Aplicacion/Servicios/TAX/Servicio_TAX.cs#L120); SER passes StrTipoOperacion, Servicio_SER.cs:121 (../../General/ActualizaEstatus/Aplicacion/Servicios/SER/Servicio_SER.cs#L121)), so TAX failure alerts carry a null operation type.
-Recommended change: fix each point where it is (they are small); move the "terminated" write after the CMS step in the FXD classes; and cover each class with a phase test (AE-FR-35).
-Benefit: local rejections and missing-row cases no longer leave an operation open or closed without its CMS update.
-Suggested JIRA: AE-FR-21 (Major, MustChange/rewrite).
-AE-FR-22 - Amount, key, and date types drift between DTOs, and the shared mapper silently defaults what does not fit (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: DatoSPEIDTO.cs:11-20 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoSPEIDTO.cs#L11-L20), DatoENT_SPIDDTO.cs:9-15 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoENT_SPIDDTO.cs#L9-L15), SalidaEstatusSPEIDTO.cs:10 (../../General/ActualizaEstatus/Aplicacion/DTOs/SalidaEstatusSPEIDTO.cs#L10), DatoTomiNFDTO.cs:13-24 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoTomiNFDTO.cs#L13-L24), DatoTomiT24DTO.cs:11 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoTomiT24DTO.cs#L11), DatoBBVADTO.cs:13-17 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoBBVADTO.cs#L13-L17), DatoTomiSATDTO.cs:15 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoTomiSATDTO.cs#L15), Servicio_ENT_SPEI.cs:98 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L98), ServicioGeneral.cs:1378-1390 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1378-L1390), ServicioGeneral.cs:144 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L144), RepositorioMaestro.cs:695-764 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L695-L764)
-DatoSPEIDTO.Op_monto is an int (DatoSPEIDTO.cs:20 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoSPEIDTO.cs#L20)) while every other amount is decimal (SalidaEstatusSPEIDTO.cs:10 (../../General/ActualizaEstatus/Aplicacion/DTOs/SalidaEstatusSPEIDTO.cs#L10), DatoENT_SPIDDTO.cs:15 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoENT_SPIDDTO.cs#L15)), and Op_clave is an int in DatoSPEIDTO but a long in DatoENT_SPIDDTO, whereas the SPEI column is numeric(18,0). The shared mapper converts with Convert.ChangeType and, when the conversion throws, logs a WARN and leaves the property at its default (RepositorioMaestro.cs:695-764 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L695-L764), RepositorioMaestro.cs:334 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L334)); a DBNull for a non-nullable value type becomes 0 or DateTime.MinValue with no warning. For the amount that means a numeric(18,2) value is rounded to a whole number (cents lost) and an Op_clave above 2,147,483,647 becomes 0. ENT_SPEI and ENT_SPEI2 pass that Op_monto and Op_clave to the receipt response (Servicio_ENT_SPEI.cs:98 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L98)), which serializes the amount with the current culture (ServicioGeneral.cs:1389 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1389)); the SPID twin passes typed values. The same file also formats op_monto with the current culture inside the status string (ServicioGeneral.cs:144 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L144), ServicioGeneral.cs:822-824 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L822-L824)).
-Other drift: the same concept Nf_fecha_ejecucion is an int in DatoSPEIDTO and DatoBBVADTO, a DateTime in DatoTomiT24DTO (which also re-declares a second date next to the inherited one), and a string in DatoTomiSATDTO; DatoTomiNFDTO.Nf_fecha_autoriza, NFFechaEjecucion, DatoTomiT24DTO.Nf_fecha_ejecucion, and DatoBBVADTO.nf_fecha_pago_bbva are non-nullable although the columns can be NULL, so a missing date becomes 0001-01-01 without a trace (the standing finding GEN-12, silently defaulting money and date conversion in payment paths).
-Not verified: the actual value ranges of op_clave and op_monto in production, and whether the amounts that reach SPEI are always whole numbers; the finding is rated Major because a wrong amount or key in a bank response is a financial defect even when rare.
-Recommended change: use decimal for every amount and long for every key, make every nullable column nullable in the DTO, one DateTime or one int date per concept, pass typed values (never ToString() with the current culture) to the response procedures, and fail the row when the mapper cannot convert a financial field instead of leaving 0.
-Benefit: the amount and key sent to SPEI and SPID are the ones stored, and a conversion problem is an error rather than a zero.
-Suggested JIRA: AE-FR-22 (Major, MustChange/rewrite).
-Rewrite Recommended
-AE-FR-23 - ServicioGeneral is a 1,602-line class that mixes six responsibilities, with bare option codes and near-duplicate SPEI and SPID twins (Major)
-Category: rewrite_recommended Priority: Major
-Evidence: ServicioGeneral.cs:26-42 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L26-L42), ServicioGeneral.cs:96-229 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L96-L229), ServicioGeneral.cs:230-504 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L230-L504), ServicioGeneral.cs:775-915 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L775-L915), ServicioGeneral.cs:916-1173 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L916-L1173), ServicioGeneral.cs:242 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L242), ServicioGeneral.cs:811 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L811), ServicioGeneral.cs:1418-1503 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1418-L1503), ServicioGeneral.cs:1532 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1532)
-• One class, six jobs. The class has 14 public methods: SPEI status and CMS update (ValidaEstatusSPEI :96, Actualiza_CMS_origen_SPEI :230), BBVA (:527, :638), SPID (:775, :916, :1519), TEF responses (:1260, :1574), SPEI and SPID receipt responses (:1323, :1378), SWIFT status (:1186), master folio (:1216), and the T24 reversal with its SOAP client (:1418). It is created per call by FabricaServicioGeneral with six constructor arguments (ServicioGeneral.cs:26-42 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L26-L42)), and 50 of the 218 discarded write calls of AE-FR-3 are inside it.
-• Twins that drift. Actualiza_CMS_origen_SPEI (:230-504) and Actualiza_CMS_origen_SPID (:916-1173) are copies of about 250 lines each, and ValidaEstatusSPEI (:96-229) and ValidaEstatus_SPID (:775-915) are another pair. AE-FR-13 and AE-FR-14 are results of the drift: the reversal gate, the reason lookup, the null handling, and the log text differ between the copies.
-• Bare option codes. The work-plan Opcion is an integer literal at 14 call sites: BBVA 1 to 3 (:680, :710, :737), SPEI 4 to 8 (:299, :366, :377, :416, :454, :483), SPID 10 to 13 (:981, :1044, :1055, :1093, :1152). Their meaning exists only inside usp_Comunes_ActualizaPlanTrabajoMaestro in the database project (089 SP usp_Comunes_ActualizaPlanTrabajoMaestro.sql:14-36 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/089%20SP%20usp_Comunes_ActualizaPlanTrabajoMaestro.sql#L14-L36)), and nothing in the C# names them.
-• Inline procedure names. Two procedure names are string literals while 158 others are constants: "sp_InterfaceTOMI_SPID_Status2" at :811 (a constant with that value exists, ProcedimientoAlmacenado.cs:110 (../../General/ActualizaEstatus/Aplicacion/Enums/ProcedimientoAlmacenado.cs#L110)) and "sp_InterfaceTOMI_SPID_Status3" at :1532 (no constant).
-• Control flow by name. The GPH variant is detected with tablaTomi.Contains(VarianteServicioGPH) (ServicioGeneral.cs:242 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L242), ServicioGeneral.cs:927 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L927)), so a table name decides the code path; and dicParametros is an instance field that is assigned as a side effect inside argument expressions (:338, :1040, :1051) and shared by every method of the instance.
-• Infrastructure in the application layer. The application project builds the BasicHttpBinding and the generated proxy client itself (AE-FR-11, AE-FR-12) and the Aplicacion project calls the static logger 323 times (AE-FR-26), so none of it can be replaced in a test.
-Recommended change: split the class by rail behind small interfaces (SpeiStatusService, SpidStatusService, BbvaStatusService, TefResponder, T24ReversalClient), put one shared "reject and reverse" routine under the SPEI and SPID services, name the work-plan options in an enum that mirrors the stored procedure, and move the SOAP client behind an interface in Infraestructura. Add characterization tests before the split (AE-FR-35).
-Benefit: each rail has one owner and one place for its rules, the twins stop drifting, and the reversal can be tested without a network.
-Suggested JIRA: AE-FR-23 (Major, rewrite_recommended).
-AE-FR-24 - One phase template is copied into 37 classes and wired by a hand-written switch with 46 labels (Major)
-Category: rewrite_recommended Priority: Major
-Evidence: ServiceHost.Composicion.cs:13-16 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L13-L16), ServiceHost.Composicion.cs:18-107 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L18-L107), ServiceHost.cs:88 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L88), ServicioBase.cs:15-25 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioBase.cs#L15-L25), Servicio_FXD.cs:51-160 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L51-L160), Servicio_FXI.cs:58-284 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L58-L284)
-Every Servicio_* class repeats one skeleton: read the last alias, then for each phase call IniciarProceso, do the work, call TerminarProceso, re-read the alias; an alias that matches no phase falls through to return true; the catch logs and returns false. The project has 37 such classes with 164 inline new ProcesoDTO { ... Excepcion = new Exception("") } blocks (81 IniciarProceso and 83 TerminarProceso calls), and the entry method has four spellings (ProcesarOperacion<X> in 9 classes, ProcesarOperacion_<X> in 15, ProcesarOperacionServicio_<X> in 8, ProcesarOperacionENT_<X> in 5; the GPH class of FXD even reuses ProcesarOperacion_FXD, Servicio_FXD_GPH.cs:51 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_GPH.cs#L51)).
-• The wiring is a hand-written switch. ProcesarOperacionAsync has 46 case labels that construct 37 service classes: 36 labels select individual types, while ten MD_* labels share Servicio_MercadoDinero (ServiceHost.Composicion.cs:18-107 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L18-L107)). There are six constructor shapes; the 10 classes of AE-FR-1 are exactly the ones built without Resolver<ConfiguracionServicio>(). The container only provides the delegate that calls this method (ServiceHost.cs:88 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L88)); an unknown type throws a bare Exception (:106).
-• Copies drift. AE-FR-1, AE-FR-15, AE-FR-16, AE-FR-17, AE-FR-19, and AE-FR-21 are each a copy of the template that was edited in one class and not in its siblings. Commit 7c9821a (2026-09-02, "CodeReview changes") replaced the shared mutable ProcesoDTO pattern with inline initializers across operation classes; in the same commit, _Configuracion reads were introduced in the ten classes of AE-FR-1 without adding that dependency to their constructors. This is a concrete example of duplicated template changes, not evidence that every edit was a one-line change.
-• The base class helps little. ServicioBase has four mutable protected fields and a factory that is null by default, so CrearServicioGeneral() throws NullReferenceException when a class is built without it (ServicioBase.cs:15-25 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioBase.cs#L15-L25)).
-Recommended change: write the template once as a phase runner (an ordered list of phases per operation type, each with its alias, its work, and its outcome from AE-FR-15), register one runner per type in the container by key, and delete the switch. Keep the current behavior first with characterization tests per class (AE-FR-35), then remove the intended differences one by one.
-Benefit: a fix to the lifecycle (logging, alerting, outcome, cancellation) is made once, the 10 missing-configuration crashes cannot recur, and a new operation type needs a list of phases and not a 150-line class.
-Suggested JIRA: AE-FR-24 (Major, rewrite_recommended).
-AE-FR-25 - A 22-method interface, duplicate repository methods, and hidden configuration members add surface without value (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: IParametrosOperaciones.cs:12-47 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IParametrosOperaciones.cs#L12-L47), IOperacionServicio.cs:27-29 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IOperacionServicio.cs#L27-L29), ConfiguracionServicio.cs:10-38 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L10-L38), ConsultasBDTef.cs:35-66 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTef.cs#L35-L66), ConsultasBDTef.cs:79-128 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTef.cs#L79-L128), ConsultasBDTomi.cs:345-381 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L345-L381), ConsultasBDTomi.cs:418-441 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L418-L441), ServiceHost.cs:74 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L74)
-• A wide interface. IParametrosOperaciones has 22 members (IParametrosOperaciones.cs:12-47 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IParametrosOperaciones.cs#L12-L47)): lifecycle marks, process markers, six rail-specific status queries, TEF calls, and two generic "run any procedure by name" methods (:43-44) that bypass the typed ones. Every class that needs one query depends on all of it, and the test fake must implement all 22 (AE-FR-35). IFabricaServicioGeneral.Crear() returns the concrete ServicioGeneral, not an interface (IOperacionServicio.cs:27-29 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IOperacionServicio.cs#L27-L29)).
-• Duplicate methods with different procedures. Responde_Entrada_Tef exists in ConsultasBDTef (:79-128, sp_InterfaceTOMI_TEF_Cambia_Estatus_Recibidas) and in ConsultasBDTomi (:345-381, sp_InterfaceTOMI_TEF_Recibidas); EjecutaSPTefRecibidad exists in both (TEF :35-66, TOMI :418-441, both sp_InterfaceTOMI_TEF_Recibidas). ServicioGeneral uses the TEF repository version, and a class that receives the TOMI one through IParametrosOperaciones would run a different procedure under the same name.
-• Hidden members. ConfiguracionServicio derives from the shared Configuracion and re-declares seven members with new (NombreServicio :18, TimerEnabled :21, TimerInterval :22, RutaArchivoConfiguracion :27 with a different type, TamanoMaximoArchivoLogKB :29, PathLog :33, Clone() :38), so each has two storage slots. A shared MUFG_T24 helper that receives the object typed as the base class reads the base slot; the host fills the base slots for PathLog and RutaArchivoConfiguracion (ServiceHost.cs:58-59 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L58-L59)) and the derived ones for NombreServicio and TimerInterval (:109-110), so the derived PathLog and RutaArchivoConfiguracion stay empty.
-• Dead members. metodoBDAsync (interface :14, ConsultasBDTomi.cs:41) and EjecutaSPSPSPEI_Estatus_Recibidas of this interface (:39) have no caller (callers use IOperacionesSpei and IOperacionesSpei2); TimerEnabled, BenHorario, StrHoraOperacionesInicio, and StrHoraOperacionesFin are never read, TimerInterval is only written (ServiceHost.cs:110 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L110)), and StrNombreSPEI1 and StrNombreSPEI2 are only assigned (OperacionServicio.cs:89,:94); SwiftStandardReleaseSanitize is registered and never resolved (ServiceHost.cs:74 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L74)); the T24 password is kept for the lifetime of the scoped configuration object in a plain string (StrPasswdReg, ConfiguracionServicio.cs:31 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L31)).
-Recommended change: split IParametrosOperaciones by role (process lifecycle, parameters, one interface per rail), delete the generic by-name methods once the callers use typed ones, keep one TEF response method per procedure with distinct names, remove the new re-declarations and use the base members, and delete the dead members and the unused registration.
-Benefit: smaller fakes, no silent switch to a different procedure, and one value per configuration setting.
-Suggested JIRA: AE-FR-25 (Minor, rewrite_recommended).
-AE-FR-26 - Logging mixes levels, records account and amount data at INFO, and has lines that mislead (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: OperacionServicio.cs:100-112 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L100-L112), ServicioGeneral.cs:408 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L408), ServicioGeneral.cs:1075-1076 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1075-L1076), ServicioGeneral.cs:1083 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1083), ServicioGeneral.cs:1086 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1086), ServicioGeneral.cs:1274 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1274), ServicioGeneral.cs:1483 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1483), Config.cs:11 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/Config.cs#L11)
-The project has 323 Config.EscribirLog calls: 254 start with INFO|, 52 with ERROR|, and none with WARN| or CRITICO| (the level is inferred from the prefix, see GEN-5). The effects:
-• Failures at INFO. The reversal failure lines are written as INFO (ServicioGeneral.cs:408 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L408), ServicioGeneral.cs:1086 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1086), ServicioGeneral.cs:1483 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1483)), and the SPID branch writes "Error al reversar el pago" when the reversal succeeded (ServicioGeneral.cs:1083 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1083)). A filter on ERROR misses the failures and a reader of the INFO lines sees the opposite of what happened.
-• Account and amount data at INFO (`GEN-5`, partial). Each package logs the T24 service user name and the reversal endpoint (OperacionServicio.cs:104 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L104), OperacionServicio.cs:112 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L112); the password is masked at :108), the company name (:100), and the SPEI server names (:90, :95); the TEF response logs operation id, amount, tracking key, and cause (ServicioGeneral.cs:1274 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1274), under the label of another method). Whether the log folder is access-controlled was not verified.
-• Lines that cannot be read. INFO|| with two pipes (ServicioGeneral.cs:1075-1076 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1075-L1076)), a second argument that the logger ignores (Config.EscribirLog(msg, NombreServicio.Entradas.ToString()) at OperacionServicio.cs:151,:159,:165: the file-name parameter is not used by the shared logger, Logging.cs:184-189), and copy-paste labels (AE-FR-27).
-• An obsolete logging API. The shared library marks the Config class [Obsolete("Legacy compatibility only. Use Logging.Info/Warn/Error/Write directly.")] (Config.cs:11 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/Config.cs#L11)), so each of the 323 calls is a deprecation warning, and the level is taken from a string prefix and not from a method.
-• No correlation of a failed write. Because the write calls discard their result (AE-FR-3), the only trace of a failed update is its absence; the "Se termina procesamiento de folio" line is logged at INFO even then.
-Recommended change: use WARN for a retried or skipped step and ERROR for a failed one, log identifiers (folio, operation type) and not names, accounts, or amounts, drop the unused file-name argument, and add one line per package with the counts of AE-FR-15.
-Benefit: the failure of a status update can be found with one filter, and the log carries less sensitive data.
-Suggested JIRA: AE-FR-26 (Minor, rewrite_recommended).
-Nice to Rewrite if Time Permits
-AE-FR-27 - Naming, typos, and copy-paste residue run through the solution (Minor)
-Category: NiceToRewrite_ifTimePermits Priority: Minor
-Evidence: DatoENT_TEFDTO.cs:7 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoENT_TEFDTO.cs#L7), DatoPagoDTO.cs:10 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoPagoDTO.cs#L10), OperacionDTO.cs:16 (../../General/ActualizaEstatus/Aplicacion/DTOs/OperacionDTO.cs#L16), ConfiguracionServicio.cs:34 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L34), FolioMaerstroModelo.cs:7 (../../General/ActualizaEstatus/Aplicacion/Modelos/FolioMaerstroModelo.cs#L7), ParametrosModelo.cs:2 (../../General/ActualizaEstatus/Aplicacion/Modelos/ParametrosModelo.cs#L2), Program.cs:5 (../../General/ActualizaEstatus/ActualizaEstatus/Program.cs#L5), Servicio_FXTLocal.cs:58 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXTLocal.cs#L58), Servicio_MFX.cs:167 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L167), Servicio_FXD_GPH.cs:111 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_GPH.cs#L111), Servicio_FXI.cs:270 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L270), AlertaDTO.cs:14 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/DTOs/Notificacion/AlertaDTO.cs#L14)
-Kind	Examples
-Type and member names	datoENT_TEFDTO (lower-case type, DatoENT_TEFDTO.cs:7 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoENT_TEFDTO.cs#L7)), SEstaus (DatoPagoDTO.cs:10 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoPagoDTO.cs#L10)), TipoaOperacion (OperacionDTO.cs:16 (../../General/ActualizaEstatus/Aplicacion/DTOs/OperacionDTO.cs#L16)), configracion (ConfiguracionServicio.cs:34 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L34)), FolioMaerstroModelo (FolioMaerstroModelo.cs:7 (../../General/ActualizaEstatus/Aplicacion/Modelos/FolioMaerstroModelo.cs#L7)), Descipcion in the shared alert DTO (AlertaDTO.cs:14 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/DTOs/Notificacion/AlertaDTO.cs#L14)), EjecutaSPTefRecibidad, ObtenerFolioMestro
-Namespaces	namespace Entradas in the host (Program.cs:5 (../../General/ActualizaEstatus/ActualizaEstatus/Program.cs#L5)), Aplicacion.DTOs used by the file in the Modelos folder (ParametrosModelo.cs:2 (../../General/ActualizaEstatus/Aplicacion/Modelos/ParametrosModelo.cs#L2)), test namespace UnitTestProject1
-Entry-method names	four patterns for the 37 classes (AE-FR-24)
-Log labels copied from another class	"TMD.procesaOperacion" in FXTLocal (Servicio_FXTLocal.cs:58 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXTLocal.cs#L58)), "FXT.procesaOperacion" in MFX (Servicio_MFX.cs:167 (../../General/ActualizaEstatus/Aplicacion/Servicios/MXF/Servicio_MFX.cs#L167)), "FDX.procesaOperacion" (Servicio_FXD.cs:175 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD.cs#L175)), the run-together word operacionen (accent omitted here) in the log text of the FXD and SPID classes, and SPID named in the log of a SPEI check in FXD_GPH (Servicio_FXD_GPH.cs:111 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXD/Servicio_FXD_GPH.cs#L111)), "ENT_TEF.responde_entrada_TEF" inside Responde_Salida_TEF
-Typos in messages	"Actualizandp" (FXI_GPH, FXI_H2H), "recazo" (Servicio_FXI.cs:240 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L240)), ESTATUS_TTERMINADA_CMS (Servicio_FXI.cs:270 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L270)), "Eror" (Servicio_FXI_GPH.cs:127 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_GPH.cs#L127)), "prcesaOperacion" (Servicio_FXI.cs:162 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI.cs#L162)), "Buscando ACtualizar el Maestro" in the six master-consolidation classes
-Duplicate constants	EstatusTerminada and AliasEstatusTerminada, SPEICl and TomiEstatusCL, SPEIRl and TomiEstatusRL, BaseCMSFormatoPaPDetalle and TbFormatoPapDetalle in ConstantesServicios.cs (../../General/ActualizaEstatus/Aplicacion/Enums/ConstantesServicios.cs)
-File names	ActualizaaEstatus_StoredProcedures_TOMI.sql and a SPEI script whose name contains an n with a tilde (AE-FR-31)
 
-Recommended change: rename in one mechanical commit per kind (the rename tool of the IDE for types and members, search and replace for log text), starting with the labels that mislead a reader of the log.
-Benefit: searching for an operation in the log finds the right class, and new code does not copy the typos.
-Suggested JIRA: AE-FR-27 (Minor, NiceToRewrite_ifTimePermits).
-AE-FR-28 - The generated T24 proxy is about 91% unused and carries change-notification code for 71 classes (Minor)
-Category: NiceToRewrite_ifTimePermits Priority: Minor
-Evidence: Reference.cs:325-6318 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.cs#L325-L6318), Reference.cs:6443-6934 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.cs#L6443-L6934), Reference.cs:6935-7116 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.cs#L6935-L7116), Reference.svcmap:4-16 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.svcmap#L4-L16), Reference.svcmap:22 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.svcmap#L22), T24WebServicesImplService.wsdl:75 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/T24WebServicesImplService.wsdl#L75), configuration91.svcinfo:115 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/configuration91.svcinfo#L115), ServicioGeneral.cs:1421-1460 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1421-L1460)
-Reference.cs has 7,341 generated lines and 71 data classes, each with INotifyPropertyChanged plumbing (the generation option EnableDataBinding=true, Reference.svcmap:4-16 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.svcmap#L4-L16)), but the solution uses one operation, APLICAREVERSOFTAsync (ServicioGeneral.cs:1421-1460 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1421-L1460)). The types reachable only from the two unused operations PAGORETORNOSPEI and PAGORETORNOSPEI_Validate (FUNDSTRANSFERType and its groups, FUNDSTRANSFERMUFGPAGORETORNOType, ofsFunction) occupy about 6,670 lines. The same hard-coded address 10.97.38.163:8085 over plain HTTP is in four generated artifacts (Reference.svcmap:22 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.svcmap#L22), T24WebServicesImplService.wsdl:75 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/T24WebServicesImplService.wsdl#L75), configuration91.svcinfo:115 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/configuration91.svcinfo#L115), and configuration.svcinfo); at runtime the address comes from the database parameter WS_REVERSA_ENDPOINT and the generated one is not used (AE-FR-11). Nothing in the generated code was hand-edited (a scan for marker comments found none).
-Recommended change: regenerate the reference with only APLICAREVERSOFT (exclude unused types, turn off data binding), or replace it with a hand-written client of one request and one response behind the interface of AE-FR-23, and keep the endpoint only in configuration.
-Benefit: a smaller assembly and diff, no address in the repository that looks live, and a client that can be reviewed.
-Suggested JIRA: AE-FR-28 (Minor, NiceToRewrite_ifTimePermits).
-4.3 Infraestructura (Tier 1)
-Rewrite Recommended
-AE-FR-29 - Three SPEI methods in the TOMI repository run on the wrong connection and have no caller (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: ConsultasBDTomi.cs:231-241 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L231-L241), ConsultasBDTomi.cs:261-273 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L261-L273), ConsultasBDTomi.cs:453-463 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L453-L463), ConsultasBDSpei.cs:82-196 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpei.cs#L82-L196), ServicioGeneral.cs:139 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L139), ServicioGeneral.cs:154 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L154)
-EjecutarSPValidaEstatusAdicionalSPEI, EjecutarSPSPEIStatus, and EjecutaSPSPSPEI_Estatus_Recibidas in ConsultasBDTomi each create a second connection with ConexionBasedatosFactory.CrearConexion(SqlServer, SPEI) in a using, cast it, and use it only to build the parameters; the command then runs through the inherited EjecutarStoredProcedureQuery, that is, on the TOMI connection of the repository. ConsultasBDSpei calls the same procedures correctly (ConsultasBDSpei.cs:82-196 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpei.cs#L82-L196)). The TOMI version of EjecutaSPSPSPEI_Estatus_Recibidas also runs sp_InterfaceTOMI_SPEI_Status2 and not a "recibidas" procedure. The three methods have no caller in this solution (ServicioGeneral and the ENT classes use IOperacionesSpei, for example ServicioGeneral.cs:139 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L139), ServicioGeneral.cs:154 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L154)), so the defect is latent: it would show only when someone calls the IParametrosOperaciones version (AE-FR-25).
-Recommended change: delete the three methods and the matching interface members, or make them delegate to IOperacionesSpei.
-Benefit: no wasted connection and no call that silently runs on the wrong database.
-Suggested JIRA: AE-FR-29 (Minor, rewrite_recommended).
-AE-FR-30 - Repository details: lookups that fail look like "no data", ordinal mapping, and a wrong log label (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: ConsultasBDTomi.cs:72-91 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L72-L91), ConsultasBDTomi.cs:98-123 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L98-L123), ConsultasBDTomi.cs:523-527 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L523-L527), ConsultasBDTomi.cs:41-46 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L41-L46), ConsultasBDTomi.cs:601-625 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L601-L625), ConsultasBDSpid.cs:145-149 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpid.cs#L145-L149), ParametrosSistemaENUM.cs:13 (../../General/ActualizaEstatus/Aplicacion/Enums/ParametrosSistemaENUM.cs#L13)
-• parametrosSistema() ignores Exito, so a failed read yields an empty dictionary (the window and endpoint effects are in AE-FR-4 and AE-FR-9), and it requests the parameters by an enum list that omits SPEI_SERVIDOR_PRINCIPAL (:74 against ParametrosSistemaENUM.cs:13 (../../General/ActualizaEstatus/Aplicacion/Enums/ParametrosSistemaENUM.cs#L13)).
-• DameUltimoProceso has no try and ignores Exito (:98-123), EjecutarSP<T> turns any exception into an empty list (:523-527), and obtenerPuertoEscucha returns "0" for no row (FirstOrDefault().ToString() on an integer) and logs its failure as ObtenerFolioMestro (:620).
-• SpidEstatusRecibidas maps its result by ordinal 0 with ParseEnteroRequerido while every other method maps by name, and passes CancellationToken.None (ConsultasBDSpid.cs:145-149 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpid.cs#L145-L149)).
-• metodoBDAsync formats a nullable DateTime with the current culture (:44) and has no caller.
-Recommended change: return a result object (Exito, Data, error) from the adapter calls that matter, map by name, fix the label, delete metodoBDAsync, and pass the real token (AE-FR-7).
-Benefit: a failed lookup is distinguishable from an empty one, and a log line names the method that failed.
-Suggested JIRA: AE-FR-30 (Minor, rewrite_recommended).
-MustChange / Rewrite
-AE-FR-31 - The three SQL scripts inside the solution are a stale, divergent, non-deployable copy of the database project (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: TOMI script:12-17 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L12-L17), CMS script:1 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaEstatus_Stored_procedures_CMS.sql#L1), CMS script:182 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaEstatus_Stored_procedures_CMS.sql#L182), TOMI script:976 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L976), TOMI script:2105 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L2105), TOMI script:2488 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L2488), CMS script:523 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaEstatus_Stored_procedures_CMS.sql#L523), TOMI script:5733 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L5733), TOMI script:5902 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L5902)
-The three scripts under Infraestructura/Scripts (TOMI 6,274 lines, CMS 2,498, SPEI 192) were last changed on 2026-06-24 (6d3cd15) and 2026-09-02 (30488a7), after the stored procedures moved into the database project StoredProcedures/MWD_DB (added 2026-07-17, 01d2d86; last changed 2026-08-06, 8319cca) and after the C# constants were renamed to the MUFG_MX2_* and usp_* / ssp_* forms (2026-07-20 to 2026-07-28; 9595ff9, dac27cf, 113d423, abc8294). All counts below come from the files and were not executed against a server.
-Defect (expected, not executed)	Count	Where
-Procedures that declare @RowsAffected INT OUTPUT without a default, while no C# code sends or reads RowsAffected (0 hits for RowsAffected and ParameterDirection)	99 (CMS 36 of 38, TOMI 62 of 99, SPEI 1 of 1)	TOMI script:12-17 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L12-L17) and the matching headers
-USE Bot; lines placed after the previous END; with no GO, so 21 ALTER PROCEDURE batches contain a USE	24 lines, 21 batches (CMS)	CMS script:1 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaEstatus_Stored_procedures_CMS.sql#L1), then :62, :126
-Batch separator written GO;	23 (CMS)	CMS script:182 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaEstatus_Stored_procedures_CMS.sql#L182), then :247, :429
-ALTER batches that swallow the next procedure's IF OBJECT_ID ... EXEC('CREATE PROCEDURE ...') stub	31 of 38 (CMS), 4 (TOMI)	TOMI TOMI script:976 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L976), :2488, :4176, :5813
-COMMIT TRANSACTION with no BEGIN TRANSACTION	35 (CMS 26, TOMI 9)	TOMI TOMI script:2105 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L2105) (usp_PaP_FXD_ActualizaFormatoTomi), TOMI script:2488 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L2488) (usp_NOM_FXD_ActualizaFormatoTomi)
-Definitions whose name matches no C# constant	33 of 38 (CMS), 5 of 99 (TOMI), the SPEI one	whole scripts
-Duplicate definitions and procedures with another procedure's signature	usp_FXI_ActualizaFormatoAceptadoCms (CMS :1163, :1227), usp_FXI_GPH_ and usp_FXI_Local_ActualizaPlanTrabajoMaestro (TOMI :3528, :3728, :3863, :4062), usp_PaP_TEF_ActualizaPlanTrabajoMaestro (:4586, :4893), usp_FXI_H2H_ActualizaTombinNF (:3664, plan signature)	TOMI and CMS scripts
-Procedures the C# calls that the scripts do not define	6 (usp_FXT_, usp_FXI_, usp_FXI_H2H_, usp_ENT_SPEI_ActualizaPlanTrabajoMaestro, ssp_Consultar_OrigenSPEI_CMS_FXD, ssp_MFX_ConsultarTombinNF)	calls in Servicios
-Text errors beyond those of the database project	a CONCAT call with the text 10015= and no opening parenthesis (CMS), ' FROM ' + @TablaTomi + 'AS tomi with no space (TOMI), @strFolio used with @Folio passed (TOMI :5316-5338), a missing comma (TOMI :1973), FORMAT overflow (TOMI :3014-3015), tbl_catalogo_errores instead of tbl_catalogo_errores_bbva, and ssp_Consultar_CmsOrigen_SPID(_GPH) defined in the CMS script but selecting TOMI tables	CMS script:523 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaEstatus_Stored_procedures_CMS.sql#L523), TOMI script:5733 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L5733), TOMI script:5902 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L5902)
-Reversed CHARINDEX(@tabla,'detalle')	7 (TOMI :5052, :5123, :5194, :5266, :5669, :6048, :6121) and 3 (CMS :1882, :2075, :2453)	see AE-FR-32
-Statements that concatenate table, field, or status text into dynamic SQL without QUOTENAME or an allow-list	40 (32 TOMI, 8 CMS), 0 QUOTENAME	values come from C# constants and TOMI columns, not from a caller outside the service
+using Aplicacion.DTOs;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using System.Collections.Generic;
 
-If the scripts were run against InterfacesT24 or Bot, the procedures with the same names as the database project would be expected to be replaced by versions that the C# code cannot call (with @RowsAffected required, and with the USE and COMMIT errors above); this was not executed. The folder is also not what the C# constants name (AE-FR-2).
-Recommended change: remove the three scripts from the solution (or mark the folder historical in its README), keep StoredProcedures/MWD_DB as the only definition, and add a contract test that compares every constant of ProcedimientoAlmacenado and the parameter keys of each call site with the procedure signatures of the database project (this is the check that would have caught AE-FR-2).
-Benefit: nobody can deploy the wrong definitions, and a rename of a procedure or parameter fails a build instead of a production call.
-Suggested JIRA: AE-FR-31 (Major, MustChange/rewrite).
-AE-FR-32 - Stored procedures in the database project fail, or return the wrong column, as written (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: 028 SP MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql:17-30 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/028%20SP%20MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql#L17-L30), 096 SP usp_Comunes_ActualizaFormatoRechazadoTomi_BBVA.sql:14-18 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/096%20SP%20usp_Comunes_ActualizaFormatoRechazadoTomi_BBVA.sql#L14-L18), 091 SP usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI.sql:13-22 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/091%20SP%20usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI.sql#L13-L22), 101 SP usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado.sql:13-21 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/101%20SP%20usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado.sql#L13-L21), 106 SP usp_Comunes_TombinStatusInterno_BBVA.sql:12-26 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/106%20SP%20usp_Comunes_TombinStatusInterno_BBVA.sql#L12-L26), 030 SP MUFG_MX2_Comunes_ActualizaFormatoRechazadoCms_BBVA.sql:14-20 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/030%20SP%20MUFG_MX2_Comunes_ActualizaFormatoRechazadoCms_BBVA.sql#L14-L20), 035 SP ssp_SAT_ConsultarTombinNF.sql:8-12 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/035%20SP%20ssp_SAT_ConsultarTombinNF.sql#L8-L12), 052 SP usp_ENT_COAS_ActualizaBmxPagDia.sql:11-15 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/052%20SP%20usp_ENT_COAS_ActualizaBmxPagDia.sql#L11-L15), 098 SP usp_Comunes_ActualizaEstatusInterno_SPID.sql:14-26 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/098%20SP%20usp_Comunes_ActualizaEstatusInterno_SPID.sql#L14-L26), 007 SP MUFG_MX2_TEF_ActualizaFormatoRechazadoCms.sql:1 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/007%20SP%20MUFG_MX2_TEF_ActualizaFormatoRechazadoCms.sql#L1), 035 SP MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado.sql:1 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/035%20SP%20MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado.sql#L1)
-These procedures are in the authoritative project (StoredProcedures/MWD_DB, branch develop, f64ecf2), so the fix belongs to the database team. The defects were read from the text; none was executed (no SQL Server was available), so each result is an expected behavior.
-File	Defect	Expected result
-Bot/028 MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado (028 SP MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql:17-30 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/028%20SP%20MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql#L17-L30))	WHERE id_formato=@strFolio (:28) is not declared in the dynamic batch, @razonrechazo is used in the text but not passed, and N'@folio VARCHAR(30), @codigomensaje ' declares @codigomensaje without a type (:30)	compile error at execution; no SPEI rejection reaches CMS
-IT24/096 usp_Comunes_ActualizaFormatoRechazadoTomi_BBVA (096 SP usp_Comunes_ActualizaFormatoRechazadoTomi_BBVA.sql:14-18 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/096%20SP%20usp_Comunes_ActualizaFormatoRechazadoTomi_BBVA.sql#L14-L18))	the text uses @strrazonrechazo and @stridrazon, which are neither parameters of the procedure nor declared for sp_executesql	error: scalar variable not declared; no BBVA rejection reaches TOMI
-IT24/091 usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI (091 SP usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI.sql:13-22 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/091%20SP%20usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI.sql#L13-L22))	nf_razon = 'SPEI Devolucion' is followed (:19) by nf_estatus = ... with no comma	syntax error
-IT24/101 usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado (101 SP usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado.sql:13-21 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/101%20SP%20usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado.sql#L13-L21))	' + @tablatomi + 'SET has no space (:13) and @strfolio is undeclared (:19)	syntax error
-IT24/106 usp_Comunes_TombinStatusInterno_BBVA (106 SP usp_Comunes_TombinStatusInterno_BBVA.sql:12-26 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/106%20SP%20usp_Comunes_TombinStatusInterno_BBVA.sql#L12-L26))	the empty-status branch builds SET nf_estatus_interno='',... inside a quoted string (an unterminated literal), and the other branch ignores the value of @Estatus and always writes PROC	error in the first branch; a fixed status in the second
-Bot/030 MUFG_MX2_Comunes_ActualizaFormatoRechazadoCms_BBVA (030 SP MUFG_MX2_Comunes_ActualizaFormatoRechazadoCms_BBVA.sql:14-20 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/030%20SP%20MUFG_MX2_Comunes_ActualizaFormatoRechazadoCms_BBVA.sql#L14-L20))	'UPDATE ' + @tablacms + 'SET has no space; @razonrechazo (VARCHAR(18)) and @idrazon are concatenated unquoted	syntax error, and a quoting hazard if it were fixed by adding spaces only
-IT24/098 usp_Comunes_ActualizaEstatusInterno_SPID (098 SP usp_Comunes_ActualizaEstatusInterno_SPID.sql:14-26 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/098%20SP%20usp_Comunes_ActualizaEstatusInterno_SPID.sql#L14-L26))	the parameter is declared as @etatusinterno, @cdclave is required, and the doubled quotes in the CASE text produce an invalid CASE expression (a string literal followed by END with no THEN)	no SPID internal status (LQ, D, CL, RL, CN, RB) can be written (with AE-FR-2)
-IT24/035 ssp_SAT_ConsultarTombinNF (035 SP ssp_SAT_ConsultarTombinNF.sql:8-12 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/035%20SP%20ssp_SAT_ConsultarTombinNF.sql#L8-L12))	nf_tipo is followed by t24_transaction_id with no comma, so nf_tipo is returned under the alias t24_transaction_id and Nf_tipo is absent	executes, but Servicio_SAT reads the tipo as the FT (sFT, Servicio_SAT.cs:105 (../../General/ActualizaEstatus/Aplicacion/Servicios/SAT/Servicio_SAT.cs#L105))
-IT24/052 usp_ENT_COAS_ActualizaBmxPagDia (052 SP usp_ENT_COAS_ActualizaBmxPagDia.sql:11-15 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/052%20SP%20usp_ENT_COAS_ActualizaBmxPagDia.sql#L11-L15))	CONVERT(INT, FORMAT(GETDATE(),'yyyyMMddhhmmss')) produces a 14-digit value (and hh is the 12-hour clock)	arithmetic overflow for any matching row
-Bot/007 (007 SP MUFG_MX2_TEF_ActualizaFormatoRechazadoCms.sql:1 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/007%20SP%20MUFG_MX2_TEF_ActualizaFormatoRechazadoCms.sql#L1)) and Bot/035 (035 SP MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado.sql:1 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/035%20SP%20MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado.sql#L1))	contain only the comment "No se encontro el SP"	MUFG_MX2_TEF_ActualizaFormatoRechazadoCms and MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado do not exist; the second is called at 6 sites (AE-FR-2)
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio Base.
+    /// </summary>
+    public class ServicioBase
+    {
+        private readonly IFabricaServicioGeneral _fabricaServicioGeneral;
 
-Nine procedures also test CHARINDEX(@tabla,'detalle') > 0, which looks for the table name inside the literal; four of them are in the table above (028 SP MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql:20 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/028%20SP%20MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql#L20), 091 SP usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI.sql:15 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/091%20SP%20usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI.sql#L15), 098 SP usp_Comunes_ActualizaEstatusInterno_SPID.sql:18 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/098%20SP%20usp_Comunes_ActualizaEstatusInterno_SPID.sql#L18), 101 SP usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado.sql:15 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/101%20SP%20usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado.sql#L15)). A table such as tb_tombin_nf_fxd_detalle is expected not to match, so the detail counters (nopagosdevueltos=1,nopagosprocesados=0) are never set; the intended test is CHARINDEX('detalle', @tabla).
-For the owners, other points seen while checking: duplicate files for one procedure (017 SP MUFG_MX2_FXI_ActualizaFormatoAceptadoCms.sql (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/017%20SP%20MUFG_MX2_FXI_ActualizaFormatoAceptadoCms.sql) with @sft and 037 SP MUFG_MX2_FXI_ActualizaFormatoAceptadoCms.sql (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/037%20SP%20MUFG_MX2_FXI_ActualizaFormatoAceptadoCms.sql) with @lsft; 039 SP ssp_PaP_SPID_ConsultarTombinNF.sql (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/039%20SP%20ssp_PaP_SPID_ConsultarTombinNF.sql) and 042 SP ssp_PaP_SPID_ConsultarTombinNF.sql (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/042%20SP%20ssp_PaP_SPID_ConsultarTombinNF.sql)), MUFG_MX2_FXT_ActualizaFormatoRechazadoCms updates the TMD table tbl_tmd_formato (003 SP MUFG_MX2_FXT_ActualizaFormatoRechazadoCms.sql:10-14 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/003%20SP%20MUFG_MX2_FXT_ActualizaFormatoRechazadoCms.sql#L10-L14)), usp_PaP_FXD_ActualizaTombinDetalle updates the FXT detail table (046 SP usp_PaP_FXD_ActualizaTombinDetalle.sql (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/046%20SP%20usp_PaP_FXD_ActualizaTombinDetalle.sql); PaP_FXT is the caller, so this is naming confusion), usp_FXI_H2H_ActualizaTombinNF has the plan signature (063 SP usp_FXI_H2H_ActualizaTombinNF.sql (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/063%20SP%20usp_FXI_H2H_ActualizaTombinNF.sql)), and usp_PaP_TEF_ActualizaFormatoCms_Maestro is a CMS-named procedure in the IT24 folder (105 SP usp_PaP_TEF_ActualizaFormatoCms_Maestro.sql (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/105%20SP%20usp_PaP_TEF_ActualizaFormatoCms_Maestro.sql)).
-Recommended change: rewrite the dynamic procedures with sp_executesql parameters for every value, QUOTENAME for the table name from an allow-list, and no concatenated reason or status text; fix the 9 CHARINDEX calls; add the two missing procedures or remove their call sites; fix the SELECT of ssp_SAT_ConsultarTombinNF; and add a test that runs every procedure once against an empty schema, so a syntax error is found at deployment.
-Benefit: the rejection and internal-status writes can succeed, and the SAT FT is the FT.
-Suggested JIRA: AE-FR-32 (Major, MustChange/rewrite).
-4.4 ActualizaEstatus host (Tier 2)
-MustChange / Rewrite
-AE-FR-33 - The host ignores the result of marking the service in use at start-up and at shutdown (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ServiceHost.cs:104 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L104), ServiceHost.cs:106 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L106), ServiceHost.cs:156-157 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L156-L157), ControlServicio.cs:50-65 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L50-L65), RepositorioMaestro.cs:1193-1215 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1215)
-Code block (csharp)
-await controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, ...);   // bool, discarded
-...
-await controlServicio.MarcarPuertoEnUsoAsync(null, null, null, configuracionBase.NombreServicio, cleanupCt);       // bool, discarded
-await controlServicio.ActualizaTerminacion(configuracionBase.NombreServicio, cleanupCt);                          // result object, discarded
-This is the host-side instance of the standing candidate GEN-9 (start-up and shutdown outcomes discarded). At start-up, MarcarPuertoEnUsoAsync returns true only when the stored procedure reports success and false for a cancellation or a failed result (ControlServicio.cs:50-65 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L50-L65)); the host does not read it and goes on to read the port and start the TCP listener (ServiceHost.cs:106 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L106), ServiceHost.cs:119-121 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L119-L121)), so the service can accept packages while the control table does not show it as running. At shutdown, both calls are discarded again; the shared ActualizaTerminacion writes an ERROR line when its procedure fails and returns the result object (RepositorioMaestro.cs:1193-1215 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1215)), so the failure is logged by the shared code but the host cannot react to it, and a failed "stopped" mark is expected to leave the service shown as running to whatever reads that table (the controller service, see CS-FR-6 in ControladorServicios_Recommendations.md (./ControladorServicios_Recommendations.md)). The remarks of the shared method say that its internal handling logs, alerts, or throws; that handling was not traced call by call.
-Recommended change: read both results. At start-up treat false as a failed start (log at ERROR, raise an alert, and stop before the listener opens), or at least log a WARN with the port and process; at shutdown continue the cleanup but log a WARN when either result is not a success, so that the state left in the control table is known.
-Benefit: the control table, the controller, and the dispatcher agree with what the process is doing, and a registration failure is a start-up failure instead of a silent mismatch.
-Suggested JIRA: AE-FR-33 (Major, MustChange/rewrite).
-Rewrite Recommended
-AE-FR-34 - Host hygiene: obsolete configuration calls, an unclear log-size unit, and dead settings (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: ServiceHost.cs:55-65 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L55-L65), ServiceHost.cs:113 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L113), App.config:6-20 (../../General/ActualizaEstatus/ActualizaEstatus/App.config#L6-L20), ActualizaEstatus.csproj:131 (../../General/ActualizaEstatus/ActualizaEstatus/ActualizaEstatus.csproj#L131), ConfiguracionEncriptadaHelper.cs:10-18 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConfiguracionEncriptadaHelper.cs#L10-L18), Logging.cs:47 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L47)
-• Obsolete configuration calls. The host calls ConfiguracionEncriptadaHelper.Inicializar() and ObtenerServicio(...) (ServiceHost.cs:55-56 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L55-L56)), which the shared library marks [Obsolete(..., false)] with the instruction to migrate to ObtencionConfguracionGeneral (ConfiguracionEncriptadaHelper.cs:10-18 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConfiguracionEncriptadaHelper.cs#L10-L18)); each call is a compiler warning today and a break when the compatibility layer is removed.
-• A log-size unit that does not match. TamanoMaximoArchivoLogKB is passed to Logging.Init(string pathLog, string filePrefix, int maxMb) (ServiceHost.cs:65 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L65), Logging.cs:47 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L47)), which multiplies the value by 1,024 (the same pattern is CS-FR-11 in ControladorServicios). The configuration value is encrypted and was not inspected, so the effect (a log limit 1,024 times larger than meant, if the value is in KB) is unconfirmed (open question 6).
-• A path built by concatenation. PathLog is Log + NombreServicio with no separator (ServiceHost.cs:59 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L59)), which works only when the configured Log value ends with a path separator (not inspected).
-• Dead client-services settings. App.config carries the Visual Studio "Client application services" template (ClientSettingsProvider.ServiceUri, a membership provider and a role provider, App.config:6-20 (../../General/ActualizaEstatus/ActualizaEstatus/App.config#L6-L20)) and the project references System.Web.Extensions (ActualizaEstatus.csproj:131 (../../General/ActualizaEstatus/ActualizaEstatus/ActualizaEstatus.csproj#L131)); no C# file of the solution uses System.Web or ClientServices (case-sensitive search).
-• Copied and never read. FechaSistema is copied into the service configuration (ServiceHost.cs:113 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L113)) and ForzaEjecucionServicios into the base configuration (:62), and nothing in the solution reads either (the business date of AE-FR-14 comes from the server clock).
-Recommended change: move to the current configuration API, name the log-size setting and its unit consistently (and convert once), build the log path with Path.Combine, remove the template settings and the unused reference, and delete the two copied settings.
-Benefit: fewer warnings, no hidden dependency on the compatibility layer, and a log limit that matches its name.
-Suggested JIRA: AE-FR-34 (Minor, rewrite_recommended).
-4.5 PruebasUnitarias (Tier 2)
-MustChange / Rewrite
-AE-FR-35 - Seven tests cover only the orchestrator shell; no operation class, no shared service, no repository, and no host switch is tested (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ACTUALIZA_ESTATUS_UT.cs:45-48 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L45-L48), ACTUALIZA_ESTATUS_UT.cs:50 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L50), ACTUALIZA_ESTATUS_UT.cs:81-107 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L81-L107), ACTUALIZA_ESTATUS_UT.cs:117-135 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L117-L135), ACTUALIZA_ESTATUS_UT.cs:136-252 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L136-L252), ACTUALIZA_ESTATUS_UT.cs:39-43 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L39-L43), PruebasUnitarias.csproj:50-52 (../../General/ActualizaEstatus/PruebasUnitarias/PruebasUnitarias.csproj#L50-L52)
-This is the standing candidate GEN-2, partially confirmed: the project has one test class and 7 [TestMethod] methods (ACTUALIZA_ESTATUS_UT.cs:50 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L50), then :63, :72, :81, :92, :108, :117), all on OperacionServicio, driven by a hand-written ParametrosOperacionesFake in which 16 of the 22 interface members throw NotImplementedException and a factory lambda that returns false for every operation type (ACTUALIZA_ESTATUS_UT.cs:45-48 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L45-L48)).
-Gap	Effect
-0 of 37 operation classes, ServicioGeneral (1,602 lines), the six repositories, and the host switch have a test	AE-FR-1 (ten classes that fail on every call) would have been found by one test that builds each type of the switch; AE-FR-2 to AE-FR-22 have no test that pins either the current or the intended behavior
-The "unknown operation" tests use a factory that returns false for everything	They prove only that a false is counted as an error; the real switch throws a bare Exception for an unknown type and is not exercised (ACTUALIZA_ESTATUS_UT.cs:81-107 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L81-L107))
-EjecutaProcedimientos_FueraDeHorario_DebeEnviarAlerta sets both window ends to 23:59	It depends on the clock (it is expected to fail if run at 23:59) and pins the behavior of AE-FR-9 (an alert, and processing continues) as correct (ACTUALIZA_ESTATUS_UT.cs:117-135 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L117-L135))
-Static state: Config.Rutas is assigned in every Setup and the real logger writes files to the temp folder	Tests are not isolated, and parallel execution is not safe (ACTUALIZA_ESTATUS_UT.cs:39-43 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L39-L43))
-The tests assert counts of fake calls, not outcomes	No test reads a stored status, an alert content other than ClaveAviso, or a message sent to a rail
-MSTest 2.2.10 only, no mocking library, namespace UnitTestProject1	Each new fake needs all 22 members (AE-FR-25)
+        protected ServicioBase(IFabricaServicioGeneral fabricaServicioGeneral = null)
+        {
+            _fabricaServicioGeneral = fabricaServicioGeneral;
+        }
 
-Recommended change: add characterization tests first, in this order: (1) one test per entry of the host switch that builds the class and calls it against a fake that records calls (this makes AE-FR-1 fail first); (2) a fake that returns failure for every write, to prove that a failed write is reported (AE-FR-3, AE-FR-4); (3) phase tests per family (FXD, FXI, SPID, ENT, PaP) with the alias transitions and the pending/failed outcome of AE-FR-15; (4) a test of ReversarPagoT24 with a stub binding for the AE-FR-12 and AE-FR-13 cases; (5) a contract test of the procedure constants against the database project (AE-FR-31). Inject the clock into OperacionServicio so the window tests do not depend on the time of day, and move the switch of ServiceHost.Composicion.cs into a class of Aplicacion so that it can be tested (AE-FR-24).
-Benefit: the findings above can be fixed and kept fixed, and a change to one family cannot silently change its siblings.
-Suggested JIRA: AE-FR-35 (Major, MustChange/rewrite).
-5. Architecture-Fit Note
-This workload is a request-driven TCP package server that runs a multi-phase state machine per folio against four databases and one SOAP service, and whose persisted phase alias already makes each folio resumable. Applying the standing trade-off table in section 6 of _ORCHESTRATION.md (./_ORCHESTRATION.md), the best near-term fit is modernize in place, in this order: first make the service start and every operation class run (AE-FR-6, AE-FR-1, and the reproducible build of AE-FR-5); then make the writes real and visible (AE-FR-2, AE-FR-3, and AE-FR-4, together with the database-project repairs of AE-FR-31 and AE-FR-32, which belong to the database owners); then make the T24 reversal safe to repeat (AE-FR-11, AE-FR-12, and AE-FR-13); and only then replace the 37 copies of the phase template with one phase runner (AE-FR-24), under the tests of AE-FR-35. A rewrite first would reproduce the defects of the contract and of the discarded results in new code, and the evidence does not support a move to a queue-triggered or serverless model: the dispatcher already provides the request, the database already persists the phase, and the open problems are correctness and visibility, not scale. An outbox or saga pattern for "reverse in T24, then update CMS and TOMI" is worth considering once the idempotency marker of AE-FR-13 exists, and not before. The service-level objectives, the host topology (one server or several), the source of truth of the database schema (open question 1), whether APLICAREVERSOFT is idempotent (open question 4), and whether the ten affected operation types are in production use (open question 3) are unknown and must be established before any re-platforming decision.
-6. JIRA-Ready Backlog
-ID	Title	Category	Project	File(s)	Priority
-AE-FR-1	Pass ConfiguracionServicio to the ten operation classes that dereference it and test every operation type	MustChange/rewrite	ActualizaEstatus / Aplicacion	ServiceHost.Composicion.cs:18-107 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L18-L107), ServicioBase.cs:15-25 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioBase.cs#L15-L25)	Blocker
-AE-FR-2	Reconcile every stored-procedure call with the database project (27 parameter mismatches, 13 undefined procedures)	MustChange/rewrite	Aplicacion / Infraestructura	ProcedimientoAlmacenado.cs:2-177 (../../General/ActualizaEstatus/Aplicacion/Enums/ProcedimientoAlmacenado.cs#L2-L177), ServicioGeneral.cs:798-869 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L798-L869)	Blocker
-AE-FR-3	Check the result of every status and work-plan write and log SQL failures	MustChange/rewrite	Infraestructura / Aplicacion	ConsultasBDTomi.cs:536-562 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L536-L562), RepositorioMaestro.cs:385-390 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L390)	Blocker
-AE-FR-4	Return a result (found, not found, failed) from the read adapters instead of default objects	MustChange/rewrite	Infraestructura / Aplicacion	ConsultasBDTomi.cs:402-407 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L402-L407), ConsultasBDTef.cs:79-128 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTef.cs#L79-L128)	Major
-AE-FR-5	Replace the D:\ServiceCMS hint paths and declare the dependency closure	MustChange/rewrite	All projects	ActualizaEstatus.csproj:91-94 (../../General/ActualizaEstatus/ActualizaEstatus/ActualizaEstatus.csproj#L91-L94), AplicacionActualizaEstatus.csproj:52-59 (../../General/ActualizaEstatus/Aplicacion/AplicacionActualizaEstatus.csproj#L52-L59)	Blocker
-AE-FR-6	Assign the Windows service name before the Service Control Manager starts the service	MustChange/rewrite	MUFG_T24 (shared) / ActualizaEstatus	WindowsServiceHostBase.cs:95-108 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L95-L108)	Blocker
-AE-FR-7	Pass a cancellation token from the host to every database call	MustChange/rewrite	ActualizaEstatus / Aplicacion / Infraestructura	ServiceHost.cs:127-138 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L127-L138), IParametrosOperaciones.cs:12-47 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IParametrosOperaciones.cs#L12-L47)	Major
-AE-FR-8	Raise a complete, awaited alert for every failed folio and every failed write	MustChange/rewrite	Aplicacion / Infraestructura	OperacionServicio.cs:213-218 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L213-L218), ConsultasBDTomi.cs:52 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L52)	Major
-AE-FR-9	Decide what the schedule window gates, validate its values strictly, and stop alerting on every package	MustChange/rewrite	Aplicacion	OperacionServicio.cs:119-178 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L119-L178)	Major
-AE-FR-10	Set and clear the execution flag in one try/finally and count concurrent packages	MustChange/rewrite	Aplicacion	OperacionServicio.cs:58 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L58), OperacionServicio.cs:243-253 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L243-L253)	Major
-AE-FR-11	Call the T24 reversal over HTTPS and stop logging the service credentials	MustChange/rewrite	Aplicacion	ServicioGeneral.cs:1421-1437 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1421-L1437), OperacionServicio.cs:102-112 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L102-L112)	Major
-AE-FR-12	Close the reversal client, build it inside the try, and read the per-record response	MustChange/rewrite	Aplicacion	ServicioGeneral.cs:1418-1503 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1418-L1503)	Major
-AE-FR-13	Make the T24 reversal idempotent and persist its outcome before the CMS and TOMI writes	MustChange/rewrite	Aplicacion	ServicioGeneral.cs:400-421 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L400-L421), ServicioGeneral.cs:1078-1126 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1078-L1126)	Major
-AE-FR-14	Validate SPEI, SPID, and BBVA status against the business date and before any write	MustChange/rewrite	Aplicacion	ServicioGeneral.cs:122-154 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L122-L154), ServicioGeneral.cs:600-614 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L600-L614)	Major
-AE-FR-15	Return a typed outcome (advanced, pending, failed) from every operation	MustChange/rewrite	Aplicacion	OperacionServicio.cs:199-211 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L199-L211)	Major
-AE-FR-16	Align the FXI phase logic across variants and make waiting for SWIFT a pending state	MustChange/rewrite	Aplicacion	Servicio_FXI_GPH.cs:103-109 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXI_GPH.cs#L103-L109), Servicio_FXILocal.cs:136-183 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXI/Servicio_FXILocal.cs#L136-L183)	Major
-AE-FR-17	Fix the key, the matching, and the forced success in the ENT receipt handlers	MustChange/rewrite	Aplicacion	Servicio_ENT_SPEI.cs:77 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_SPEI.cs#L77), Servicio_ENT_COAS.cs:56-97 (../../General/ActualizaEstatus/Aplicacion/Servicios/ENT/Servicio_ENT_COAS.cs#L56-L97)	Major
-AE-FR-18	Call the rejected TEF procedure, check the TEF response, and derive the cause	MustChange/rewrite	Aplicacion	Servicio_TEF.cs:114-142 (../../General/ActualizaEstatus/Aplicacion/Servicios/TEF/Servicio_TEF.cs#L114-L142)	Major
-AE-FR-19	Close PaP masters with the right option and check the master folio	MustChange/rewrite	Aplicacion	Servicio_PaP_SPID.cs:174-215 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_SPID.cs#L174-L215), Servicio_PaP_FXD.cs:171-211 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXD.cs#L171-L211)	Major
-AE-FR-20	Send each procedure to the database that owns it and correct the wrong arguments	MustChange/rewrite	Aplicacion	Servicio_PaP_FXT.cs:177 (../../General/ActualizaEstatus/Aplicacion/Servicios/PaP/Servicio_PaP_FXT.cs#L177), Servicio_NOM_FXD.cs:217-220 (../../General/ActualizaEstatus/Aplicacion/Servicios/NOM/Servicio_NOM_FXD.cs#L217-L220)	Major
-AE-FR-21	Fix the MercadoDinero, TMD, MFX, FXD, and TAX defects that leave an operation open	MustChange/rewrite	Aplicacion	Servicio_MercadoDinero.cs:123-156 (../../General/ActualizaEstatus/Aplicacion/Servicios/MercadoDinero/Servicio_MercadoDinero.cs#L123-L156), Servicio_TMD.cs:89-124 (../../General/ActualizaEstatus/Aplicacion/Servicios/TMD/Servicio_TMD.cs#L89-L124)	Major
-AE-FR-22	Use decimal amounts and long keys, nullable columns, and fail on a failed financial conversion	MustChange/rewrite	Aplicacion	DatoSPEIDTO.cs:11-20 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoSPEIDTO.cs#L11-L20), ServicioGeneral.cs:1378-1390 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1378-L1390)	Major
-AE-FR-23	Split ServicioGeneral by rail and name the work-plan options	rewrite_recommended	Aplicacion	ServicioGeneral.cs:230-504 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L230-L504), ServicioGeneral.cs:916-1173 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L916-L1173)	Major
-AE-FR-24	Replace the 37 copies of the phase template and the 46-label switch with a phase runner	rewrite_recommended	Aplicacion / ActualizaEstatus	ServiceHost.Composicion.cs:18-107 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.Composicion.cs#L18-L107)	Major
-AE-FR-25	Narrow the 22-method interface and remove duplicate repository methods and hidden members	rewrite_recommended	Aplicacion / Infraestructura	IParametrosOperaciones.cs:12-47 (../../General/ActualizaEstatus/Aplicacion/Interfaces/IParametrosOperaciones.cs#L12-L47), ConfiguracionServicio.cs:10-38 (../../General/ActualizaEstatus/Aplicacion/Modelos/ConfiguracionServicio.cs#L10-L38)	Minor
-AE-FR-26	Use correct log levels and keep account and amount data out of INFO lines	rewrite_recommended	Aplicacion	OperacionServicio.cs:100-112 (../../General/ActualizaEstatus/Aplicacion/OperacionServicio.cs#L100-L112), ServicioGeneral.cs:1274 (../../General/ActualizaEstatus/Aplicacion/Servicios/ServicioGeneral.cs#L1274)	Minor
-AE-FR-27	Fix names, typos, and copy-paste residue	NiceToRewrite_ifTimePermits	All projects	DatoENT_TEFDTO.cs:7 (../../General/ActualizaEstatus/Aplicacion/DTOs/DatoENT_TEFDTO.cs#L7), AlertaDTO.cs:14 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/DTOs/Notificacion/AlertaDTO.cs#L14), Servicio_FXTLocal.cs:58 (../../General/ActualizaEstatus/Aplicacion/Servicios/FXT/Servicio_FXTLocal.cs#L58)	Minor
-AE-FR-28	Regenerate or replace the T24 proxy with only the reversal operation	NiceToRewrite_ifTimePermits	Aplicacion	Reference.cs:325-6318 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.cs#L325-L6318), Reference.svcmap:4-16 (../../General/ActualizaEstatus/Aplicacion/Connected%20Services/wsReverseFT/Reference.svcmap#L4-L16)	Minor
-AE-FR-29	Remove the three SPEI methods of the TOMI repository that run on the wrong connection	rewrite_recommended	Infraestructura	ConsultasBDTomi.cs:231-241 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L231-L241), ConsultasBDTomi.cs:453-463 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L453-L463)	Minor
-AE-FR-30	Return real results from the parameter, process, and port lookups and map by name	rewrite_recommended	Infraestructura	ConsultasBDTomi.cs:72-91 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDTomi.cs#L72-L91), ConsultasBDSpid.cs:145-149 (../../General/ActualizaEstatus/Infraestructura/Repositorio/ConsultasBDSpid.cs#L145-L149)	Minor
-AE-FR-31	Remove the stale in-solution SQL scripts and add a contract test against the database project	MustChange/rewrite	Infraestructura	TOMI script:12-17 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaaEstatus_StoredProcedures_TOMI.sql#L12-L17), CMS script:1 (../../General/ActualizaEstatus/Infraestructura/Scripts/ActualizaEstatus_Stored_procedures_CMS.sql#L1)	Major
-AE-FR-32	Repair the database-project procedures that fail or return the wrong column	MustChange/rewrite	Database project (DBMDW)	028 SP MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql:17-30 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/Bot/Procedures/028%20SP%20MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado.sql#L17-L30), 098 SP usp_Comunes_ActualizaEstatusInterno_SPID.sql:14-26 (../../StoredProcedures/MWD_DB/DBMDW/General/ActualizaEstatus/IT24/Procedures/098%20SP%20usp_Comunes_ActualizaEstatusInterno_SPID.sql#L14-L26)	Major
-AE-FR-33	Check the result of marking the service in use at start-up and at shutdown	MustChange/rewrite	ActualizaEstatus	ServiceHost.cs:104 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L104), ServiceHost.cs:156-157 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L156-L157)	Major
-AE-FR-34	Replace the obsolete configuration calls, fix the log-size unit, and remove the dead host settings	rewrite_recommended	ActualizaEstatus	ServiceHost.cs:55-65 (../../General/ActualizaEstatus/ActualizaEstatus/ServiceHost.cs#L55-L65), App.config:6-20 (../../General/ActualizaEstatus/ActualizaEstatus/App.config#L6-L20)	Minor
-AE-FR-35	Add characterization tests for the operation classes, the shared service, the repositories, and the host switch	MustChange/rewrite	PruebasUnitarias	ACTUALIZA_ESTATUS_UT.cs:45-135 (../../General/ActualizaEstatus/PruebasUnitarias/ACTUALIZA_ESTATUS_UT.cs#L45-L135)	Major
+        protected ConfiguracionServicio _Configuracion;
+        protected OperacionDTO _Operacion;
+        protected IParametrosOperaciones _IParametrosOperaciones;
+        protected Dictionary<string, object> dicParametros;
+
+        protected ServicioGeneral CrearServicioGeneral() => _fabricaServicioGeneral.Crear();
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.ServiceModel;
+using System.Threading.Tasks;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+
+namespace Aplicacion.Servicios
+{
+    public class FabricaServicioGeneral : IFabricaServicioGeneral
+    {
+        private readonly ConfiguracionServicio _configuracion;
+        private readonly IParametrosOperaciones _operaciones;
+        private readonly IOperacionesCms _operacionesCms;
+        private readonly IOperacionesSpei _operacionesSpei;
+        private readonly IOperacionesSpid _operacionesSpid;
+        private readonly IOperacionesTef _operacionesTef;
+
+        public FabricaServicioGeneral(
+            ConfiguracionServicio configuracion,
+            IParametrosOperaciones operaciones,
+            IOperacionesCms operacionesCms,
+            IOperacionesSpei operacionesSpei,
+            IOperacionesSpid operacionesSpid,
+            IOperacionesTef operacionesTef)
+        {
+            _configuracion = configuracion;
+            _operaciones = operaciones;
+            _operacionesCms = operacionesCms;
+            _operacionesSpei = operacionesSpei;
+            _operacionesSpid = operacionesSpid;
+            _operacionesTef = operacionesTef;
+        }
+
+        public ServicioGeneral Crear() => new ServicioGeneral(
+            _configuracion,
+            _operaciones,
+            _operacionesCms,
+            _operacionesSpei,
+            _operacionesSpid,
+            _operacionesTef);
+    }
+
+    /// <summary>
+    /// Clase principal de servicio general.
+    /// </summary>
+    public class ServicioGeneral 
+    {
+        private readonly IParametrosOperaciones _IOperaciones;
+        private readonly IOperacionesCms _OperacionesCms;
+        private readonly IOperacionesSpid _OperacionesSpid;
+        private readonly IOperacionesSpei _OperacionesSpei;
+        private readonly IOperacionesTef _OperacionesTEF;
+        private readonly ConfiguracionServicio _Configuracion;
+        private Dictionary<string, object> dicParametros;
+
+        /// <summary>
+        /// Constructor de ServicioGeneral.
+        /// Inicializa las dependencias necesarias para la validación de estatus,
+        /// actualización de operaciones y comunicación con los distintos sistemas.
+        /// </summary>
+        /// <param name="configuracion">Configuración general del servicio.</param>
+        /// <param name="operaciones">Operaciones generales y parámetros del sistema.</param>
+        /// <param name="ioperacionesCMS">Operaciones relacionadas con CMS.</param>
+        /// <param name="ioperacionesSPEI">Operaciones relacionadas con SPEI.</param>
+        /// <param name="ioperacionesSPID">Operaciones relacionadas con SPID.</param>
+        /// <param name="operacionesTEF">Operaciones relacionadas con TEF.</param>
+        public ServicioGeneral(ConfiguracionServicio configuracion, IParametrosOperaciones operaciones, IOperacionesCms ioperacionesCMS = null, IOperacionesSpei ioperacionesSPEI = null, IOperacionesSpid ioperacionesSPID = null, IOperacionesTef operacionesTEF = null)
+        {
+            _Configuracion = configuracion;
+            _IOperaciones = operaciones;
+            _OperacionesCms = ioperacionesCMS;
+            _OperacionesSpei = ioperacionesSPEI;
+            _OperacionesSpid = ioperacionesSPID;
+            _OperacionesTEF = operacionesTEF;
+        }
+
+        /// <summary>
+        /// Valida el estatus de una operación SPEI y actualiza los estatus
+        /// correspondientes en TOMI de acuerdo con la respuesta obtenida.
+        /// </summary>
+        /// <param name="tablaTomi">Tabla TOMI donde se encuentra registrada la operación.</param>
+        /// <param name="CampoTablaTomi">Campo utilizado para localizar la operación.</param>
+        /// <param name="FolioTomi">Folio de la operación a validar.</param>
+        /// <param name="TipoOperacion">Tipo de operación en proceso.</param>
+        /// <returns>
+        /// Resultado de la validación de la operación SPEI.
+        /// </returns>
+        public async Task<EstatusSPEIModel> ValidaEstatusSPEI(string tablaTomi, string CampoTablaTomi,string FolioTomi, string TipoOperacion)
+        {
+            EstatusSPEIModel resultado = new EstatusSPEIModel();
+
+            try
+            {
+                Config.EscribirLog($"INFO|Config.ValidaEstatus_SPEI|A revisar el estatus en SPEI del Folio {FolioTomi} en la base : {tablaTomi}");
+
+                DatoSPEIDTO datoSpei = await _IOperaciones.EjecutarSPValidaEstatusSPEI(tablaTomi, CampoTablaTomi, FolioTomi);
+
+                if (datoSpei == null) throw new Exception("No se encontro el registro en la tabla de TOMI");
+
+                switch (datoSpei.Nf_estatus)
+                {
+                    case ConstantesServicios.TomiEstatusRECC:
+                        Config.EscribirLog($"INFO|Config.ValidaEstatus_SPEI|Operación CANCELADA, no buscará el status en SPEI");
+
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaEstatusRechazadoSPEI, new Dictionary<string, object>()
+                        {
+                            {"tablatomi", tablaTomi},
+                            {"campotomi", CampoTablaTomi},
+                            {"foliotomi", FolioTomi},
+                        });
+
+                        resultado.BResultado = true;
+                        return resultado;
+                    case ConstantesServicios.TomiEstatusCONP:
+                    case ConstantesServicios.TomiEstatusCONF:
+
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaEstatusProcesadoSPEI, new Dictionary<string, object>()
+                        {
+                            {"tablatomi", tablaTomi},
+                            {"campotomi", CampoTablaTomi},
+                            {"foliotomi", FolioTomi},
+                        });
+
+                        break;
+
+                }
+
+                if (datoSpei.Nf_fecha_ejecucion.ToString() != _Configuracion.strFechayyyyMMdd)
+                    throw new Exception("La fecha de operación es distinta a la del sistema ");
+
+                SalidaEstatusSPEIDTO resultadoStatusSpei = await _OperacionesSpei.EjecutarSPSPEIStatus(datoSpei.Nf_opfechaoper_spei, datoSpei.T24_folio_asignado);
+
+                if (resultadoStatusSpei == null)
+                    throw new Exception($"No fue posible consultar el estatus SPEI para el folio {FolioTomi}");
+                
+                string StrCadenaRegreso = String.Format("{0}|{1}|{2}", resultadoStatusSpei.op_estado, resultadoStatusSpei.op_monto, resultadoStatusSpei.Clave?.ToString() ?? string.Empty);
+
+                await _OperacionesSpei.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_InterfacesTOMI_SPEI_Status3, new Dictionary<string, object>()
+                {
+                    {"op_fecha_oper", datoSpei.Nf_opfechaoper_spei},
+                    {"op_cve_rastreo", datoSpei.Nf_opclave_spei}
+                });
+
+                Config.EscribirLog($"INFO|Config.ValidaEstatus_SPEI|SQL de Actualización de tabla SPEI_e");
+
+                if (string.IsNullOrEmpty(StrCadenaRegreso)) await _OperacionesSpei.EjecutarSPValidaEstatusAdicionalSPEI(datoSpei.Nf_opfechaoper_spei, datoSpei.T24_folio_asignado);
+
+                
+                string[] strResultado = StrCadenaRegreso.Split('|');
+                switch (strResultado[0])
+                {
+                    case ConstantesServicios.TomiEstatusLQ:
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaEstatusInterno_SPEI_LQ, new Dictionary<string, object>()
+                {
+                    {"tablatomi", tablaTomi},
+                    {"campotomi", CampoTablaTomi},
+                    {"foliotomi", FolioTomi},
+                });
+                        break;
+
+                    case ConstantesServicios.TomiEstatusD:
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaEstatusInterno_SPEI_D, new Dictionary<string, object>()
+                {
+                    {"tablatomi", tablaTomi},
+                    {"campotomi", CampoTablaTomi},
+                    {"foliotomi", FolioTomi},
+                });
+                        break;
+
+                    case ConstantesServicios.TomiEstatusCL:
+                    case ConstantesServicios.TomiEstatusRL:
+                    case ConstantesServicios.TomiEstatusCN:
+                    case ConstantesServicios.TomiEstatusRB:
+
+                        
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaEstatusInterno_SPEI, new Dictionary<string, object>()
+                        {
+                            {"tablatomi", tablaTomi},
+                            {"campotomi", CampoTablaTomi},
+                            {"foliotomi", FolioTomi},
+                            {"estatus", resultadoStatusSpei.op_estado }
+                        });
+
+                        break;
+                    default:
+                        await _OperacionesSpei.EjecutarSPValidaEstatusAdicionalSPEI(datoSpei.Nf_opfechaoper_spei, datoSpei.T24_folio_asignado);
+                        break;
+                }
+                resultado.BResultado = true;
+                resultado.StrSPey = resultadoStatusSpei.op_estado;
+
+                Config.EscribirLog($"INFO|Config.ValidaEstatus_SPEI|Se termina procesamiento de folio: {FolioTomi}");
+
+                return resultado;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Config.ValidaEstatus_SPEI|Se presenta exception: {ex.ToString()}. Trace: {ex.InnerException}");
+                _IOperaciones.EnviaAlerta(new AlertaDTO()
+                {
+                    Folio = FolioTomi,
+                    TipoOPeracion = TipoOperacion,
+                    NombreProceso = TipoOperacion
+                });
+            }
+
+            return resultado;
+        }
+
+        /// <summary>
+        /// Actualiza la información de CMS y TOMI para operaciones SPEI
+        /// de acuerdo con el estatus final de la operación.
+        /// </summary>
+        /// <param name="tablaTomi">Tabla TOMI donde se encuentra registrada la operación.</param>
+        /// <param name="FolioTomi">Folio de la operación.</param>
+        /// <param name="TipoOperacion">Tipo de operación en proceso.</param>
+        /// <param name="BaseCMS">Base o tabla CMS a actualizar.</param>
+        /// <param name="strFT">Identificador FT asociado a la operación.</param>
+        /// <returns>
+        /// True cuando la actualización finaliza correctamente; en caso contrario, false.
+        /// </returns>
+        public async Task<bool> Actualiza_CMS_origen_SPEI(string tablaTomi, string FolioTomi, string TipoOperacion, string BaseCMS)
+        {
+            
+            try
+            {
+                string strSPNombre = string.Empty;
+
+                List<CatRazonRechazoDTO> razonesRechazo = null;
+                CatRazonRechazoDTO razonRechazo = null;
+
+                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|A revisar el estatus final en SPEI del folio: {FolioTomi}");
+
+                if (tablaTomi.Contains(ConstantesServicios.VarianteServicioGPH))
+                    strSPNombre = ProcedimientoAlmacenado.sp_Consultar_OrigenSPEI_CMS_GPH;
+                else
+                    strSPNombre = ProcedimientoAlmacenado.sp_Consultar_OrigenSPEI_CMS_FXD;
+
+
+                List<DatoTomiNFDTO> datosTomi = await _IOperaciones.EjecutarSP<DatoTomiNFDTO>(strSPNombre, new Dictionary<string, object>()
+                {
+                    { "tablatomi", tablaTomi},
+                    { "folio", FolioTomi }
+                });
+                DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI| Se ejecuta el Procedimiento: {strSPNombre}");
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontró el registro en TOMI");
+
+                if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                {
+                    switch (datoTomi.nf_estatus_interno)
+                    {
+                        case ConstantesServicios.TomiEstatusLQ:
+
+
+                            await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Comunes_Actualizar_CmsFormato, new Dictionary<string, object>()
+                            {
+                                { "tablacms", BaseCMS },
+                                { "tablatomi", tablaTomi },
+                                { "horaautorizacion", datoTomi.Nf_fecha_autoriza.ToString("HH:mm:ss") },
+                                { "foio", FolioTomi }
+                            });
+
+
+                            switch (BaseCMS)
+                            {
+                                case ConstantesServicios.BaseCMSFormato:
+                                    await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Insertar_CmsFormato, new Dictionary<string, object> {
+                                { "folio", FolioTomi },
+                                { "ft", datoTomi.T24_transaction_id }
+                            });
+                                    break;
+                                case ConstantesServicios.BaseCMSFormatoPaPDetalle:
+                                    await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Insertar_CmsFormatoPaPDetalle, new Dictionary<string, object> {
+                                { "folio", FolioTomi },
+                                { "ft", datoTomi.T24_transaction_id }
+                            });
+                                    break;
+                            }
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|Terminando actualizacion de aceptación de operación");
+                            
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                            {
+                                {"folio", FolioTomi },
+                                {"tipo_operacion", TipoOperacion },
+                                {"opcion" , 4 }
+                            });
+
+                            break;
+
+                        case ConstantesServicios.TomiEstatusD:
+                            
+
+                            razonesRechazo = await _IOperaciones.EjecutarSP<CatRazonRechazoDTO>(ProcedimientoAlmacenado.sp_Consultar_Cat_RazonRechazo, new Dictionary<string, object>
+                            {
+                                { "clave", datoTomi.cd_clave },
+                                { "tipoPago", ConstantesServicios.EstatusSPEI }
+                            });
+                            razonRechazo = razonesRechazo?.FirstOrDefault();
+
+                            if (razonRechazo == null)
+                                throw new Exception($"No se encontró la razón de rechazo SPEI para la clave {datoTomi.cd_clave}");
+
+                            if (ConstantesServicios.VarianteServicioFXD.Equals(TipoOperacion))
+                            {
+                                
+
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|CMS - codigo_mensaje_CMS {razonRechazo.Codigo }");
+
+                                
+
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|Ejecuta el procedimiento {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPEI_Rechazado} con los parametros: Folio {FolioTomi}; BaseCMS {BaseCMS}; CodigoMensaje {razonRechazo.Codigo}");
+                                await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPEI_Rechazado, new Dictionary<string, object>()
+                                {
+                                    { "tablacms", BaseCMS },
+                                    { "tablatomi", tablaTomi },
+                                    { "codigomensaje", razonRechazo.Codigo },
+                                    { "folio", FolioTomi }
+                                });
+                            }
+                            else
+                            {
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|Ejecuta el procedimiento {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPEI_Rechazado} con los parametros: Folio {FolioTomi}; BaseCMS {BaseCMS}; ");
+                                
+                                await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPEI_Rechazado, dicParametros = new Dictionary<string, object>()
+                                {
+                                    { "tablacms", BaseCMS },
+                                    { "tablatomi", tablaTomi },
+                                    { "razonrechazo", razonRechazo.Descripcion },
+                                    { "codigomensaje", razonRechazo.Codigo },
+                                    { "folio", FolioTomi }
+                                });
+                            }
+
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|TOMI");
+                            
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_TomiFormato_SPEI_Rechazado, new Dictionary<string, object>()
+                            {
+                                { "strfolio", FolioTomi },
+                                { "strtablatomi", tablaTomi },
+                            });
+
+                            if (ConstantesServicios.VarianteServicioFXD.Equals(TipoOperacion))
+                            {
+                                
+
+                                await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                                {
+                                    {"folio", FolioTomi },
+                                    {"tipo_operacion", TipoOperacion },
+                                    {"opcion" , 5 },
+                                    {"desc_mensaje", razonRechazo.Descripcion}
+                                });
+                            } 
+                            else
+                            {
+
+                                await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                                {
+                                    {"folio", FolioTomi },
+                                    {"tipo_operacion", TipoOperacion },
+                                    {"opcion" , 6 }
+                                });
+                            }
+
+                            break;
+
+                        case ConstantesServicios.TomiEstatusCN:
+                        case ConstantesServicios.TomiEstatusCL:
+                        case ConstantesServicios.TomiEstatusRB:
+
+                            razonesRechazo = await _IOperaciones.EjecutarSP<CatRazonRechazoDTO>(ProcedimientoAlmacenado.sp_Consultar_Cat_RazonRechazo, new Dictionary<string, object>()
+                            {
+                                { "strclave", datoTomi.cd_clave },
+                                { "strtipopago", ConstantesServicios.EstatusSPEI },
+                                { "strkarpay", datoTomi.nf_estatus_interno }
+                            });
+                            razonRechazo = razonesRechazo?.FirstOrDefault();
+
+                            if (razonRechazo == null)
+                                throw new Exception($"No se encontró la razón de rechazo SPEI para la clave {datoTomi.cd_clave}");
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|CMS - codigo_mensaje_CMS: {razonRechazo.Codigo}");
+
+                            if (ConstantesServicios.VarianteServicioFXD.Equals(TipoOperacion))
+                            {
+                                ReversaPagoRespuestaModel reversar = await ReversarPagoT24(datoTomi.T24_transaction_id);
+
+                                if (reversar.bCorrecto)
+                                    Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|Reverso exitoso: {datoTomi.T24_transaction_id} |Folio: {FolioTomi}");
+                                else
+                                {
+                                    Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|Error al reversar el pago: {datoTomi.T24_transaction_id} | error: {reversar.StrMensajeError}");
+
+                                    
+
+                                    await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                                    {
+                                        {"folio", FolioTomi },
+                                        {"tipo_operacion", TipoOperacion },
+                                        {"opcion" , 7 }
+                                    });
+
+                                    return false;
+                                }
+                            }
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|Ejecuta el procedimiento {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPEI_Rechazado} con los parametros: Folio {FolioTomi}; BaseCMS {BaseCMS};");
+
+                           
+
+                            await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPEI_Rechazado, new Dictionary<string, object>()
+                            {
+                                { "TablaCms", BaseCMS },
+                                { "TablaTomi", tablaTomi },
+                                { "RazonRechazo", razonRechazo.Descripcion },
+                                { "CodigoMensaje", razonRechazo.Codigo },
+                                { "Folio", FolioTomi }
+                            });
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|TOMI");
+
+                            
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_TomiFormato_SPEI_Rechazado, new Dictionary<string, object>()
+                            {
+                                { "strFolio", FolioTomi },
+                                { "strTablaTomi", tablaTomi },
+                            });
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI|Terminando actualización de devolución de operación");
+
+                            
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                            {
+                                {"Folio", FolioTomi },
+                                {"Tipo_operacion", TipoOperacion },
+                                {"Opcion" , 8 },
+                                {"Desc_mensaje", datoTomi.nf_estatus_interno }
+                            });
+                            
+                            break;
+
+                        default:
+                            throw new Exception($"Estatus Interno de SPEI deconocido, nf_estatus_interno = {datoTomi.nf_estatus_interno}");
+                    }
+                }
+                else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                {
+                    
+
+                    await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPEI_Rechazado, new Dictionary<string, object>()
+                    {
+                        { "TablaCms", BaseCMS },
+                        { "TablaTomi", tablaTomi },
+                        { "RazonRechazo", razonRechazo?.Descripcion },
+                        { "CodigoMensaje", razonRechazo?.Codigo },
+                        { "Folio", FolioTomi }
+                    });
+
+                    ;
+
+                    await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                    {
+                        {"Folio", FolioTomi },
+                        {"Tipo_operacion", TipoOperacion },
+                        {"Opcion" , 8 }
+                    });
+
+                }
+
+                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPEI| Se termina Procesamiento de Folio {FolioTomi}");
+
+                return true;
+            }
+            catch(Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Actualiza_CMS_Origen_SPEI|Se presenta Exception: {ex.ToString()} Trace: {ex.InnerException}");
+                _IOperaciones.EnviaAlerta(new AlertaDTO()
+                {
+                    Folio = FolioTomi,
+                    TipoOPeracion = TipoOperacion,
+                    NombreProceso = TipoOperacion
+                });
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Valida el estatus de una operación BBVA y actualiza el estatus
+        /// interno correspondiente en TOMI de acuerdo con la información
+        /// obtenida desde BBVA.
+        /// </summary>
+        /// <param name="tablaTomi">
+        /// Tabla TOMI donde se encuentra registrada la operación.
+        /// </param>
+        /// <param name="CampoTomi">
+        /// Campo utilizado para localizar la operación.
+        /// </param>
+        /// <param name="FolioTomi">
+        /// Folio de la operación a validar.
+        /// </param>
+        /// <param name="TipoOperacion">
+        /// Tipo de operación que se encuentra en proceso.
+        /// </param>
+        /// <returns>
+        /// True cuando la validación y actualización del estatus
+        /// concluyen correctamente; en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ValidaEstatus_BBVA(string tablaTomi, string CampoTomi,string FolioTomi, string TipoOperacion)
+        {
+            try
+            {
+
+                Config.EscribirLog($"INFO|Config.ValidaEstatus_BBVA|A revisar el estatus en BBVA del Folio {FolioTomi}");
+
+                DatoBBVADTO datoBBVA = await _IOperaciones.EjecutarSPValidaEstatusBBVA(tablaTomi, CampoTomi, FolioTomi);
+
+                if (datoBBVA == null)
+                    throw new Exception("No se encontro el registro en la tabla TOMI");
+
+                switch (datoBBVA.nf_estatus)
+                {
+                    case ConstantesServicios.TomiEstatusRECC:
+                        Config.EscribirLog($"INFO|ValidaEstatus_BBVA|Operación CANCELADA, no buscará estatus en BBVA");
+
+                        
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinStatusInterno_BBVA, new Dictionary<string, object>()
+                        {
+                            {"TablaTomi", tablaTomi },
+                            {"Folio", FolioTomi }
+                        });
+
+                        return true;
+                    case ConstantesServicios.TomiEstatusCONF:
+                    case ConstantesServicios.TomiEstatusCONP:
+
+
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinStatusInterno_BBVA, new Dictionary<string, object>()
+                        {
+                            {"TablaTomi", tablaTomi },
+                            {"Folio", FolioTomi },
+                            {"Estatus", ConstantesServicios.TomiEstatusPROC}
+                        });
+
+                        break;
+                }
+
+                if (datoBBVA.nf_fecha_ejecucion.ToString() != _Configuracion.strFechayyyyMMdd)
+                {
+                    throw new Exception("La fecha de la operación es distinta a ladel sistema");
+                }
+
+                DatoPagoDTO pago = await _IOperaciones.BuscarEstatusPago(FolioTomi);
+
+                switch (pago.Stage)
+                {
+                    case ConstantesServicios.TomiEstatusSUCC:
+
+                        
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinStatusInternoLQD_BBVA, new Dictionary<string, object>()
+                        {
+                            {"TablaTomi", tablaTomi },
+                            {"Folio", FolioTomi },
+                            {"Estatus", ConstantesServicios.TomiEstatusLQ }
+                        });
+
+                        return true;
+                    case ConstantesServicios.TomiEstatusDECL:
+
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinStatusInternoLQD_BBVA, new Dictionary<string, object>()
+                        {
+                            {"TablaTomi", tablaTomi },
+                            {"Folio", FolioTomi },
+                            {"Estatus", ConstantesServicios.TomiEstatusD }
+                        });
+                        
+                        return true;
+                    default:
+                        break;
+                }
+
+                Config.EscribirLog($"INFO|ValidaEstatus_BBVA|Se termina Procesamiento de Folio");
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ValidaEstatus_BBVA|Se presenta Exception: {ex.ToString()} Trace: {ex.InnerException}");
+
+                _IOperaciones.EnviaAlerta(new AlertaDTO()
+                {
+                    Folio = FolioTomi,
+                    TipoOPeracion = TipoOperacion,
+                    NombreProceso = TipoOperacion
+                });
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Actualiza la información de CMS y TOMI para operaciones BBVA
+        /// de acuerdo con el estatus final obtenido durante el procesamiento
+        /// de la operación.
+        /// </summary>
+        /// <param name="tablaTomi">
+        /// Tabla TOMI donde se encuentra registrada la operación.
+        /// </param>
+        /// <param name="FolioTomi">
+        /// Folio de la operación a procesar.
+        /// </param>
+        /// <param name="TipoOperacion">
+        /// Tipo de operación en proceso.
+        /// </param>
+        /// <param name="BaseCMS">
+        /// Base o tabla CMS que será actualizada.
+        /// </param>
+        /// <returns>
+        /// True cuando la actualización finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> Actualiza_CMS_origen_BBVA(string tablaTomi, string FolioTomi, string TipoOperacion,string BaseCMS)
+        {
+            try
+            {
+
+                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|A revisar el estatus final en BBVA del folio {FolioTomi}");
+
+                ErrorBBVADTO errorBBVA = (ErrorBBVADTO)await _IOperaciones.ConsultaErroresBBVA();
+
+
+                List<DatoBBVADTO> datosBBVA = await _IOperaciones.EjecutarSP<DatoBBVADTO>(ProcedimientoAlmacenado.sp_Consulta_EstatusTombin_BBVA, new Dictionary<string, object>()
+                {
+                    { "TablaTomi", tablaTomi },
+                    { "Folio", FolioTomi }
+                });
+                DatoBBVADTO datoBBVA = datosBBVA?.FirstOrDefault();
+
+                if (datoBBVA == null)
+                    throw new Exception("No se encontró el registro en TOMI");
+
+                if (ConstantesServicios.TomiEstatusPROC.Equals(datoBBVA.nf_estatus))
+                {
+                    switch (datoBBVA.nf_estatus_interno)
+                    {
+                        case ConstantesServicios.TomiEstatusLQ:
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|CMS");
+
+
+                            await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualiza_OrigenLQCms_BBVA, new Dictionary<string, object>
+                            {   { "TablaCms", BaseCMS },
+                                { "Folio", FolioTomi },
+                                { "FechaPago", datoBBVA.nf_fecha_pago_bbva.ToString("yyyy-MM-dd") },
+                                { "CieGuideBBVA", datoBBVA.nf_cieguide_bbva }
+                            });
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|Terminando aceptación de operación");
+
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                            {
+                                {"Folio", FolioTomi },
+                                {"Tipo_operacion", TipoOperacion },
+                                {"Opcion", 1 }
+                            });
+
+                            break;
+
+                        case ConstantesServicios.TomiEstatusD:
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|CMS");
+
+
+                            await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualiza_OrigenRecCms_BBVA, new Dictionary<string, object>
+                            {   { "TablaCms", BaseCMS },
+                                { "Folio", FolioTomi },
+                                { "RazonRechazo", errorBBVA?.ErrorMessageGeneric },
+                                { "IdRazon", errorBBVA?.IdError }
+                            });
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|Terminando actualizacion de devolución de operación");
+
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualiza_OrigenRecTomi_BBVA, new Dictionary<string, object>
+                            {   { "tablatomi", tablaTomi },
+                                { "folio", FolioTomi },
+                                { "strrazonrechazo", errorBBVA?.ErrorMessageGeneric }
+                            });
+
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                            {
+                                {"Folio", FolioTomi },
+                                {"Tipo_operacion", TipoOperacion },
+                                {"Opcion", 2 }
+                            });
+
+
+                            break;
+
+                        default:
+                            throw new Exception($"Estatus Interno de BBVA desconocido, nf_estatus_interno = {datoBBVA.nf_estatus_interno}");
+
+                    }
+                }
+                else if (ConstantesServicios.TomiEstatusRECC.Equals(datoBBVA.nf_estatus))
+                {
+                    Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|CMS");
+
+                    await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualiza_OrigenRecCms_BBVA, new Dictionary<string, object>
+                    {   { "TablaCms", BaseCMS },
+                        { "Folio", FolioTomi },
+                        { "RazonRechazo", errorBBVA?.ErrorMessageGeneric },
+                        { "IdRazon", errorBBVA?.IdError }
+                    });
+
+
+                    await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                    {
+                        {"Folio", FolioTomi },
+                        {"Tipo_operacion", TipoOperacion },
+                        {"Opcion", 3 }
+                    });
+
+                    Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|Terminando actualizacion de devolución de operación");
+                    
+                }
+
+                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_BBVA|Se Termina Procesamiento de Folio: {FolioTomi}");
+
+                return true;
+            }
+            catch(Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Actualiza_CMS_Origen_BBVA|Se Presenta Exception {ex.ToString()}. Trace {ex.InnerException}");
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Valida el estatus de una operación SPID y actualiza los estatus
+        /// correspondientes en TOMI de acuerdo con la respuesta obtenida.
+        /// </summary>
+        /// <param name="tablaTomi">
+        /// Tabla TOMI donde se encuentra registrada la operación.
+        /// </param>
+        /// <param name="CampoTomi">
+        /// Campo utilizado para localizar la operación.
+        /// </param>
+        /// <param name="FolioTomi">
+        /// Folio de la operación a validar.
+        /// </param>
+        /// <param name="TipoOperacion">
+        /// Tipo de operación que se encuentra en proceso.
+        /// <returns>
+        /// True cuando la validación finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ValidaEstatus_SPID(string tablaTomi,string CampoTomi, string FolioTomi, string TipoOperacion)
+        {
+            try
+            {
+                string StrCadenaRegreso = string.Empty;
+
+                Config.EscribirLog($"INFO|ValidaEstatus_SPID|A revisar el estatus en SPID del folio {FolioTomi}");
+
+
+                List<DatoSPEIDTO> datosTomi = await _IOperaciones.EjecutarSP<DatoSPEIDTO>(ProcedimientoAlmacenado.sp_Consultar_Estatus_TbTombin_SPID, new Dictionary<string, object>() {
+                    { "Folio", FolioTomi },
+                    { "TablaTomi", tablaTomi },
+                    { "CampoTomi", CampoTomi }
+                });
+                DatoSPEIDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontro el registro en la tabla TOMI");
+
+                if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                {
+                    Config.EscribirLog($"INFO|ValidaEstatus_SPID|Operacion CANCELADA, no bucara el estatus en SPID");
+
+                    await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_EstatusInterno_SPID, new Dictionary<string, object>() {
+                    { "Folio", FolioTomi },
+                    { "TablaTomi", tablaTomi },
+                    { "CampoTomi", CampoTomi }
+                });
+
+                    return true;
+                }
+
+                if (datoTomi.Nf_fecha_ejecucion.ToString() != _Configuracion.strFechayyyyMMdd)
+                    throw new Exception("La fecha de la operación es distinta a la del sistema");
+
+
+                List<SalidaStatusSPIDDTO> salidasSPID =  await _OperacionesSpid.EjecutaSPTransaccion<SalidaStatusSPIDDTO>("sp_InterfaceTOMI_SPID_Status2", new Dictionary<string, object>()
+                {
+                    { "op_fecha_oper", datoTomi.Nf_opfechaoper_spei },
+                    { "op_cve_rastreo", datoTomi.T24_folio_asignado }
+                });
+                SalidaStatusSPIDDTO salidaSPID = salidasSPID?.FirstOrDefault();
+
+                if (salidaSPID == null)
+                    throw new Exception($"SPID no devolvió estatus para el folio {FolioTomi}");
+                
+                if (salidaSPID.Clave == null)
+                    StrCadenaRegreso = $"{salidaSPID.op_estado}|{salidaSPID.op_monto}|";
+                else
+                    StrCadenaRegreso = $"{salidaSPID.op_estado}|{salidaSPID.op_monto}|{salidaSPID.Clave}";
+
+                Config.EscribirLog($"INFO|ValidaEstatus_SPID|Cadena de regreso {StrCadenaRegreso}");
+
+                if (string.IsNullOrEmpty(StrCadenaRegreso))
+                   await ValidaEstatusAdicional_SPID(datoTomi.Nf_opfechaoper_spei.ToString(), datoTomi.T24_folio_asignado);
+
+                switch (salidaSPID.op_estado)
+                {
+                    case ConstantesServicios.TomiEstatusLQ:
+
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_EstatusInterno_SPID, new Dictionary<string, object>()
+                        {
+                            { "Folio", FolioTomi },
+                            { "TablaTomi", tablaTomi },
+                            { "CampoTomi", CampoTomi },
+                            { "EstatusInterno", salidaSPID.op_estado }
+                        });
+                        break;
+
+                    case ConstantesServicios.TomiEstatusD:
+
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_EstatusInterno_SPID, new Dictionary<string, object>()
+                        {
+                            { "Folio", FolioTomi },
+                            { "TablaTomi", tablaTomi },
+                            { "CampoTomi", CampoTomi },
+                            { "EstatusInterno", salidaSPID.op_estado },
+                            { "CdClave", salidaSPID.Clave.ToString()  }
+                        });
+                        break;
+
+                    case ConstantesServicios.TomiEstatusCL:
+                    case ConstantesServicios.TomiEstatusRL:
+                    case ConstantesServicios.TomiEstatusCN:
+                    case ConstantesServicios.TomiEstatusRB:
+                        
+                        Config.EscribirLog($"INFO|ValidaEstatus_SPID|Estatus SPID: '{salidaSPID.op_estado}', EstatusTomi: {salidaSPID.op_estado}");
+
+                        await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_EstatusInterno_SPID, new Dictionary<string, object>()
+                        {
+                            { "strFolio", FolioTomi },
+                            { "strTablaTomi", tablaTomi },
+                            { "strCampoTomi", CampoTomi },
+                            { "strEstatusInterno", salidaSPID.op_estado }
+                        });
+                        break;
+
+                    default:
+                        await ValidaEstatusAdicional_SPID(datoTomi.Nf_opfechaoper_spei.ToString(), datoTomi.T24_folio_asignado);
+                        break;
+                }
+
+                Config.EscribirLog($"INFO|ValidaEstatus_SPID|Se termina procesamiento de folio {FolioTomi}");
+                return true;
+            }
+            catch(Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ValidaEstatus_SPID|Se presenta Exception: {ex.ToString()} Trace: {ex.InnerException}");
+
+                _IOperaciones.EnviaAlerta(new AlertaDTO()
+                {
+                    Folio = FolioTomi,
+                    TipoOPeracion = TipoOperacion,
+                    NombreProceso = TipoOperacion
+                });
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Actualiza la información de CMS y TOMI para operaciones SPID
+        /// de acuerdo con el estatus final obtenido durante el procesamiento
+        /// de la operación.
+        /// </summary>
+        /// <param name="tablaTomi">
+        /// Tabla TOMI donde se encuentra registrada la operación.
+        /// </param>
+        /// <param name="FolioTomi">
+        /// Folio de la operación a procesar.
+        /// </param>
+        /// <param name="TipoOperacion">
+        /// Tipo de operación que se encuentra en proceso.
+        /// </param>
+        /// <param name="BaseCMS">
+        /// Base o tabla CMS que será actualizada.
+        /// </param>
+        /// <returns>
+        /// True cuando la actualización finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> Actualiza_CMS_origen_SPID(string tablaTomi, string FolioTomi, string TipoOperacion, string BaseCMS)
+        {
+            try
+            {
+                string strSPNombre = string.Empty;
+
+                List<CatRazonRechazoDTO> razonesRechazo = null;
+                CatRazonRechazoDTO razonRechazo = null;
+
+                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|A revisar el estatus final en SPID del folio {FolioTomi}");
+
+                if (tablaTomi.Contains(ConstantesServicios.VarianteServicioGPH))
+                    strSPNombre = ProcedimientoAlmacenado.sp_Consultar_OrigenSPID_CMS_GPH;
+                else
+                    strSPNombre = ProcedimientoAlmacenado.sp_Consultar_OrigenSPID_CMS;
+
+
+                List<DatoTomiNFDTO> datosTomi = await _IOperaciones.EjecutarSP<DatoTomiNFDTO>(strSPNombre, new Dictionary<string, object>()
+                {
+                    { "TablaTomi", tablaTomi},
+                    { "Folio", FolioTomi }
+                });
+                DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontró el registroen TOMI");
+
+                if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                {
+                    switch(datoTomi.nf_estatus_interno)
+                    {
+                        case ConstantesServicios.TomiEstatusLQ:
+
+                            await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Comunes_Actualizar_CmsFormato, new Dictionary<string, object>()
+                            {
+                                { "TablaCms", BaseCMS },
+                                { "TablaTomi", tablaTomi},
+                                { "HoraAutorizacion", datoTomi.Nf_fecha_autoriza.ToString("HH:mm:ss") },
+                                { "Folio", FolioTomi },
+                            });
+
+
+                            switch (BaseCMS)
+                            {
+                                case ConstantesServicios.BaseCMSFormato:
+                                    await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Insertar_T24Formato_SPID, new Dictionary<string, object> {
+                                { "strFolio", FolioTomi },
+                                { "sFt", datoTomi.T24_transaction_id },
+                            });
+                                    break;
+                                case ConstantesServicios.BaseCMSFormatoPaPDetalle:
+                                    await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Insertar_T24Formato_SPID_PaP, new Dictionary<string, object> {
+                                { "strFolio", FolioTomi },
+                                { "sFt", datoTomi.T24_transaction_id },
+                            });
+                                    break;
+                            }
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Terminando actualización de aceptación de operación {FolioTomi}");
+                            
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                            {
+                                {"Folio", FolioTomi },
+                                {"Tipo_operacion", TipoOperacion },
+                                {"Opcion", 10 }
+                            });
+
+
+                            break;
+
+                        case ConstantesServicios.TomiEstatusD:
+
+
+                            razonesRechazo = await _IOperaciones.EjecutarSP<CatRazonRechazoDTO>(ProcedimientoAlmacenado.sp_Consultar_Cat_RazonRechazo, new Dictionary<string, object>
+                            {
+                                { "strClave", datoTomi.cd_clave },
+                                { "strTipoPago", ConstantesServicios.EstatusSPEI }
+                            });
+                            razonRechazo = razonesRechazo?.FirstOrDefault();
+
+                            if (razonRechazo == null)
+                                throw new Exception($"No se encontró la razón de rechazo SPID para la clave {datoTomi.cd_clave}");
+
+                            if (ConstantesServicios.OperacionSPID.Equals(TipoOperacion))
+                            {
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|CMS - codigo_mensaje_CMS {razonRechazo.Codigo }");
+
+
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Ejecuta el procedimiento {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado} con los parametros: Folio {FolioTomi}; BaseCMS {BaseCMS}; CodigoMensaje {razonRechazo.Codigo}");
+                                await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado, new Dictionary<string, object>()
+                                {
+                                    { "TablaCms", BaseCMS },
+                                    { "TablaTomi", tablaTomi },
+                                    { "CodigoMensaje",razonRechazo.Codigo },
+                                    { "Folio", FolioTomi },
+                                });
+                            }
+                            else
+                            {
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Ejecuta el procedimiento {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado} con los parametros: Folio {FolioTomi}; BaseCMS {BaseCMS}; ");
+
+                                
+                                await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado, new Dictionary<string, object>()
+                                {
+                                    { "TablaCms", BaseCMS },
+                                    { "TablaTomi", tablaTomi },
+                                    { "Folio", FolioTomi },
+                                });
+                            }
+
+                            Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|TOMI ");
+
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_Formato_SPID_Rechazado_TOMI, new Dictionary<string, object>()
+                            {
+                                { "Folio", FolioTomi },
+                                { "TablaTomi", tablaTomi },
+                            });
+
+                            if (ConstantesServicios.OperacionSPID.Equals(TipoOperacion))
+                            {
+
+                                //CAG
+                                dicParametros = new Dictionary<string, object>()
+                                {
+                                    {"Folio", FolioTomi },
+                                    {"Tipo_operacion", TipoOperacion },
+                                    {"Opcion" , 11 },
+                                    {"Desc_mensaje", razonRechazo.Descripcion }
+                                };
+
+                            }
+                            else
+                            {
+                                dicParametros = new Dictionary<string, object>()
+                                {
+                                    {"Folio", FolioTomi },
+                                    {"Tipo_operacion", TipoOperacion },
+                                    {"Opcion", 12 }
+                                };
+                            }
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, dicParametros);
+                            break;
+
+                        case ConstantesServicios.TomiEstatusCN:
+                        case ConstantesServicios.TomiEstatusCL:
+                        case ConstantesServicios.TomiEstatusRB:
+
+
+                            razonesRechazo = await _IOperaciones.EjecutarSP<CatRazonRechazoDTO>(ProcedimientoAlmacenado.sp_Consultar_Cat_RazonRechazo, new Dictionary<string, object>()
+                            {
+                                { "Clave", datoTomi.cd_clave },
+                                { "TipoPago", ConstantesServicios.EstatusSPEI },
+                                { "KarPay", datoTomi.nf_estatus_interno }
+                            });
+                            razonRechazo = razonesRechazo?.FirstOrDefault();
+
+                            Config.EscribirLog($"INFO||Actualiza_CMS_Origen_SPID|CMS - codigo_mensaje_CMS: {razonRechazo?.Codigo}");
+                            Config.EscribirLog($"INFO||Actualiza_CMS_Origen_SPID|CMS ");
+
+                            if (ConstantesServicios.OperacionSPID.Equals(TipoOperacion))
+                            {
+                                ReversaPagoRespuestaModel reversar = await ReversarPagoT24(datoTomi.T24_transaction_id);
+
+                                if (reversar.bCorrecto)
+                                    Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Error al reversar el pago: {datoTomi.T24_transaction_id} |Folio: {FolioTomi}");
+                                else
+                                {
+                                    Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Error al reversar el pago: {datoTomi.T24_transaction_id} | error: {reversar.StrMensajeError}");
+                                    
+
+                                    await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                                    {
+                                        {"Folio", FolioTomi },
+                                        {"Tipo_operacion", TipoOperacion },
+                                        {"Opcion", 13 }
+                                    });
+
+                                    return false;
+                                }
+
+
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Ejecutando el Procedimiento: {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado} ");
+                                
+                                await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado, new Dictionary<string, object>()
+                                {
+                                    { "strFolio", FolioTomi },
+                                    { "strTablaCms", BaseCMS},
+                                    { "strCodigoMensaje", razonRechazo?.Codigo }
+                                });
+                            }
+                            else
+                            {
+
+                                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Ejecutando el Procedimiento: {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado} ");
+
+                                await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado, new Dictionary<string, object>()
+                                {
+                                    { "strFolio", FolioTomi },
+                                    { "strTablaCms", BaseCMS}
+                                });
+                            }
+
+                            await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_Formato_SPID_Rechazado_TOMI, new Dictionary<string, object>()
+                            {
+                                { "Folio", FolioTomi },
+                                { "TablaTomi", tablaTomi}
+                            });
+                            break;
+
+                        default:
+                            throw new Exception($"Estatus de interno de SPID desconocido nf_estatus_interno={datoTomi.nf_estatus_interno}");
+                    }
+                }
+
+                if(ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                {
+                    Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Ejecutando el Procedimiento: {ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado} ");
+                    
+
+                    await _OperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado, new Dictionary<string, object>()
+                    {
+                        { "TablaCms", BaseCMS },
+                        { "TablaTomi", tablaTomi },
+                        { "RazonRechazo", razonRechazo?.Descripcion  },
+                        { "CodigoMensaje", razonRechazo?.Codigo  },
+                        { "Folio", FolioTomi },
+                    });
+
+
+                    await _IOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, new Dictionary<string, object>()
+                    {
+                        {"Folio", FolioTomi },
+                        {"Tipo_operacion", TipoOperacion },
+                        {"Opcion", 13 }
+                    });
+                }
+
+                Config.EscribirLog($"INFO|Actualiza_CMS_Origen_SPID|Se termina Procesamiento de folio: {FolioTomi}");
+
+                return true;
+            }
+            catch(Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Actualiza_CMS_Origen_SPID|Se presenta Exception: {ex.ToString()} Trace: {ex.InnerException}");
+
+                _IOperaciones.EnviaAlerta(new AlertaDTO()
+                {
+                    Folio = FolioTomi,
+                    TipoOPeracion = TipoOperacion,
+                    NombreProceso = TipoOperacion
+                });
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Obtiene el estatus SWIFT asociado a una operación mediante
+        /// el folio T24 proporcionado.
+        /// </summary>
+        /// <param name="FolioT24">
+        /// Folio T24 de la operación a consultar.
+        /// </param>
+        /// <returns>
+        /// Estatus SWIFT de la operación; retorna una cadena vacía
+        /// cuando no se encuentra información.
+        /// </returns>
+        public async Task<string> Dame_Estatus_Swift(string FolioT24)
+        {
+            try
+            {
+                dicParametros = new Dictionary<string, object>() { {"folioT24", FolioT24 } };
+                List<SwiftDTO> _Swift = await _IOperaciones.EjecutarSP<SwiftDTO>(ProcedimientoAlmacenado.sp_Consultar_EstatusSWIFT, dicParametros);
+                SwiftDTO Switf = _Swift?.FirstOrDefault();
+
+                return Switf?.cve_estatus ?? string.Empty;
+            } catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Dame_Estatus_Swift|{ex}");
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene el folio maestro asociado a una operación de acuerdo con
+        /// el folio y tipo de operación proporcionados.
+        /// </summary>
+        /// <param name="Folio">
+        /// Folio de la operación a consultar.
+        /// </param>
+        /// <param name="TipoOperacion">
+        /// Tipo de operación asociado al folio.
+        /// </param>
+        /// <returns>
+        /// Folio maestro encontrado para la operación;
+        /// en caso de no existir información retorna una cadena vacía.
+        /// </returns>
+        public async Task<string> DameFolioMaestro(string Folio, string TipoOperacion) {
+            try
+            {
+                FolioMaerstroModelo _master = await _IOperaciones.ObtenerFolioMestro(Folio, TipoOperacion);
+
+                return (_master != null && !string.IsNullOrEmpty(_master.folio_maestro))
+                    ? _master.folio_maestro
+                    : string.Empty;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|DameFolioMaestro|{ex}");
+                return string.Empty;
+            }
+            
+        }
+
+        /// <summary>
+        /// Envía la respuesta de una operación TEF de salida y valida
+        /// el resultado obtenido a partir de la cadena de respuesta
+        /// generada por el proceso.
+        /// </summary>
+        /// <param name="IdOperacion">
+        /// Identificador de la operación.
+        /// </param>
+        /// <param name="FechaProceso">
+        /// Fecha de proceso de la operación.
+        /// </param>
+        /// <param name="ClaveRastreo">
+        /// Clave de rastreo asociada a la operación.
+        /// </param>
+        /// <param name="Monto">
+        /// Monto de la operación.
+        /// </param>
+        /// <param name="ClaveOperacion">
+        /// Estatus o clave de operación a registrar.
+        /// </param>
+        /// <param name="CausaDevolucion">
+        /// Código de la causa de devolución.
+        /// </param>
+        /// <returns>
+        /// True cuando la operación se procesa correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> Responde_Salida_TEF(int IdOperacion, int FechaProceso,string ClaveRastreo, decimal Monto, string ClaveOperacion, int CausaDevolucion)
+        {
+            try
+            {
+                SalidaTEFModel salidaTEF = new SalidaTEFModel()
+                {
+                    iOperacionId = IdOperacion,
+                    iFechaProceso = FechaProceso,
+                    sClaveRastreo = ClaveRastreo,
+                    dMonto = Monto,
+                    sCausaDevolucion = CausaDevolucion.ToString(),
+                    sClaveOperacion = ClaveOperacion
+                };
+
+                Config.EscribirLog(string.Format("INFO|ENT_TEF.responde_entrada_TEF|Pasaron los parametros. opClave={0},opFechaOper={1},opMonto={2},cveRastreo={3},cd_clave={4},op_estatus={5} ", salidaTEF.iOperacionId, salidaTEF.iFechaProceso, salidaTEF.dMonto, salidaTEF.sClaveRastreo, salidaTEF.sCausaDevolucion, salidaTEF.sClaveOperacion));
+
+                SalidaTefDTO respuesta = await _IOperaciones.Responde_Salida_Tef(salidaTEF);
+
+                Config.EscribirLog(string.Format("INFO|ENT_TEF.responde_entrada_TEF|Cadena_Regreso{0}", respuesta?.StrCadenaRegreso));
+
+                string[] valores = respuesta?.StrCadenaRegreso?.Split(ConstantesServicios.SeparadorPipe);
+                if (valores == null || valores.Length == 0)
+                    return false;
+
+                int.TryParse(valores[0], out int resultado);
+                return resultado == 0; //true or false
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Responde_Salida_TEF|{ex}");
+                return false;
+            }
+        }
+    
+        /// <summary>
+        /// Actualiza el estatus de una operación SPID recibida y valida
+        /// el resultado obtenido del procedimiento correspondiente.
+        /// </summary>
+        /// <param name="ClaveOperacion">
+        /// Clave o estatus de la operación a registrar.
+        /// </param>
+        /// <param name="CausaDevolucion">
+        /// Código de la causa de devolución asociado a la operación.
+        /// </param>
+        /// <param name="Op_Clave">
+        /// Clave de la operación SPID.
+        /// </param>
+        /// <param name="Op_fecha_oper">
+        /// Fecha de operación.
+        /// </param>
+        /// <param name="Op_folio">
+        /// Folio de la operación.
+        /// </param>
+        /// <param name="Op_Cve_Reastreo">
+        /// Clave de rastreo de la operación.
+        /// </param>
+        /// <param name="Op_monto">
+        /// Monto asociado a la operación.
+        /// </param>
+        /// <returns>
+        /// True cuando la actualización del estatus es exitosa;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> Responde_Entrada_SPID(string ClaveOperacion,int? CausaDevolucion, long Op_Clave, int Op_fecha_oper,int Op_folio,string Op_Cve_Reastreo,decimal Op_monto)
+        {
+            try
+            {
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"op_clave", Op_Clave },
+                    {"op_fecha_oper", Op_fecha_oper },
+                    {"op_folio", Op_folio },
+                    {"op_cve_rastreo", Op_Cve_Reastreo ?? string.Empty },
+                    {"op_monto", Op_monto },
+                    {"cd_clave", CausaDevolucion ?? 0 },
+                    {"op_estatus", ClaveOperacion }
+                };
+
+                EntradaSPIDModel entradaSPID = await _OperacionesSpid.SpidEstatusRecibidas(ProcedimientoAlmacenado.sp_InterfaceTOMI_SPID_Cambia_Estatus_Recibidas, dicParametros);
+
+                return (entradaSPID?.IntClave != null && entradaSPID.IntClave.Value == 0); //true or false
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Responde_Entrada_SPID|{ex}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Actualiza el estatus de una operación SPEI recibida y valida
+        /// el resultado obtenido del procedimiento correspondiente.
+        /// </summary>
+        /// <param name="ClaveOperacion">
+        /// Clave o estatus de la operación a registrar.
+        /// </param>
+        /// <param name="CausaDevolucion">
+        /// Código de la causa de devolución asociado a la operación.
+        /// </param>
+        /// <param name="Op_Clave">
+        /// Clave de la operación SPEI.
+        /// </param>
+        /// <param name="Op_fecha_oper">
+        /// Fecha de operación.
+        /// </param>
+        /// <param name="Op_folio">
+        /// Folio de la operación.
+        /// </param>
+        /// <param name="Op_Cve_Reastreo">
+        /// Clave de rastreo de la operación.
+        /// </param>
+        /// <param name="Op_monto">
+        /// Monto asociado a la operación.
+        /// </param>
+        /// <returns>
+        /// True cuando la actualización del estatus es exitosa;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> Responde_Entrada_SPEI(string ClaveOperacion, int? CausaDevolucion, int Op_Clave, int Op_fecha_oper, int Op_folio, string Op_Cve_Reastreo, decimal Op_monto)
+        {
+            try
+            {
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"op_clave", Op_Clave.ToString() },
+                    {"op_fecha_oper", Op_fecha_oper.ToString() },
+                    {"op_folio", Op_folio.ToString() },
+                    {"op_cve_restreo", Op_Cve_Reastreo },
+                    {"op_monto", Op_monto.ToString() },
+                    {"cd_clave", CausaDevolucion?.ToString() ?? string.Empty },
+                    {"op_estatus", ClaveOperacion }
+
+                };
+
+                List<EntradaSPIDModel> entradasSPID = await _IOperaciones.EjecutarSP<EntradaSPIDModel>(ProcedimientoAlmacenado.sp_InterfaceTOMI_SPEI_Cambia_Estatus_Recibidas, dicParametros);
+                EntradaSPIDModel entradaSPID = entradasSPID?.FirstOrDefault();
+
+                return (entradaSPID?.IntClave != null && entradaSPID.IntClave.Value == 0); //true or false
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Responde_Entrada_SPEI|{ex}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el reverso de una operación T24 mediante el servicio
+        /// correspondiente y devuelve el resultado del proceso.
+        /// </summary>
+        /// <param name="FT">
+        /// Identificador FT de la operación a reversar.
+        /// </param>
+        /// <returns>
+        /// Resultado de la ejecución del reverso, incluyendo el estatus
+        /// de éxito y el mensaje de error cuando corresponda.
+        /// </returns>
+        public async Task<ReversaPagoRespuestaModel> ReversarPagoT24(string FT)
+        {
+
+            string endpointWebService = ObtenerEndpointWebService(); var wsReverseFTRef = new wsReverseFT.T24WebServicesImplClient(
+
+            new BasicHttpBinding(),
+            new EndpointAddress(endpointWebService));
+
+            ReversaPagoRespuestaModel respuesta = new ReversaPagoRespuestaModel();
+
+            wsReverseFT.APLICAREVERSOFTRequest req =
+                new wsReverseFT.APLICAREVERSOFTRequest();
+
+            wsReverseFT.webRequestCommon wrc =
+                new wsReverseFT.webRequestCommon
+                {
+                    company = _Configuracion.StrCompanyName,
+                    password = _Configuracion.StrPasswdReg,
+                    userName = _Configuracion.StrUserNameReg
+                };
+
+            wsReverseFT.enquiryInputCollection eiC =
+                new wsReverseFT.enquiryInputCollection
+                {
+                    columnName = "@ID",
+                    criteriaValue = FT,
+                    operand = "EQ"
+                };
+
+            wsReverseFT.enquiryInputCollection[] eiC_Array = new wsReverseFT.enquiryInputCollection[1] 
+            { 
+                eiC
+            };
+
+
+            req.WebRequestCommon = wrc;
+            req.MUFGEFTREVRECORDType = eiC_Array;
+
+            wsReverseFT.APLICAREVERSOFTResponse response;
+
+            try
+            {
+                response = await wsReverseFTRef.APLICAREVERSOFTAsync(req);
+                 
+                string messageGeneralError = string.Empty;
+
+                if (response?.Status?.messages != null &&
+                    response.Status.messages.Length > 0)
+                {
+                    for (short cnt = 0; cnt < response.Status.messages.Length; cnt++)
+                    {
+                        messageGeneralError += response.Status.messages[cnt];
+
+                        if (cnt != response.Status.messages.Length - 1)
+                        {
+                            messageGeneralError += "|";
+                        }
+                    }
+                }
+
+                respuesta.StrMensajeError = messageGeneralError;
+                respuesta.bCorrecto = false;
+
+                if (response?.Status?.successIndicator != wsReverseFT.successIndicator.Success || messageGeneralError.Contains("No records were found that matched the selection criteria"))
+                {
+                    Config.EscribirLog($"INFO|ReversarPagoT24|El registro del reverso de la operación {FT} marcó un error :  {messageGeneralError} El status regresado fue {response?.Status?.successIndicator.ToString()} ");
+                    return respuesta;
+                }
+
+                Config.EscribirLog($"INFO|ReversarPagoT24|El registro del reverso de la operación :  {FT} fue exitoso.");
+                respuesta.StrMensajeError = "";
+                respuesta.bCorrecto = true;
+                return respuesta;
+                
+                
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ReversarPagoT24|El registro del reverso de la operación :  {FT} marcó un error : {ex.ToString()}");
+
+                respuesta.StrMensajeError = ex.ToString();
+                respuesta.bCorrecto = false;
+                return respuesta;
+            }
+
+        }
+
+        /// <summary>
+        /// Realiza una validación adicional del estatus de una operación SPID
+        /// mediante la consulta de información complementaria en el sistema.
+        /// </summary>
+        /// <param name="FechaOperSPID">
+        /// Fecha de operación de la transacción SPID.
+        /// </param>
+        /// <param name="FolioReferencia">
+        /// Folio o clave de rastreo asociado a la operación.
+        /// </param>
+        /// <returns>
+        /// Cadena de respuesta obtenida de la validación adicional;
+        /// retorna una cadena vacía cuando ocurre un error o no existe información.
+        /// </returns>
+        public async Task<string> ValidaEstatusAdicional_SPID(string FechaOperSPID, string FolioReferencia)
+        {
+            try
+            {
+                string cadenaRegreso2 = string.Empty;
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"op_fecha_oper", FechaOperSPID.ToString() },
+                    {"op_cve_rastreo", FolioReferencia },
+
+                };
+
+                List<ValidaSPIDStatus3Modelo> validarSPID = await _OperacionesSpid.EjecutaSPTransaccion<ValidaSPIDStatus3Modelo>("sp_InterfaceTOMI_SPID_Status3", dicParametros);
+                ValidaSPIDStatus3Modelo validaSPID = validarSPID?.FirstOrDefault();
+
+                if (validaSPID != null)
+                {
+                    cadenaRegreso2 = $"{validaSPID.op_estado_proceso}|{validaSPID.op_descripcion_error}";
+                }
+
+                if (!string.IsNullOrEmpty(cadenaRegreso2))
+                {
+                    string[] resultado = cadenaRegreso2.Split('|');
+                    if (resultado[0] != ConstantesServicios.ResultadoExitoso) throw new Exception($"Se presenta un error al registrar la operación: {resultado[1]}");
+                }
+                return cadenaRegreso2;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ValidaEstatusAdicional_SPID|{ex}");
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// Envía la respuesta de una operación TEF de entrada y valida
+        /// el resultado obtenido del proceso correspondiente.
+        /// </summary>
+        /// <param name="IdOperacion">
+        /// Identificador de la operación.
+        /// </param>
+        /// <param name="FechaProceso">
+        /// Fecha de proceso de la operación.
+        /// </param>
+        /// <param name="CausaDevolucion">
+        /// Código de la causa de devolución.
+        /// </param>
+        /// <param name="ClaveOperacion">
+        /// Clave o estatus de la operación.
+        /// </param>
+        /// <returns>
+        /// True cuando la actualización del estatus se procesa correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> Responde_Entrada_TEF(int IdOperacion, int FechaProceso, int CausaDevolucion, string ClaveOperacion)
+        {
+            try
+            {
+
+                SalidaTefDTO respuesta = await _OperacionesTEF.Responde_Entrada_Tef(IdOperacion, FechaProceso, CausaDevolucion, ClaveOperacion);
+
+                if (respuesta == null) return false;
+                
+                respuesta.StrCadenaRegreso = $"{respuesta.op_error}|{respuesta.id_master}";
+                string[] valores = respuesta.StrCadenaRegreso.Split(ConstantesServicios.SeparadorPipe);
+                return (valores.Length > 0 && int.TryParse(valores[0], out int resultado) && resultado == 0); //true or flase
+
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Responde_Entrada_TEF|{ex}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// se oobtiene la informacion de la uri retorno dev.
+        /// </summary>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        private string ObtenerEndpointWebService() => _Configuracion?.UriReversa != null ? _Configuracion.UriReversa : throw new Exception($"No se encontró el parámetro obligatorio '{ParametrosSistema.WS_REVERSA_ENDPOINT}' para el web service Actualiza Estatus.");
+    }
+}
+
+using MUFG_T24.Configuracion_utilidades;
+using System;
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Propiedades generales del servicio.
+    /// </summary>
+    public class ConfiguracionServicio : Configuracion
+    {
+  
+        public TimeSpan StrFechaSistema { get; set; }
+        public TimeSpan StrHoraLecturaInicio { get; set; }
+        public TimeSpan StrHoraLecturaFin { get; set; }
+        public TimeSpan StrHoraOperacionesInicio { get; set; }
+        public TimeSpan StrHoraOperacionesFin { get; set; }
+        public bool BHorarioLectura { get; set; } = false;
+        public new string NombreServicio { get; set; } = null;
+        public string StrNombreSPEI1 { get; set; } = null;
+        public string StrNombreSPEI2 { get; set; } = null;
+        public new bool? TimerEnabled { get; set; } = null;
+        public new double? TimerInterval { get; set; } = null;
+        public bool? BenHorario { get; set; } = false;
+
+        public string strFechayyyyMMdd { get; set; }
+
+        public new object RutaArchivoConfiguracion { get; set; }
+
+        public new string TamanoMaximoArchivoLogKB { get; set; } = null;
+        public string StrCompanyName { get; set; } = null;
+        public string StrPasswdReg { get; internal set; }
+        public string StrUserNameReg { get; set; }
+        public new string PathLog { get; set; }
+        public string configracion { get; set; }
+
+        public string UriReversa { get; set; }
+
+        public new ConfiguracionServicio Clone()
+        {
+            return (ConfiguracionServicio)MemberwiseClone();
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Servicios;
+using MUFG_T24.Modelos;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    public delegate Task<bool> ProcesadorOperacion(string tipoOperacion, OperacionDTO operacion);
+
+    /// <summary>
+    /// Interfaces Operacion Servicio.
+    /// </summary>
+    public interface IOperacionServicio
+    {
+        Task<RespuestaResumenDto> EjecutaProcedimientosAsync(string tipoOperacion = null, string[] folios = null);
+        Task<string> ObtenerPuertoEscucha();
+    }
+
+    /// <summary>
+    /// Contrato para crear y ejecutar servicios según el tipo de operación.
+    /// </summary>
+    public interface IFabricaServiciosOperacion
+    {
+        Task<bool> ProcesarAsync(string tipoOperacion, OperacionDTO operacion);
+    }
+
+    public interface IFabricaServicioGeneral
+    {
+        ServicioGeneral Crear();
+    }
+}
+
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Aplicacion.DTOs;
+using Aplicacion.Modelos;
+using MUFG_T24.Modelos;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interface Parametros Operaciones.
+    /// </summary>
+    public interface IParametrosOperaciones
+    {
+        Task<string> metodoBDAsync();
+
+        Task<Dictionary<string, string>> parametrosSistema();
+        Task MarcarServicioEnEjecucion(string strNombreServicio);
+        Task MarcarServicioEnFinalizacion(string strNombreServcicio);
+        void EnviaAlerta(AlertaDTO alerta);
+
+        Task<string> DameUltimoProceso(OperacionDTO operacion);
+
+        Task IniciarProceso(ProcesoDTO operacion);
+
+        Task TerminarProceso(ProcesoDTO terminaProceso);
+
+        Task<DatoBBVADTO> EjecutarSPValidaEstatusBBVA(string tablaTomi, string CampoTablaTomi, string Folio);
+        Task<DatoSPEIDTO> EjecutarSPValidaEstatusSPEI(string tablaTomi, string CampoTablaTomi, string Folio);
+        Task<DatoSPEIDTO> EjecutarSPValidaEstatusAdicionalSPEI(int FechaOperacionSPEI, string FolioReferencia);
+
+        Task<SalidaEstatusSPEIDTO> EjecutarSPSPEIStatus(int Op_Fecha_Oper, string Op_Cve_Rastreo);
+        Task<SalidaTefDTO> Responde_Salida_Tef(SalidaTEFModel salidaTEF);
+        Task<SalidaTefDTO> Responde_Entrada_Tef(int IdOperacion, int FechaProceso,int CausaDevolucion, string ClaveOperacion);
+
+        Task<DatoPagoDTO> BuscarEstatusPago(string Folio);
+
+        Task<datoENT_TEFDTO> EjecutaSPTefRecibidad(int Op_Fecha_Oper);
+
+        Task<DatoSPEIDTO> EjecutaSPSPSPEI_Estatus_Recibidas(int OpFechaOperacion);
+
+        Task<ErrorBBVADTO> ConsultaErroresBBVA();
+
+        Task<List<T>> EjecutarSP<T>(string SPNombre, Dictionary<string, object> Parametros) where T : new();
+        Task<bool> EjecutarSP(string SPNombre, Dictionary<string, object> Parametros);
+        Task<FolioMaerstroModelo> ObtenerFolioMestro(string folio, string tipoOperacion);
+        Task<string> obtenerPuertoEscucha();
+    }
+}
+
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interface Operaciones Cms.
+    /// </summary>
+    public interface IOperacionesCms
+    {
+        Task<object> EjecutaSPTransaccion(string SPNombre, Dictionary<string, object> Parametros);
+    }
+}
+
+using Aplicacion.DTOs;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interface Operaciones Spei.
+    /// </summary>
+    public interface IOperacionesSpei
+    {
+        Task<object> EjecutaSPTransaccion(string SPNombre, Dictionary<string, object> Parametros);
+        Task<SalidaEstatusSPEIDTO> EjecutarSPSPEIStatus(int Op_Fecha_Oper, string Op_Cve_Rastreo);
+        Task<DatoSPEIDTO> EjecutarSPValidaEstatusAdicionalSPEI(int FechaOperacionSPEI, string FolioReferencia);
+        Task<List<DatoSPEIDTO>> EjecutaSPSPSPEI_Estatus_Recibidas(int OpFechaOperacion);
+    }
+}
+
+using Aplicacion.DTOs;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interfaces Operaciones Spei2.
+    /// </summary>
+    public interface IOperacionesSpei2
+    {
+        Task<List<DatoSPEIDTO>> EjecutaSPSPSPEI_Estatus_Recibidas(int OpFechaOperacion);
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Modelos;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interfaces Operaciones Spid.
+    /// </summary>
+    public interface IOperacionesSpid
+    {
+        Task<List<T>> EjecutaSPTransaccion<T>(string SPNombre, Dictionary<string, object> Parametros) where T : new();
+        Task<List<DatoENT_SPIDDTO>> EjecutaSPSPID_Estatus_Recibidas(int OpFechaOperacion);
+        Task<EntradaSPIDModel> SpidEstatusRecibidas(string SPNombre, Dictionary<string, object> Parametros);
+    }
+}
+
+using Aplicacion.DTOs;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interfaces Operaciones Tef.
+    /// </summary>
+    public interface IOperacionesTef
+    {
+        Task<datoENT_TEFDTO> EjecutaSPTefRecibidad(int Op_Fecha_Oper);
+        Task<SalidaTefDTO> Responde_Entrada_Tef(int IdOperacion, int FechaProceso, int CausaDevolucion, string ClaveOperacion);
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Conexiones;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Threading.Tasks;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+
+namespace Infraestructura.Repositorio
+{
+    /// <summary>
+    /// Clase principal de ConsultaBDTomi.
+    /// </summary>
+    public class ConsultasBDTomi : RepositorioMaestro, IParametrosOperaciones
+    {
+        private readonly IAlertas alerta;
+
+        /// <summary>
+        /// Constructor 
+        /// </summary>
+        /// <param name="proveedor"></param>
+        /// <param name="nombreBaseDatos"></param>
+        public ConsultasBDTomi(IAlertas alertaT)
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            alerta = alertaT;
+        }
+
+        /// <summary>
+        /// Obtención de la fecha desde la base de datos
+        /// </summary>
+        /// <returns></returns>
+        public async Task<string> metodoBDAsync()
+        {
+            var resultado = await EjecutarStoredProcedureQuery<SistemaFechaDto>(ProcedimientoAlmacenado.sp_Fecha_Sistema);
+            return resultado?.Data?.FirstOrDefault()?.Fecha?.ToString();
+
+        }
+
+        /// <summary>
+        /// Envia alerta.
+        /// </summary>
+        /// <param name="alertaDto"></param>
+        public void EnviaAlerta(AlertaDTO alertaDto) => alerta.InsertarAlerta(alertaDto);
+
+        /// <summary>
+        /// Marca el servicio en ejecucion.
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <returns></returns>
+        public async Task MarcarServicioEnEjecucion(string strNombreServicio) => await ActualizaEJecucion(strNombreServicio);
+        
+        /// <summary>
+        /// Marva el servicio en finalizacion.
+        /// </summary>
+        /// <param name="strNombreServcicio"></param>
+        /// <returns></returns>
+        public async Task MarcarServicioEnFinalizacion(string strNombreServcicio) => await ActualizaTerminacion(strNombreServcicio);
+
+        /// <summary>
+        /// Obtiene los parametros del sistema.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<Dictionary<string, string>> parametrosSistema()
+        {
+            string parametrosSistema = $"'{ParametrosSistema.HORA_LECTURA_INICIO}','{ParametrosSistema.HORA_LECTURA_FIN}','{ParametrosSistema.SPEI_SERVIDOR_1}','{ParametrosSistema.SPEI_SERVIDOR_2}','{ParametrosSistema.WST24_MW_COMPANY}','{ParametrosSistema.WST24_MW_USERNAME_REG}','{ParametrosSistema.WST24_MW_PASS_REG}','{ParametrosSistema.WS_REVERSA_ENDPOINT}'";
+            var result = await EjecutarStoredProcedureQuery<ParametrosModelo>(ProcedimientoAlmacenado.sp_Parametros_Sistema, cmd =>
+            {
+                IDbDataParameter param = cmd.CreateParameter();
+                param.ParameterName = "@strParametros";
+                param.Value = parametrosSistema;
+                cmd.Parameters.Add(param);
+            });
+
+            if (result.Data == null) return new Dictionary<string, string>();
+
+            return result.Data
+            .Where(x => x != null && !string.IsNullOrWhiteSpace(x.Id_parametro))
+            .GroupBy(x => x.Id_parametro)
+            .ToDictionary(
+                x => x.Key,
+                x => x.LastOrDefault()?.Valor ?? string.Empty);
+        }
+
+        /// <summary>
+        /// Obtiene el ultimo proceso de la operación
+        /// </summary>
+        /// <param name="operacion">Los datos de la operación a consultar</param>
+        /// <returns></returns>
+        public async Task<string> DameUltimoProceso(OperacionDTO operacion)
+        {
+            
+            //SP a Ejecutar sp_UltimoProcesoFolio
+            var result = await EjecutarStoredProcedureQuery<AliasProcesoModelo>(ProcedimientoAlmacenado.sp_UltimoProcesoFolio, cmd =>
+            {
+                IDbDataParameter param = cmd.CreateParameter();
+                param.ParameterName = "@TipoOperacion";
+                param.Value = operacion.StrTipoOperacion;
+                cmd.Parameters.Add(param);
+
+                param = cmd.CreateParameter();
+                param.ParameterName = "@Folio";
+                param.Value = operacion.StrFolio;
+                cmd.Parameters.Add(param);
+
+                param = cmd.CreateParameter();
+                param.ParameterName = "@Servicio";
+                param.Value = operacion.StrServicio;
+                cmd.Parameters.Add(param);
+            });
+
+            return result?.Data?
+            .Select(r => r?.Alias_proceso)
+            .FirstOrDefault() ?? string.Empty;
+        }
+
+        /// <summary>
+        /// Inicia el proceso.
+        /// </summary>
+        /// <param name="operacion"></param>
+        /// <returns></returns>
+        public async Task IniciarProceso(ProcesoDTO operacion) => await IniciaProceso(operacion);
+
+        /// <summary>
+        /// Termina el proceso.
+        /// </summary>
+        /// <param name="operacion"></param>
+        /// <returns></returns>
+        public async Task TerminarProceso(ProcesoDTO operacion) => await TerminaProceso(operacion);
+
+        /// <summary>
+        /// Valida el estatus de BBVA.
+        /// </summary>
+        /// <param name="tablaTomi"></param>
+        /// <param name="CampoTablaTomi"></param>
+        /// <param name="Folio"></param>
+        /// <returns></returns>
+        public async Task<DatoBBVADTO> EjecutarSPValidaEstatusBBVA(string tablaTomi, string CampoTablaTomi, string Folio)
+        {
+            //DatoBBVADTO
+            //sp_Consulta_Estatus_BBVA
+            try
+            {
+                //SP a Ejecutar sp_TerminaProceso
+                var result = await EjecutarStoredProcedureQuery<DatoBBVADTO>(ProcedimientoAlmacenado.sp_Consulta_Estatus_BBVA, cmd =>
+                {
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@TablaTomi";
+                    param.Value = tablaTomi;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@CampoTomi";
+                    param.Value = CampoTablaTomi;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@Folio";
+                    param.Value = Folio;
+                    cmd.Parameters.Add(param);
+
+                });
+
+                return result?.Data?.FirstOrDefault() ?? new DatoBBVADTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EjecutarSPValidaEstatusBBVA|{ex}");
+                return new DatoBBVADTO();
+            }
+        }
+
+        /// <summary>
+        /// Valida Estatus SPEI.
+        /// </summary>
+        /// <param name="tablaTomi"></param>
+        /// <param name="CampoTablaTomi"></param>
+        /// <param name="Folio"></param>
+        /// <returns></returns>
+        public async Task<DatoSPEIDTO> EjecutarSPValidaEstatusSPEI(string tablaTomi, string CampoTablaTomi, string Folio)
+        {
+            //SP: sp_ConsultaEstatusSPEI
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<DatoSPEIDTO>(ProcedimientoAlmacenado.sp_ConsultaEstatusSPEI, cmd =>
+                {
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@TablaTomi";
+                    param.Value = tablaTomi;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@CampoTomi";
+                    param.Value = CampoTablaTomi;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@FolioTomi";
+                    param.Value = Folio;
+                    cmd.Parameters.Add(param);
+                });
+
+
+                return result?.Data?.FirstOrDefault() ?? new DatoSPEIDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EjecutarSPValidaEstatusSPEI|{ex}");
+                return new DatoSPEIDTO();
+            }
+        }
+
+        /// <summary>
+        /// Valida el estatus adicional de SPEI.
+        /// </summary>
+        /// <param name="FechaOperacionSPEI"></param>
+        /// <param name="FolioReferencia"></param>
+        /// <returns></returns>
+        public async Task<DatoSPEIDTO> EjecutarSPValidaEstatusAdicionalSPEI(int FechaOperacionSPEI, string FolioReferencia)
+        {
+            try
+            {
+                using (var ConexionSPEI = (IDisposable)ConexionBasedatosFactory.CrearConexion(BasedatosProveedor.SqlServer, NombreBasedatos.SPEI))
+                {
+                    var db = (IBasedatosConexion)ConexionSPEI;
+                    var result = await EjecutarStoredProcedureQuery<DatoSPEIDTO>(ProcedimientoAlmacenado.sp_InterfacesTOMI_SPEI_Status3, cmd =>
+                    {
+                        cmd.Parameters.Add(db.CrearParametro("@op_fecha_oper", FechaOperacionSPEI));
+                        cmd.Parameters.Add(db.CrearParametro("@op_cve_rastreo", FolioReferencia));
+                    });
+
+                    return result?.Data?.FirstOrDefault() ?? new DatoSPEIDTO();
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EjecutarSPValidaEstatusAdicionalSPEI|{ex}");
+                return new DatoSPEIDTO();
+            } 
+        }
+
+        /// <summary>
+        /// Ejecuta el Spei estatus.
+        /// </summary>
+        /// <param name="Op_Fecha_Oper"></param>
+        /// <param name="Op_Cve_Rastreo"></param>
+        /// <returns></returns>
+        public async Task<SalidaEstatusSPEIDTO> EjecutarSPSPEIStatus(int Op_Fecha_Oper, string Op_Cve_Rastreo)
+        {
+            //SP: sp_InterfaceTOMI_SPEI_Status2
+            try
+            {
+                using (var ConexionSPEI = (IDisposable)ConexionBasedatosFactory.CrearConexion(BasedatosProveedor.SqlServer, NombreBasedatos.SPEI))
+                {
+                    var db = (IBasedatosConexion)ConexionSPEI;
+                    var result = await EjecutarStoredProcedureQuery<SalidaEstatusSPEIDTO>(ProcedimientoAlmacenado.sp_InterfaceTOMI_SPEI_Status2, cmd =>
+                    {
+                        cmd.Parameters.Add(db.CrearParametro("@op_fecha_oper", Op_Fecha_Oper));
+
+                        cmd.Parameters.Add(db.CrearParametro("@op_cve_rastreo", Op_Cve_Rastreo));
+
+                    });
+
+                    return result?.Data?.FirstOrDefault() ?? new SalidaEstatusSPEIDTO();
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EjecutarSPSPEIStatus|{ex}");
+                return new SalidaEstatusSPEIDTO();
+            }
+
+        }
+
+        /// <summary>
+        /// Responde salida TEF.
+        /// </summary>
+        /// <param name="salidaTEF"></param>
+        /// <returns></returns>
+        public async Task<SalidaTefDTO> Responde_Salida_Tef(SalidaTEFModel salidaTEF)
+        {
+            try
+            {
+                var resp = await EjecutarStoredProcedureQuery<SalidaTefDTO>(ProcedimientoAlmacenado.sp_InterfaceTOMITEFCambiaEstatusEnviadas, cmd =>
+                {
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@id_master";
+                    param.Value = salidaTEF.iOperacionId;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_fecha_oper";
+                    param.Value = salidaTEF.iFechaProceso;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_cve_rastreo";
+                    param.Value = salidaTEF.sClaveRastreo;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_monto";
+                    param.Value = salidaTEF.dMonto;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_razon_rechazo";
+                    param.Value = salidaTEF.sCausaDevolucion;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_estatus";
+                    param.Value = salidaTEF.sClaveOperacion;
+                    cmd.Parameters.Add(param);
+
+                });
+
+                return resp?.Data?.FirstOrDefault() ?? new SalidaTefDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Responde_Salida_Tef|{ex}");
+                return new SalidaTefDTO();
+                
+            }
+
+        }
+
+        /// <summary>
+        /// Responde entrada TEF.
+        /// </summary>
+        /// <param name="IdOperacion"></param>
+        /// <param name="FechaProceso"></param>
+        /// <param name="CausaDevolucion"></param>
+        /// <param name="ClaveOperacion"></param>
+        /// <returns></returns>
+        public async Task<SalidaTefDTO> Responde_Entrada_Tef(int IdOperacion, int FechaProceso, int CausaDevolucion, string ClaveOperacion)
+        {
+            try
+            {
+                var resp = await EjecutarStoredProcedureQuery<SalidaTefDTO>(ProcedimientoAlmacenado.sp_InterfaceTOMI_TEF_Recibidas, cmd =>
+                {
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@id_master";
+                    param.Value = IdOperacion;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_fecha_oper";
+                    param.Value = FechaProceso;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_razon_rechazo";
+                    param.Value = CausaDevolucion;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@op_estatus";
+                    param.Value = ClaveOperacion;
+                    cmd.Parameters.Add(param);
+
+                });
+
+                return resp?.Data?.FirstOrDefault() ?? new SalidaTefDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Responde_Entrada_Tef|{ex}");
+                return new SalidaTefDTO();
+            }
+
+        }
+
+        /// <summary>
+        /// Busca Estatus pago.
+        /// </summary>
+        /// <param name="Folio"></param>
+        /// <returns></returns>
+        public async Task<DatoPagoDTO> BuscarEstatusPago(string Folio)
+        {
+            //sp_Consulta_EstatusPago_BBVA
+            try
+            {
+                var resp = await EjecutarStoredProcedureQuery<DatoPagoDTO>(ProcedimientoAlmacenado.sp_Consulta_EstatusPago_BBVA, cmd =>
+                {
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@Folio";
+                    param.Value = Folio;
+                    cmd.Parameters.Add(param);
+
+                });
+
+                return resp?.Data?.FirstOrDefault() ?? new DatoPagoDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|BuscarEstatusPago|{ex}");
+                return new DatoPagoDTO();
+            }
+
+
+        }
+
+        /// <summary>
+        /// Ejecuta TEF recibidas.
+        /// </summary>
+        /// <param name="Op_Fecha_Oper"></param>
+        /// <returns></returns>
+        public async Task<datoENT_TEFDTO> EjecutaSPTefRecibidad(int Op_Fecha_Oper)
+        {
+            //sp_InterfaceTOMI_TEF_Recibidas
+            try
+            {
+                var resp = await EjecutarStoredProcedureQuery<datoENT_TEFDTO>(ProcedimientoAlmacenado.sp_InterfaceTOMI_TEF_Recibidas, cmd =>
+                {
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@op_fecha_oper";
+                    param.Value = Op_Fecha_Oper;
+                    cmd.Parameters.Add(param);
+
+                });
+
+                return resp?.Data?.FirstOrDefault() ?? new datoENT_TEFDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EjecutaSPTefRecibidad|{ex}");
+                return new datoENT_TEFDTO();
+                
+            }
+
+        }
+
+        /// <summary>
+        /// Ejecuta SPEI estatus recibidas.
+        /// </summary>
+        /// <param name="OpFechaOperacion"></param>
+        /// <returns></returns>
+        public async Task<DatoSPEIDTO> EjecutaSPSPSPEI_Estatus_Recibidas(int OpFechaOperacion)
+        {
+            //ConstantesServicios.sp_InterfaceTOMI_SPEI_Status2
+            try
+            {
+                using (var ConexionSPEI = (IDisposable)ConexionBasedatosFactory.CrearConexion(BasedatosProveedor.SqlServer, NombreBasedatos.SPEI))
+                {
+                    var db = (IBasedatosConexion)ConexionSPEI;
+                    var result = await EjecutarStoredProcedureQuery<DatoSPEIDTO>(ProcedimientoAlmacenado.sp_InterfaceTOMI_SPEI_Status2, cmd =>
+                    {
+                        cmd.Parameters.Add(db.CrearParametro("@op_fecha_oper", OpFechaOperacion));
+
+                    });
+
+                    return result?.Data?.FirstOrDefault() ?? new DatoSPEIDTO();
+                }
+            }
+            catch (Exception ex)
+            {
+
+                Config.EscribirLog($"ERROR|EjecutaSPSPSPEI_Estatus_Recibidas|{ex}");
+                return new DatoSPEIDTO();
+                
+            }
+
+        }
+
+        /// <summary>
+        /// Consulta Errores BBVA.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<ErrorBBVADTO> ConsultaErroresBBVA()
+        {
+            //sp_Consulta_Errores_BBVA
+            try
+            {
+                var resp = await EjecutarStoredProcedureQuery<ErrorBBVADTO>(ProcedimientoAlmacenado.sp_Consulta_Errores_BBVA);
+
+                return resp?.Data?.FirstOrDefault() ?? new ErrorBBVADTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ConsultaErroresBBVA|{ex}");
+                return new ErrorBBVADTO();
+            }
+
+        }
+
+        /// <summary>
+        /// Ejecuta Store procedures dinamicos con su DTO dinamico.
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="SPNombre"></param>
+        /// <param name="Parametros"></param>
+        /// <returns></returns>
+        public async Task<List<T>> EjecutarSP<T>(string SPNombre, Dictionary<string, object> Parametros) where T : new()
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<T>(SPNombre, cmd =>
+                {
+                    if (Parametros != null)
+                    {
+                        foreach (var parametro in Parametros)
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = $"@{parametro.Key}";
+                            param.Value = parametro.Value;
+                            cmd.Parameters.Add(param);
+                        }
+                    }
+                });
+
+                return result?.Data;
+            } 
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EjecutarSP<T>|{ex}");
+                return new List<T>();
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta Store Procedures dinamicos.
+        /// </summary>
+        /// <param name="SPNombre"></param>
+        /// <param name="Parametros"></param>
+        /// <returns></returns>
+        public async Task<bool> EjecutarSP(string SPNombre, Dictionary<string, object> Parametros)
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<dynamic>(SPNombre, cmd =>
+                {
+                    if (Parametros != null)
+                    {
+                        foreach (var parametro in Parametros)
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = $"@{parametro.Key}";
+                            param.Value = parametro.Value;
+                            cmd.Parameters.Add(param);
+                        }
+                    }
+                });
+                return result.Exito;
+
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EjecutarSP|{ex}");
+                return false;
+            }
+
+        }
+
+        /// <summary>
+        /// Obtiene Folio maestro.
+        /// </summary>
+        /// <param name="folio"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <returns></returns>
+        public async Task<FolioMaerstroModelo> ObtenerFolioMestro(string folio, string tipoOperacion)
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<FolioMaerstroModelo>(ProcedimientoAlmacenado.sp_ObtenerFolio_Mestro, cmd =>
+                {
+
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@folio";
+                    param.Value = folio;
+                    cmd.Parameters.Add(param);
+
+                    param = cmd.CreateParameter();
+                    param.ParameterName = "@tipooperacion";
+                    param.Value = tipoOperacion;
+                    cmd.Parameters.Add(param);
+                });
+
+                return result?.Data?.FirstOrDefault() ?? new FolioMaerstroModelo();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ObtenerFolioMestro|{ex}");
+                return new FolioMaerstroModelo();
+            }
+        }
+
+        /// <summary>
+        /// Obtiene el puerto donde escucha.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<string> obtenerPuertoEscucha()
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<PuertoEscuchaServicioModelo>(ProcedimientoAlmacenado.sp_ObtenerPuertoEscuchaServicio, cmd =>
+                {
+                    IDbDataParameter param = cmd.CreateParameter();
+                    param.ParameterName = "@servicio";
+                    param.Value = ConstantesServicios.NombreServicio;
+                    cmd.Parameters.Add(param);
+                });
+
+                return result?.Data?
+                .Select(a => a.Puerto)
+                .FirstOrDefault()
+                .ToString() ?? string.Empty;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ObtenerFolioMestro|{ex}");
+                return string.Empty;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorio
+{
+    /// <summary>
+    /// Repositorio para la ejecución de consultas y procedimientos almacenados
+    /// relacionados con operaciones SPEI.
+    /// </summary>
+    public class ConsultasBDSpei : RepositorioMaestro, IOperacionesSpei
+    {
+        /// <summary>
+        /// Constructor de ConsultasBDSpei.
+        /// Inicializa la conexión hacia la base de datos SPEI.
+        /// </summary>
+        public ConsultasBDSpei()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.SPEI, null, null)
+        {
+        }
+
+
+        /// <summary>
+        /// Ejecuta un procedimiento almacenado utilizando los parámetros recibidos.
+        /// </summary>
+        /// <param name="SPNombre">Nombre del procedimiento almacenado.</param>
+        /// <param name="Parametros">Parámetros requeridos para la ejecución.</param>
+        /// <returns>Resultado obtenido del procedimiento almacenado.</returns>
+        public async Task<object> EjecutaSPTransaccion(
+            string SPNombre,
+            Dictionary<string, object> Parametros)
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<DatoSPEIDTO>(
+                    SPNombre,
+                    cmd =>
+                    {
+                        if (Parametros == null)
+                        {
+                            return;
+                        }
+
+                        foreach (var parametro in Parametros)
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = $"@{parametro.Key}";
+                            param.Value = parametro.Value;
+                            cmd.Parameters.Add(param);
+                        }
+                    });
+
+                if (result?.Data == null)
+                {
+                    return new object();
+                }
+
+                return result.Data;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutaSPTransaccion|Error al ejecutar el procedimiento '{SPNombre}': {ex}");
+
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta la consulta de estatus SPEI para la operación indicada.
+        /// </summary>
+        /// <param name="Op_Fecha_Oper">Fecha de operación SPEI.</param>
+        /// <param name="Op_Cve_Rastreo">Clave de rastreo.</param>
+        /// <returns>Información de estatus SPEI.</returns>
+        public async Task<SalidaEstatusSPEIDTO> EjecutarSPSPEIStatus(
+            int Op_Fecha_Oper,
+            string Op_Cve_Rastreo)
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<SalidaEstatusSPEIDTO>(
+                    ProcedimientoAlmacenado.sp_InterfaceTOMI_SPEI_Status2,
+                    cmd =>
+                    {
+                        cmd.Parameters.Add(
+                            basedatosConexion.CrearParametro(
+                                "@op_fecha_oper",
+                                Op_Fecha_Oper));
+
+                        cmd.Parameters.Add(
+                            basedatosConexion.CrearParametro(
+                                "@op_cve_rastreo",
+                                Op_Cve_Rastreo));
+                    });
+
+                if (result?.Data == null)
+                {
+                    return new SalidaEstatusSPEIDTO();
+                }
+
+                return result.Data.FirstOrDefault()
+                    ?? new SalidaEstatusSPEIDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutarSPSPEIStatus|{ex}");
+
+                return null;
+            }
+        }
+
+
+        /// <summary>
+        /// Obtiene información adicional de estatus para una operación SPEI.
+        /// </summary>
+        /// <param name="FechaOperacionSPEI">Fecha de operación.</param>
+        /// <param name="FolioReferencia">Folio o clave de referencia.</param>
+        /// <returns>Información adicional de la operación.</returns>
+        public async Task<DatoSPEIDTO> EjecutarSPValidaEstatusAdicionalSPEI(
+            int FechaOperacionSPEI,
+            string FolioReferencia)
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<DatoSPEIDTO>(
+                    ProcedimientoAlmacenado.sp_InterfacesTOMI_SPEI_Status3,
+                    cmd =>
+                    {
+                        cmd.Parameters.Add(
+                            basedatosConexion.CrearParametro(
+                                "@op_fecha_oper",
+                                FechaOperacionSPEI));
+
+                        cmd.Parameters.Add(
+                            basedatosConexion.CrearParametro(
+                                "@op_cve_rastreo",
+                                FolioReferencia));
+                    });
+
+                if (result?.Data == null)
+                {
+                    return new DatoSPEIDTO();
+                }
+
+                return result.Data.FirstOrDefault()
+                    ?? new DatoSPEIDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutarSPValidaEstatusAdicionalSPEI|{ex}");
+
+                return null;
+            }
+        }
+
+
+        /// <summary>
+        /// Actualiza y obtiene las operaciones SPEI recibidas que requieren cambio de estatus.
+        /// </summary>
+        /// <param name="OpFechaOperacion">Fecha de operación.</param>
+        /// <returns>Listado de operaciones SPEI procesadas.</returns>
+        public async Task<List<DatoSPEIDTO>> EjecutaSPSPSPEI_Estatus_Recibidas(
+            int OpFechaOperacion)
+        {
+            try
+            {
+                var result =
+                    await EjecutarStoredProcedureQuery<DatoSPEIDTO>(
+                        ProcedimientoAlmacenado.sp_InterfaceTOMI_SPEI_CambiaEstatusRecibidas,
+                        cmd =>
+                        {
+                            cmd.Parameters.Add(
+                                basedatosConexion.CrearParametro(
+                                    "@op_fecha_oper",
+                                    OpFechaOperacion));
+                        });
+
+                return result?.Data;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutaSPSPSPEI_Estatus_Recibidas|{ex}");
+
+                return null;
+            }
+        }
+    }
+}
+
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorio
+{
+    /// <summary>
+    /// Repositorio para la ejecución de consultas y procedimientos almacenados
+    /// en la base de datos CMS.
+    /// </summary>
+    public class ConsultasBDCms : RepositorioMaestro, IOperacionesCms
+    {
+        /// <summary>
+        /// Constructor de ConsultasBDCms.
+        /// Inicializa la conexión hacia la base de datos CMS.
+        /// </summary>
+        public ConsultasBDCms()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.CMS, null, null)
+        {
+        }
+
+        /// <summary>
+        /// Ejecuta un procedimiento almacenado utilizando los parámetros recibidos.
+        /// </summary>
+        /// <param name="SPNombre">Nombre del procedimiento almacenado.</param>
+        /// <param name="Parametros">Parámetros requeridos por el procedimiento.</param>
+        /// <returns>
+        /// Resultado obtenido de la ejecución del procedimiento almacenado.
+        /// </returns>
+        public async Task<object> EjecutaSPTransaccion(
+            string SPNombre,
+            Dictionary<string, object> Parametros)
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<dynamic>(
+                    SPNombre,
+                    cmd =>
+                    {
+                        if (Parametros == null)
+                        {
+                            return;
+                        }
+
+                        foreach (var parametro in Parametros)
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = $"@{parametro.Key}";
+                            param.Value = parametro.Value;
+                            cmd.Parameters.Add(param);
+                        }
+                    });
+
+                if (result?.Data == null)
+                {
+                    return new object();
+                }
+
+                return result.Data;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutaSPTransaccion|Error al ejecutar el procedimiento almacenado '{SPNombre}': {ex}");
+                return null;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorio
+{
+    /// <summary>
+    /// Repositorio para la ejecución de consultas y procedimientos almacenados
+    /// relacionados con operaciones SPID.
+    /// </summary>
+    public class ConsultasBDSpid : RepositorioMaestro, IOperacionesSpid
+    {
+        /// <summary>
+        /// Constructor de ConsultasBDSpid.
+        /// Inicializa la conexión hacia la base de datos SPID.
+        /// </summary>
+        public ConsultasBDSpid()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.SPID, null, null)
+        {
+
+        }
+
+
+        /// <summary>
+        /// Ejecuta un procedimiento almacenado utilizando los parámetros recibidos.
+        /// </summary>
+        /// <param name="SPNombre">Nombre del procedimiento almacenado.</param>
+        /// <param name="Parametros">Parámetros requeridos para la ejecución.</param>
+        /// <returns>
+        /// Lista de registros obtenidos del procedimiento almacenado.
+        /// </returns>
+        public async Task<List<T>> EjecutaSPTransaccion<T>(string SPNombre, Dictionary<string, object> Parametros) where T : new()
+        {
+            try
+            {
+                var result = await EjecutarStoredProcedureQuery<T>(
+                    SPNombre,
+                    cmd =>
+                    {
+                        if (Parametros == null)
+                        {
+                            return;
+                        }
+
+                        foreach (var parametro in Parametros)
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = $"@{parametro.Key}";
+                            param.Value = parametro.Value;
+                            cmd.Parameters.Add(param);
+                        }
+                    });
+
+                return result?.Data;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutaSPTransaccion|Error al ejecutar '{SPNombre}': {ex}");
+
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene el estatus de operaciones SPID recibidas para la fecha indicada.
+        /// </summary>
+        /// <param name="OpFechaOperacion">Fecha de operación.</param>
+        /// <returns>
+        /// Conjunto de operaciones SPID recibidas para la fecha indicada.
+        /// </returns>
+        public async Task<List<DatoENT_SPIDDTO>> EjecutaSPSPID_Estatus_Recibidas(
+            int OpFechaOperacion)
+        {
+            try
+            {
+                var resp =
+                    await EjecutarStoredProcedureQuery<DatoENT_SPIDDTO>(
+                        ProcedimientoAlmacenado.sp_InterfaceTOMI_SPID_Estatus_Recibidas,
+                        cmd =>
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = "@op_fecha_oper";
+                            param.Value = OpFechaOperacion;
+                            cmd.Parameters.Add(param);
+                        });
+
+                
+
+                return resp?.Data
+                    ?? new List<DatoENT_SPIDDTO>();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutaSPSPID_Estatus_Recibidas|{ex}");
+
+                return new List<DatoENT_SPIDDTO>();
+            }
+        }
+
+
+        /// <summary>
+        /// Ejecuta la consulta de estatus SPID utilizando el procedimiento almacenado indicado.
+        /// </summary>
+        /// <param name="SPNombre">Nombre del procedimiento almacenado.</param>
+        /// <param name="Parametros">Parámetros requeridos para la consulta.</param>
+        /// <returns>
+        /// Resultado de la consulta de estatus SPID.
+        /// </returns>
+        public async Task<EntradaSPIDModel> SpidEstatusRecibidas(
+            string SPNombre,
+            Dictionary<string, object> Parametros)
+        {
+            try
+            {
+                var resultado =
+                    await EjecutarStoredProcedureQuery<EntradaSPIDModel>(
+                        SPNombre,
+                        cmd =>
+                        {
+                            if (Parametros == null)
+                            {
+                                return;
+                            }
+
+                            foreach (var parametro in Parametros)
+                            {
+                                IDbDataParameter param = cmd.CreateParameter();
+                                param.ParameterName = $"@{parametro.Key}";
+                                param.Value = parametro.Value;
+                                cmd.Parameters.Add(param);
+                            }
+                        },
+                        reader => new EntradaSPIDModel()
+                        {
+                            IntClave = ConversionesComunes.ParseEnteroRequerido(reader.GetValue(0)?.ToString(), "IntClave")
+                        },
+                        CancellationToken.None,
+                        esVistasT24: false,
+                        commandTimeout: null,
+                        validarAfectacion: false);
+
+                return resultado?.Data?.FirstOrDefault();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|SpidEstatusRecibidas|{ex}");
+
+                return null;
+            }
+        }
+
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Data;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorio
+{
+    /// <summary>
+    /// Repositorio para la ejecución de consultas y procedimientos almacenados
+    /// relacionados con operaciones TEF.
+    /// </summary>
+    public class ConsultasBDTef : RepositorioMaestro, IOperacionesTef
+    {
+        /// <summary>
+        /// Constructor de ConsultasBDTef.
+        /// Inicializa la conexión hacia la base de datos TEF.
+        /// </summary>
+        public ConsultasBDTef()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TEF, null, null)
+        {
+        }
+
+        /// <summary>
+        /// Obtiene las operaciones TEF recibidas para la fecha indicada.
+        /// </summary>
+        /// <param name="Op_Fecha_Oper">Fecha de operación a consultar.</param>
+        /// <returns>
+        /// Información de la operación TEF recuperada.
+        /// </returns>
+        public async Task<datoENT_TEFDTO> EjecutaSPTefRecibidad(
+            int Op_Fecha_Oper)
+        {
+            try
+            {
+                var resp =
+                    await EjecutarStoredProcedureQuery<datoENT_TEFDTO>(
+                        ProcedimientoAlmacenado.sp_InterfaceTOMI_TEF_Recibidas,
+                        cmd =>
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = "@op_fecha_oper";
+                            param.Value = Op_Fecha_Oper;
+                            cmd.Parameters.Add(param);
+                        });
+
+                if (resp?.Data == null)
+                {
+                    return new datoENT_TEFDTO();
+                }
+
+                return resp.Data.FirstOrDefault()
+                    ?? new datoENT_TEFDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|EjecutaSPTefRecibidad|{ex}");
+
+                return new datoENT_TEFDTO();
+            }
+        }
+
+        /// <summary>
+        /// Actualiza el estatus de una operación TEF y registra la respuesta
+        /// de devolución correspondiente.
+        /// </summary>
+        /// <param name="IdOperacion">Identificador de la operación.</param>
+        /// <param name="FechaProceso">Fecha de procesamiento.</param>
+        /// <param name="CausaDevolucion">Código de causa de devolución.</param>
+        /// <param name="ClaveOperacion">Estatus de la operación.</param>
+        /// <returns>
+        /// Resultado de la actualización de la operación.
+        /// </returns>
+        public async Task<SalidaTefDTO> Responde_Entrada_Tef(
+            int IdOperacion,
+            int FechaProceso,
+            int CausaDevolucion,
+            string ClaveOperacion)
+        {
+            try
+            {
+                var resp =
+                    await EjecutarStoredProcedureQuery<SalidaTefDTO>(
+                        ProcedimientoAlmacenado.sp_InterfaceTOMITEFCambiaEstatusRecibidas,
+                        cmd =>
+                        {
+                            IDbDataParameter param = cmd.CreateParameter();
+                            param.ParameterName = "@id_master";
+                            param.Value = IdOperacion;
+                            cmd.Parameters.Add(param);
+
+                            param = cmd.CreateParameter();
+                            param.ParameterName = "@op_fecha_oper";
+                            param.Value = FechaProceso;
+                            cmd.Parameters.Add(param);
+
+                            param = cmd.CreateParameter();
+                            param.ParameterName = "@op_razon_rechazo";
+                            param.Value = CausaDevolucion;
+                            cmd.Parameters.Add(param);
+
+                            param = cmd.CreateParameter();
+                            param.ParameterName = "@op_estatus";
+                            param.Value = ClaveOperacion;
+                            cmd.Parameters.Add(param);
+                        });
+
+                if (resp?.Data == null)
+                {
+                    return new SalidaTefDTO();
+                }
+
+                return resp.Data.FirstOrDefault()
+                    ?? new SalidaTefDTO();
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|Responde_Entrada_Tef|{ex}");
+
+                return new SalidaTefDTO();
+            }
+        }
+    }
+
+}
+
+
+namespace Aplicacion.Enums
+{
+    /// <summary>
+    /// Procedimientos almacenados.
+    /// </summary>
+    public class ProcedimientoAlmacenado
+    {
+        #region Stored Procedures IterfacesT24 (Tomi)
+
+        public const string sp_Fecha_Sistema = "usp_ObtenerFechaSistema";
+        public const string sp_Parametros_Sistema = "dbo.usp_Comun_ObtenerParametrosSistema";
+        public const string sp_UltimoProcesoFolio = "dbo.usp_ConsultaAliasUltimoProceso_MUFGLibreria";
+        public const string sp_IniciaProceso = "dbo.usp_comun_InicioProceso";
+        public const string sp_TerminaProceso = "dbo.usp_comun_TerminarProceso"; 
+        public const string sp_ActualizaPlanTrabajo_Maestro_CNT = "dbo.usp_CNT_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXD_GPH = "dbo.usp_FXD_GPH_ActualizaPlanTrabajoMaestro";        
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXD_H2H = "dbo.usp_FXD_H2H_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXD_Local = "dbo.usp_FXD_Local_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXD = "dbo.usp_FXD_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_TMD = "dbo.usp_TMD_ConsultarTombinNF";
+        public const string sp_ActualizaFormatoAceptadoCms_TMD = "dbo.usp_TMD_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaPlanTrabajo_Maestro_TMD = "dbo.usp_TMD_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_TAX = "dbo.usp_TAX_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_SPID_GPH = "dbo.usp_SPID_GPH_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_SPID_H2H = "dbo.usp_SPID_H2H_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_SPID_Local = "dbo.usp_SPID_Local_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_SPID = "dbo.usp_SPID_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_SER = "dbo.usp_SER_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_FXT_GPH = "dbo.ssp_FXT_GPH_ConsultarTombinNF";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXT_GPH = "dbo.usp_FXT_GPH_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXT_H2H = "dbo.usp_FXT_H2H_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_FXT_H2H = "dbo.ssp_FXT_H2H_ConsultarTombinNF";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXT_Local = "dbo.usp_FXT_Local_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_FXT_Local = "dbo.ssp_FXT_Local_ConsultarTombinNF";
+        public const string sp_ConsultarTombinNF_FXT = "dbo.ssp_FXT_ConsultarTombinNF";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXT = "dbo.usp_FXT_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_MercadoDinero = "dbo.usp_MercadoDinero_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_MXF = "dbo.usp_MXF_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_MFX = "dbo.ssp_MFX_ConsultarTombinNF";
+        public const string sp_ConsultarTombinNFEstatus_MFX = "dbo.ssp_MFX_ConsultarTombinNFEstatus";
+        public const string sp_ActualizaTombinNF_MXF = "dbo.usp_MXF_ActualizaTombinNF";
+        public const string sp_ConsultarTombinNFEstatus_TEF = "dbo.ssp_TEF_ConsultarTombinNF";
+        public const string sp_ActualizaPlanTrabajo_Maestro_TEF = "dbo.usp_TEF_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_TEF_H2H = "dbo.usp_TEF_H2H_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_TEF_H2H = "dbo.ssp_TEF_H2H_ConsultarTombinNF";
+        public const string sp_ActualizaPlanTrabajo_Maestro_TEF_GPH = "dbo.usp_TEF_GPH_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_TEF_GPH = "dbo.ssp_TEF_GPH_ConsultarTombinNF"; 
+        public const string sp_ActualizaPlanTrabajo_Maestro_SAT = "dbo.usp_SAT_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_SAT = "dbo.ssp_SAT_ConsultarTombinNF"; 
+        public const string sp_ActualizaPlanTrabajo_Maestro_PaP_FXD = "dbo.usp_PaP_FXD_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_PaP_FXD = "dbo.ssp_PaP_FXD_ConsultarTombinNF";
+        public const string sp_ActualizaFormatoTomi_PaP_FXD = "dbo.usp_PaP_FXD_ActualizaFormatoCms";
+        public const string sp_ActualizaPlanTrabajo_Maestro_PaP_SPID = "dbo.usp_PaP_SPID_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_PaP_SPID = "dbo.ssp_PaP_SPID_ConsultarTombinNF";
+        public const string sp_ActualizaFormatoTomi_PaP_SPID = "dbo.usp_PaP_SPID_ActualizaFormatoTomi";
+        public const string sp_ActualizaPlanTrabajo_Maestro_NOM_FXD = "dbo.usp_NOM_FXD_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_NOM_FXD = "dbo.ssp_PaP_SPID_ConsultarTombinNF";
+        public const string sp_ActualizaFormatoTomi_NOM_FXD = "dbo.usp_NOM_FXD_ActualizaFormatoTomi";
+        public const string sp_ActualizaPlanTrabajo_Maestro_PaP_FXT = "dbo.usp_PaP_FXT_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNFEstatus_PaP_FXT = "dbo.ssp_PaP_FXT_ConsultarTombinNFEstatus";
+        public const string sp_ActualizaTombinDetalle_PaP_FXT = "dbo.usp_PaP_FXD_ActualizaTombinDetalle";
+        public const string sp_ConsultarTombinNF_PaP_FXT = "dbo.ssp_PaP_FXT_ConsultarTombinNF";
+        public const string sp_ActualizaFormatoTomi_PaP_FXT = "dbo.usp_PaP_FXT_ActualizaFormatoTomi";
+        public const string sp_ActualizaPlanTrabajo_Maestro_ENT_SPEI = "dbo.usp_ENT_SPEI_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinEstradasSpei = "dbo.ssp_ENT_SPEI_ConsultarTombinEntradasSPEI";
+        public const string sp_ConsultarBmxPagDia_ENT_COAS = "dbo.ssp_ENT_COAS_ConsultarBmxPagDia";
+        public const string sp_ActualizarBmxPagDia_ENT_COAS = "dbo.usp_ENT_COAS_ActualizaBmxPagDia";
+        public const string sp_ActualizaPlanTrabajo_Maestro_ENT_COAS = "dbo.usp_ENT_COAS_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaPlanTrabajo_Maestro_ENT_SPEI2 = "dbo.usp_ENT_SPEI2_ActualizaPlanTrabajoMaestro";
+        public const string sp_InterfaceTOMI_SPID_Estatus_Recibidas = "sp_InterfaceTOMI_SPID_Estatus_Recibidas";
+        public const string sp_ActualizaPlanTrabajo_Maestro_ENT_SPID = "dbo.usp_ENT_SPID_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarSubTipo_ENT_SPID = "ssp_ENT_SPID_ConsultarSubTipoPlanMaestro";
+        public const string sp_ConsultarOperacionDevuelta_ENT_SPID = "dbo.ssp_ENT_SPID_ConsultarOperacionDevuelta";
+        public const string sp_InterfaceTOMI_TEF_Recibidas = "sp_InterfaceTOMI_TEF_Recibidas";
+        public const string sp_ActualizaPlanTrabajo_Maestro_ENT_TEF = "dbo.usp_ENT_TEF_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_ENT_TEF = "dbo.ssp_ENT_TEF_ConsultarTombinEntradasTEF";
+        public const string sp_ConsultarTombinNF_FXI_GPH = "dbo.ssp_FXI_GPH_ConsultarTombin";
+        public const string sp_ActualizaTombinNF_FXI_GPH = "usp_FXI_GPH_ActualizaTombinNF";
+        public const string sp_ActualizaPlanTrabajo_Maestro_FXI_GPH = "usp_FXI_GPH_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_FXI_H2H = "dbo.ssp_FXI_H2H_ConsultarTombin";
+        public const string sp_ActualizaTombinNF_FXI_H2H = "dbo.usp_FXI_H2H_ActualizaTombinNF";
+        public const string sp_ActualizarPlanTrabajo_Maestro_FXI_H2H = "dbo.usp_FXI_H2H_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_FXI_Local = "dbo.ssp_FXI_Local_ConsultarTombin";
+        public const string sp_ActualizaTombinNF_FXI_Local = "dbo.usp_FXI_Local_ActualizaTombinNF";
+        public const string sp_ActualizarPlanTrabajo_Maestro_FXI_Local = "dbo.usp_FXI_Local_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_FXI = "ssp_FXI_ConsultarTombin";
+        public const string sp_ActualizarPlanTrabajo_Maestro_FXI = "dbo.usp_FXI_ActualizaPlanTrabajoMaestro";
+        public const string sp_ActualizaTombinDetalle_FXI = "dbo.usp_FXI_ActualizaTombinDetalle";
+        public const string sp_ConsultarTombinNF_PaP_FXI = "dbo.ssp_PaP_FXI_ConsultarTombinNF";
+        public const string sp_ActualizarPlanTrabajo_Maestro_PaP_FXI = "dbo.usp_PaP_FXI_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_Detalle_PaP_FXI = "dbo.ssp_PaP_FXI_ConsultarTombinDetalle";
+        public const string sp_ActualizaTombinDetalle_PaP_FXI = "dbo.usp_PaP_FXI_Local_ActualizaTombinNFDetalle";
+        public const string sp_ConsultarTombinNF_DetalleMaestro_PaP_FXI = "dbo.ssp_PaP_FXI_ConsultarTombinNF_DetalleMaestro";
+        public const string sp_ActualizarFormatoTomi_DetalleMaestro_PaP_FXI = "usp_PaP_FXI_ActualizaTombinNFDetalleMaestro";
+        public const string sp_ActualizarPlanTrabajo_Maestro_PaP_TEF = "dbo.usp_PaP_TEF_ActualizaPlanTrabajoMaestro";
+        public const string sp_ConsultarTombinNF_Detalle_PaP_TEF = "dbo.ssp_PaP_TEF_ConsultarTombinDetalle";
+        public const string sp_ActualizarTombinNF_Detalle_PaP_TEF = "dbo.usp_PaP_TEF_ActualizaTombinDetalle";
+        public const string sp_ConsultarTombinNF_DetalleMaestro_PaP_TEF = "dbo.ssp_PaP_TEF_ConsultarTombinMaestro";
+        public const string sp_ActualizarFormatoCms_DetalleMaestro_PaP_TEF = "dbo.usp_PaP_TEF_ActualizaFormatoCms_Maestro";
+        public const string sp_ConsultaEstatusSPEI = "dbo.ssp_ConsultaEstatusSpei";
+        public const string sp_ActualizaEstatusRechazadoSPEI = "dbo.usp_ActualizaEstatusRechazadoSpei";
+        public const string sp_ActualizaEstatusProcesadoSPEI = "dbo.usp_ActualizaEstatusProcesadoSpei";
+        public const string sp_ActualizaEstatusInterno_SPEI_LQ = "dbo.usp_ActualizaEstatuInternoLQSpei";
+        public const string sp_ActualizaEstatusInterno_SPEI_D = "dbo.usp_ActualizaEstatuInternoDSpei";
+        public const string sp_ActualizaEstatusInterno_SPEI = "dbo.usp_ActualizaEstatuInternoSpei";
+        public const string sp_InterfaceTOMITEFCambiaEstatusEnviadas = "sp_InterfaceTOMI_TEF_Cambia_Estatus_Enviadas";
+        public const string sp_InterfaceTOMI_SPEI_Status2 = "sp_InterfaceTOMI_SPEI_Status2";
+        public const string sp_InterfaceTOMI_SPEI_Status_Recibidas = "sp_InterfaceTOMI_SPEI_Status_Recibidas";
+        public const string sp_InterfaceTOMI_SPID_Status2 = "sp_InterfaceTOMI_SPID_Status2";
+        public const string sp_Consultar_OrigenSPEI_CMS_GPH = "dbo.ssp_Consultar_OrigenSPEI_CMS_GPH";
+        public const string sp_Consultar_OrigenSPEI_CMS_FXD = "dbo.ssp_Consultar_OrigenSPEI_CMS_FXD";
+        public const string sp_Comunes_Actualizar_PlanTrabajoMaestro = "dbo.usp_Comunes_ActualizaPlanTrabajoMaestro";
+        public const string sp_Consultar_Cat_RazonRechazo = "dbo.ssp_Consultar_Cat_Razon_Rechazo";
+        public const string sp_Actualizar_TomiFormato_SPEI_Rechazado = "dbo.usp_Comunes_ActualizaFormatoCms_SPEI_Rechazado_TOMI";
+        public const string sp_Consulta_Estatus_BBVA = "dbo.ssp_Consultar_Estatus_BBVA";
+        public const string sp_Consulta_EstatusPago_BBVA = "dbo.ssp_Consultar_EstatusPago_BBVA";
+        public const string sp_Consulta_Errores_BBVA = "dbo.ssp_Consultar_Errores_BBVA";
+        public const string sp_Consulta_EstatusTombin_BBVA = "dbo.ssp_Consultar_TombinStatus_BBVA";
+        public const string sp_Actualiza_OrigenRecTomi_BBVA = "dbo.usp_Comunes_ActualizaFormatoRechazadoTomi_BBVA";
+        public const string sp_Consultar_Estatus_TbTombin_SPID = "dbo.ssp_Consultar_TombinStatus_SPID";
+        public const string sp_Actualizar_EstatusInterno_SPID = "dbo.usp_Comunes_ActualizaEstatusInterno_SPID";
+        public const string sp_Actualizar_Formato_SPID_Rechazado_TOMI = "dbo.usp_Comunes_ActualizaFormatoTomi_SPID_Rechazado";
+        public const string sp_Consultar_EstatusSWIFT = "dbo.ssp_Consultar_EstatusSWIFT";
+        public const string sp_InterfaceTOMI_SPID_Cambia_Estatus_Recibidas = "sp_InterfaceTOMI_SPID_Cambia_Estatus_Recibidas";
+        public const string sp_InterfaceTOMI_SPEI_Cambia_Estatus_Recibidas = "sp_InterfaceTOMI_SPEI_Cambia_Estatus_Recibidas";
+        public const string sp_InterfacesTOMI_SPEI_Status3 = "sp_InterfaceTOMI_SPEI_Status3";
+        public const string sp_ObtenerFolio_Mestro = "dbo.usp_ObtenerFolioMaestro";
+        public const string sp_ObtenerPuertoEscuchaServicio = "dbo.usp_ObtenerPuertoEscuchaServicio";
+        public const string sp_InterfaceTOMITEFCambiaEstatusRecibidas = "sp_InterfaceTOMI_TEF_Cambia_Estatus_Recibidas";
+        public const string sp_InterfaceTOMI_SPEI_CambiaEstatusRecibidas = "sp_InterfaceTOMI_SPEI_Estatus_Recibidas";
+        public const string sp_ActualizaTombinStatusInterno_BBVA = "dbo.usp_Comunes_TombinStatusInterno_BBVA";
+        public const string sp_ActualizaTombinStatusInternoLQD_BBVA = "dbo.usp_Comunes_TombinStatusInternoLQD_BBVA";
+        public const string sp_Consultar_OrigenSPID_CMS_GPH = "dbo.ssp_Consultar_CmsOrigen_SPID_GPH";
+        public const string sp_Consultar_OrigenSPID_CMS = "dbo.ssp_Consultar_CmsOrigen_SPID";
+        #endregion
+
+        #region SP's Para CMS(BOT)
+        public const string sp_ActualizaFormatoRechazadoCms_TMD = "dbo.MUFG_MX2_TMD_ActualizaFormatoRechazadoCms"; //OK
+        public const string sp_ActualizaFormatoAceptadoCms_FXT = "dbo.MUFG_MX2_FXT_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoRechazadoCms_FXT = "dbo.MUFG_MX2_FXT_ActualizaFormatoRechazadoCms";
+        public const string sp_ActualizaFormatoAceptadoCms_MXF = "dbo.MUFG_MX2_MXF_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoRechazadoCms_MXF = "dbo.MUFG_MX2_MFX_ActualizaFormatoRechazadoCms";
+        public const string sp_ActualizaFormatoAceptadoCms_TEF = "dbo.MUFG_MX2_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoRechazadoCms_TEF = "dbo.MUFG_MX2_TEF_ActualizaFormatoRechazadoCms";
+        public const string sp_ActualizaFormatoAceptadoCms_SAT = "dbo.MUFG_MX2_SAT_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoRechazadoCms_SAT = "dbo.MUFG_MX2_SAT_ActualizaFormatoRechazadoCms";
+        public const string sp_ActualizaFormatoCms_PaP_FXD = "dbo.MUFG_MX2_PaP_FXD_ActualizaFormatoCms";
+        public const string sp_ActualizaFormatoCms_PaP_SPID = "dbo.MUFG_MX2_PaP_SPID_ActualizaFormatoCms";
+        public const string sp_ActualizaFormatoCms_NOM_FXD = "dbo.MUFG_MX2_NOM_FXD_ActualizaFormatoCms";
+        public const string sp_InsertarFormatoCms_NOM_FXD = "dbo.MUFG_MX2_NOM_FXD_InsertarFormatoCms";
+        public const string sp_ActualizaFormatoAceptadoCms_PaP_FXT = "dbo.MUFG_MX2_PaP_FXT_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoRechazadoCms_PaP_FXT = "dbo.MUFG_MX2_PaP_FXT_ActualizaFormatoRechazadoCms";
+        public const string sp_ActualizaFormatoCms_PaP_FXT = "dbo.MUFG_MX2_PaP_FXT_ActualizaFormatoCms";
+        public const string sp_ActualizaFormatoAceptadoCms_FXI = "dbo.MUFG_MX2_FXI_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoAceptadoCms_PaP_FXI = "dbo.MUFG_MX2_PaP_FXI_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoRechazadoCms_PaP_FXI = "dbo.MUFG_MX2_PaP_FXI_ActualizaFormatoRechazadoCms";
+        public const string sp_ActualizarFormatoCms_DetalleMaestro_PaP_FXI = "dbo.MUFG_MX2_PaP_FXI_ActualizaFormatoMaestro";
+        public const string sp_ActualizaFormatoAceptadoCms_PaP_TEF = "dbo.MUFG_MX2_PaP_TEF_ActualizaFormatoAceptadoCms";
+        public const string sp_ActualizaFormatoRechazadoCms_PaP_TEF = "dbo.MUFG_MX2_PaP_TEF_ActualizaFormatoRechazadoCms";
+        public const string sp_Comunes_Actualizar_CmsFormato = "dbo.MUFG_MX2_Comunes_ActualizaCmsFormato";
+        public const string sp_Insertar_CmsFormato = "dbo.MUFG_MX2_Insertar_T24Formato";
+        public const string sp_Insertar_CmsFormatoPaPDetalle = "dbo.MUFG_MX2_Insertar_T24Formato_PaP_detalle";
+        public const string sp_Actualizar_CmsFormato_SPEI_Rechazado = "dbo.MUFG_MX2_Comunes_ActualizaFormatoCms_SPEI_Rechazado";
+        public const string sp_Actualiza_OrigenLQCms_BBVA = "dbo.MUFG_MX2_Comunes_ActualizaFormatoLiquidadaCms_BBVA";
+        public const string sp_Actualiza_OrigenRecCms_BBVA = "dbo.MUFG_MX2_Comunes_ActualizaFormatoRechazadoCms_BBVA";
+        public const string sp_Insertar_T24Formato_SPID = "dbo.MUFG_MX2_Insertar_T24Formato_SPID";
+        public const string sp_Insertar_T24Formato_SPID_PaP = "dbo.MUFG_MX2_Insertar_T24Formato_SPID_PaP";
+        public const string sp_Actualizar_CmsFormato_SPID_Rechazado = "dbo.MUFG_MX2_Comunes_ActualizaFormatoCms_SPID_Rechazado";
+        public const string sp_ActualizaFormatoRechazadoCms_FXI = "dbo.MUFG_MX2_FXI_ActualizaFormatoRechazadoCms";
+
+        #endregion
+
+        #region SP's para Enlace(SPEI)
+        public const string sp_ActualizaBmx1_SPEI = "dbo.MUFG_MX2_ActualizaBmx1Spei";
+        #endregion
+    }
+}
+
+
+namespace Aplicacion.Enums
+{
+    /// <summary>
+    /// Constantes del servicio.
+    /// </summary>
+    public class ConstantesServicios
+    {
+        #region Constantes de Tipos de Operación
+
+        public const string NombreServicio = "ActualizaEstatus";
+        public const string OperacionFXD = "FXD";
+        public const string OperacionFXI = "FXI";
+        public const string OperacionFXT = "FXT";
+        public const string OperacionSAT = "SAT";
+        public const string OperacionMFX = "MFX";
+        public const string OperacionFXDLocal = "FXD_Local";
+        public const string OperacionFXILocal = "FXI_Local";
+        public const string OperacionFXTLocal = "FXT_Local";
+        public const string OperacionENTSPEI = "ENT_SPEI";
+        public const string OperacionENTSPEI2 = "ENT_SPEI_2";
+        public const string OperacionENTCOAS = "ENT_COAS";
+        public const string OperacionENTSPID = "ENT_SPID";
+        public const string OperacionSPIDLocal = "SPID_Local";
+        public const string OperacionSPID = "SPID";
+        public const string OperacionCNT = "CNT";
+        public const string OperacionNOMFXD = "NOM_FXD";
+        public const string OperacionPaPFXD = "PaP_FXD";
+        public const string OperacionPaPFXI = "PaP_FXI";
+        public const string OperacionPaPFXT = "PaP_FXT";
+        public const string OperacionPaPSPID = "PaP_SPID";
+        public const string OperacionTMD = "TMD";
+        public const string OperacionTEF = "TEF";
+        public const string OperacionPaPTEF = "PaP_TEF";
+        public const string OperacionENTTEF = "ENT_TEF";
+        public const string OperacionFXDGPH = "FXD_GPH";
+        public const string OperacionFXIGPH = "FXI_GPH";
+        public const string OperacionFXTGPH = "FXT_GPH";
+        public const string OperacionSPIDGPH = "SPID_GPH";
+        public const string OperacionTEFGPH = "TEF_GPH";
+        public const string OperacionFXDH2H = "FXD_H2H";
+        public const string OperacionFXIH2H = "FXI_H2H";
+        public const string OperacionFXTH2H = "FXT_H2H";
+        public const string OperacionSPIDH2H = "SPID_H2H";
+        public const string OperacionTEFH2H = "TEF_H2H";
+        public const string OperacionSER = "SER";
+        public const string OperacionTAX = "TAX";
+        public const string OperacionMDUNKNOW = "MD_UNKNOW";
+        public const string OperacionMDT24 = "MD_T24";
+        public const string OperacionMDSPEIE = "MD_SPEI_E";
+        public const string OperacionMDSPEIS = "MD_SPEI_S";
+        public const string OperacionMDSPIDE = "MD_SPID_E";
+        public const string OperacionMDSPIDS = "MD_SPID_S";
+        public const string OperacionMDMT103S = "MD_MT103_S";
+        public const string OperacionMDMT202S = "MD_MT202_S";
+        public const string OperacionMDMT210S = "MD_MT210_S";
+        public const string OperacionMDMT300S = "MD_MT300_S";
+
+        #endregion
+
+        #region Cadenas de Estatus de Proceso
+
+        public const string EstatusTerminada = "ESTATUS_TERMINADA";
+        public const string EstatusProcesada = "PROCESADA";
+        public const string EstatusSPEI = "SPEI";
+        public const string EstatusTerminado = "TERMINADO";
+        public const string EstatusRechazada = "RECHAZADA";
+
+        #endregion
+
+        #region Alias de Procesos
+
+        public const string AliasDatosGeneral = "DATOS_GRAL";
+        public const string AliasSPEIEstatus = "SPEI_ESTATUS";
+        public const string AliasEstatusTerminadaCMS = "ESTATUS_TERMINADA_CMS";
+        public const string AliasValidaEstatusTOMI = "VALIDA_ESTATUS_TOMI";
+        public const string AliasSwitfEstatus = "SWIFT_ESTATUS";
+        public const string AliasSPIDEstatus = "SPID_ESTATUS";
+        public const string AliastBBVAStatus = "BBVA_ESTATUS";
+        public const string AliasCambiaEstatusTEF = "CAMBIA_ESTATUS_TEF";
+        public const string AliasCambiaEstatusCOAS = "CAMBIA_ESTATUS_COAS";
+        public const string AliasCambiaEstatusSPID = "CAMBIA_ESTATUS_SPID";
+        public const string AliasCambiaEstatusSPEI = "CAMBIA_ESTATUS_SPEI";
+        public const string AliasEstatusTerminada = "ESTATUS_TERMINADA";
+
+        #endregion
+
+        #region Otras Constantes de cadena
+        public const string TomiEstatusPROC = "PROC";
+        public const string TomiEstatusAUAB = "AUAB";
+        public const string TomiEstatusRECC = "RECC";
+        public const string TomiEstatusAPBT = "APBT";
+        public const string TomiEstatusCONP = "CONP";
+        public const string TomiEstatusCONF = "CONF";
+
+        public const string TomiEstatusSUCC = "SUCC";
+        public const string TomiEstatusDECL = "DECL";
+
+        public const string TomiEstatusLQ = "LQ";
+        public const string TomiEstatusD = "D";
+        public const string TomiEstatusCL = "CL";
+        public const string TomiEstatusRL = "RL";
+        public const string TomiEstatusCN = "CN";
+        public const string TomiEstatusRB = "RB";
+
+        public const string FormatoMensajeAceptado = "Formato aceptado";
+        public const string FormatoMensajeRechazado = "Formato rechazado";
+
+        public const string SubTipoOperacionDevolucion = "DEVOLUCION";
+
+        public const char SeparadorPipe = '|';
+
+        public const string SPEICl = "CL";
+        public const string SPEIRl = "RL";
+        public const string ClaveOperacionR = "R";
+        public const string ClaveOperacionA = "A";
+        public const string CausaDevolucionUno = "1";
+        public const string ResultadoExitoso = "0";
+
+        public const string VarianteServicioGPH = "gph";
+        public const string VarianteServicioFXD = "FXD";
+
+        public const string BaseCMSFormato = "formato";
+        public const string BaseCMSFormatoPaPDetalle = "formato_pap_detalle";
+
+        public const string ClaveEstatusRechazadaSPEI = "RECHAZADA - SPEI";
+
+        #endregion
+
+        #region Bases y Tablas
+        public const string TbTombinNFFxdGph = "tb_tombin_nf_fxd_gph";
+        public const string TbTombinNFFxd = "tb_tombin_nf_fxd";
+        public const string CampoNFFolio = "nf_folio";
+        public const string TbTombinNFFxdH2H = "tb_tombin_nf_fxd_h2h";
+        public const string TbTombinNFFxdLocal = "tb_tombin_nf_fxd_local";
+        public const string TbTombinNFSerPay = "tb_tombin_nf_ser_pay";
+        public const string TbFormatPtPs = "tbl_format_pt_ps";
+        public const string TbTombinNFSpid = "tb_tombin_nf_spid";
+        public const string TbSpidFormat = "tbl_spid_formato";
+        public const string TbTombinNFSpidGph = "tb_tombin_nf_spid_gph";
+        public const string TbTombinNFSpidH2H = "tb_tombin_nf_spid_h2h";
+        public const string TbTombinNFSpidLocal = "tb_tombin_nf_spid_local";
+        public const string TbCalypsoLiquidacion = "tbl_calypso_liquidacion";
+        public const string TbTombinNFFxdPaPDetalle = "tb_tombin_nf_fxd_pap_detalle";
+        public const string TbFormatoPapDetalle = "formato_pap_detalle";
+        public const string TbTombinNFSpidPaPDetalle = "tb_tombin_nf_spid_pap_detalle";
+        public const string TbTombinNFFXDNominaDetalle = "tb_tombin_nf_fxd_nomina_detalle";
+        public const string TbFormatoNominaDetalle = "formato_nomina_detalle";
+        public const string TbTombinNFTaxPay = "tb_tombin_nf_tax_pay"; 
+
+
+        
+        #endregion
+
+    }
+}
+
+
+namespace Aplicacion.DTOs
+{
+    /// <summary>
+    /// DTO Dato Spei.
+    /// </summary>
+    public class DatoSPEIDTO
+    {
+
+        public string Nf_estatus { get; set; }
+        public int Op_clave { get; set; }
+        public int Op_folio { get; set; }
+        public string Op_cve_rastreo { get; set; }
+        public string Folio_referencia { get; set; }
+        public int Nf_fecha_ejecucion { get; set; }
+
+        public int Ins_clave { get; set; }
+        public int Tp_clave { get; set; }
+
+        public int Op_monto { get; set; }
+        public string Nf_opclave_spei { get; set; }
+        public int Nf_opfechaoper_spei { get; set; }
+        public string T24_folio_asignado { get; set; }
+    }
+}
+
+
+namespace Aplicacion.DTOs
+{
+    /// <summary>
+    /// DTO Dato Ent_spid.
+    /// </summary>
+    public class DatoENT_SPIDDTO
+    {
+        public long op_clave { get; set; }
+        public int Op_fecha_oper { get; set; }
+
+        public int Op_folio { get; set; }
+
+        public string Op_cve_rastreo { get; set; }
+        public decimal Op_monto { get; set; }
+        public int tp_clave { get; set; }
+        public int cd_clave { get; set; }
+
+    }
+
+    public class OperacionDevueltaSPIDDTO
+    {
+        public int nf_folio { get; set; }
+        public string canal { get; set; }
+    }
+}
+
+
+namespace Aplicacion.DTOs
+{
+    /// <summary>
+    /// DTO Salida estatus spei.
+    /// </summary>
+    public class SalidaEstatusSPEIDTO
+    {
+        public string op_estado { get; set; }
+        public decimal op_monto { get; set; }
+        public int? Clave { get; set; } 
+    }
+}
+
+using System;
+
+namespace Aplicacion.DTOs
+{
+    /// <summary>
+    /// DTO Dato Tomi.
+    /// </summary>
+    public class DatoTomiNFDTO
+    {
+        public string NF_tipo { get; set;  }
+        public string Nf_estatus { get; set; }
+        public string Nf_razon { get; set; }
+        public DateTime Nf_fecha_autoriza { get; set; }
+        public string StrComisionCuenta { get; set; }
+        public string StrComisionMoneda { get; set; }
+        public decimal DecComisionMonto { get; set; }
+        public decimal DecIvaMonto { get; set; }
+        public string T24_transaction_id { get; set; }
+        public string NF_Folio { get; set; }
+
+        public string nf_estatus_interno { get; set; }
+        public string cd_clave { get; set; }
+
+        public DateTime NFFechaEjecucion { get; set; }
+
+    }
+}
+
+using System;
+
+namespace Aplicacion.DTOs
+{
+    /// <summary>
+    /// DTO Dato Tomi t24.
+    /// </summary>
+    public class DatoTomiT24DTO : DatoTomiNFDTO
+    {
+        public int Nf_tef_id_master { get; set; }
+        public DateTime Nf_fecha_ejecucion { get; set; }
+        public decimal T24_debit_amount { get; set; } 
+    }
+}
+
+using System;
+
+namespace Aplicacion.DTOs
+{
+    /// <summary>
+    /// DTO Dato BBVA.
+    /// </summary>
+    public class DatoBBVADTO
+    {
+        public string nf_estatus { get; set; }
+        public string nf_cieguide_bbva { get; set; }
+
+        public int nf_fecha_ejecucion { get; set; }
+        public string t24_folio_asignado { get; set; }
+
+        public string nf_estatus_interno { get; set; }
+        public DateTime nf_fecha_pago_bbva { get; set; }
+
+    }
+}
+
+
+namespace Aplicacion.DTOs
+{
+    /// <summary>
+    /// DTO Dato tomi sat.
+    /// </summary>
+    public class DatoTomiSATDTO
+    {
+        public string NF_estatus { get; set; }
+        public string T24_transaction_id { get; set; }
+        public string Nf_observacion { get; set; }
+        public string Nf_cadena_original { get; set; }
+        public string Nf_sello_digital { get; set; }
+        public string Nf_llave_pago { get; set; }
+        public string Nf_fecha_ejecucion { get; set; }
+        public string nf_tipo { get; set; }
+    }
+}
 
