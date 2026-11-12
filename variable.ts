@@ -4083,3 +4083,7654 @@ namespace Aplicacion.DTOs
     }
 }
 
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Clase principal de servicio cnt.
+    /// </summary>
+    public class Servicio_CNT : ServicioBase
+    {
+        /// <summary>
+        /// Controlador servicio cnt.
+        /// </summary>
+        /// <param name="operacion"></param>
+        /// <param name="parametros"></param>
+        public Servicio_CNT(OperacionDTO operacion, IParametrosOperaciones parametros) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+        /// <summary>
+        /// Procesa la actualización de estatus para operaciones CNT,
+        /// registrando el avance del proceso y actualizando la información
+        /// correspondiente en TOMI y Plan de Trabajo Maestro.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_CNT()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+                    Config.EscribirLog("INFO|CNT.procesaOperacion|Actualizando el estatus como operación terminada en TOMI. ");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_CNT, dicParametros); //
+
+
+                    Config.EscribirLog(string.Format("INFO|CNT.procesaOperacion|Se termina procesamiento de folio: {0}", _Operacion.StrFolio));
+
+                    
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+                    Config.EscribirLog("INFO|CNT.procesaOperacion|Operación finalizada.");
+
+                    dicParametros["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_CNT, dicParametros);
+
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_CNT|{ex}");
+                return false;
+            }
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones ENT_COAS,
+    /// incluyendo la actualización de estatus y la ejecución de los
+    /// procesos correspondientes en TOMI.
+    /// </summary>
+    public class Servicio_ENT_COAS : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio ENT_COAS.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución del servicio.
+        /// </param>
+        public Servicio_ENT_COAS(OperacionDTO operacion, IParametrosOperaciones parametros)
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación ENT_COAS ejecutando las actualizaciones
+        /// de estatus y las acciones correspondientes de acuerdo con el
+        /// último proceso pendiente.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionENT_COAS()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Leyendo los datos de la operación en base SPEI");
+
+                dicParametros = new Dictionary<string, object>() { { "FechaOperacion", _Configuracion.strFechayyyyMMdd } };
+
+
+                List<DatoSPEIDTO> datosSpei = await _IParametrosOperaciones.EjecutarSP<DatoSPEIDTO>(ProcedimientoAlmacenado.sp_ConsultarBmxPagDia_ENT_COAS, dicParametros);
+                DatoSPEIDTO datoSpei = datosSpei?.FirstOrDefault();
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasCambiaEstatusCOAS))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A actualizar estatus en SPEI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (datoSpei?.Op_clave.ToString() == _Operacion.StrFolio)
+                    {
+                        dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarBmxPagDia_ENT_COAS, dicParametros);
+                    }
+
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación termina en TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion", 1 }
+                    };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_COAS, dicParametros);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina procesaiento de folio: {_Operacion.StrFolio}");
+
+                    
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación en espera para finalizar el servicio del SEP");
+                }
+
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionENT_COAS|{ex}");
+                return false;
+            }
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones ENT_SPEI,
+    /// incluyendo la actualización de estatus y la ejecución de los
+    /// procesos asociados en TOMI y SPEI.
+    /// </summary>
+    public class Servicio_ENT_SPEI : ServicioBase
+    {
+        private readonly IOperacionesSpei _IOPeracionesSpei;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio ENT_SPEI.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesSPEI">
+        /// Operaciones especializadas para SPEI.
+        /// </param>
+        public Servicio_ENT_SPEI(ConfiguracionServicio configuracion, OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesSpei operacionesSPEI, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IOPeracionesSpei = operacionesSPEI;
+            _IParametrosOperaciones = parametros;
+
+        }
+
+        /// <summary>
+        /// Procesa una operación ENT_SPEI ejecutando las actualizaciones
+        /// de estatus y los procesos correspondientes de acuerdo con el
+        /// último proceso pendiente registrado.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionENT_SPEI()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Leyendo los datos de la operación en base SPEI. ");
+
+
+                List<DatoSPEIDTO> datosSpei = await _IOPeracionesSpei.EjecutaSPSPSPEI_Estatus_Recibidas(
+                    ConversionesComunes.ParseEnteroRequerido(_Configuracion.strFechayyyyMMdd, nameof(_Configuracion.strFechayyyyMMdd)));
+                DatoSPEIDTO datoSPEI = datosSpei?.Where(a => a?.Op_clave.ToString() == _Operacion.StrFolio).FirstOrDefault();
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasCambiaEstatusSPEI))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A actualizar estatus en SPEI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (datoSPEI?.Op_folio.ToString() == _Operacion.StrFolio)
+                    {
+                        servicio = servicio ?? CrearServicioGeneral();
+                        bProcesado = await servicio.Responde_Entrada_SPEI(ConstantesServicios.ClaveOperacionA, null, datoSPEI.Op_clave, datoSPEI.Nf_opfechaoper_spei, datoSPEI.Op_folio, datoSPEI.Op_cve_rastreo, datoSPEI.Op_monto);
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de resgitro CAMBIA_ESTATUS_SPEI con folio: {_Operacion.StrFolio}");
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_SPEI, dicParametros);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina el procesamiento del folio: {_Operacion.StrFolio}");
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+
+                        datosSpei = await _IParametrosOperaciones.EjecutarSP<DatoSPEIDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinEstradasSpei, dicParametros);
+
+                        datoSPEI = datosSpei?.FirstOrDefault();
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Entrada Devolucion - {datoSPEI?.Tp_clave}");
+
+                        if (datoSPEI?.Tp_clave == 0)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando la operación {_Operacion.StrFolio} tipo - {datoSPEI?.Tp_clave}");
+
+                            await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                            {
+                                Folio = _Operacion.StrFolio,
+                                TipoOperacion = _Operacion.StrTipoOperacion,
+                                NombreProceso = _Configuracion.NombreProceso,
+                                AliasProceso = strAliasProceso,
+                                Servicio = _Configuracion.NombreServicio,
+                                PId = (int)_Configuracion.Pid,
+                                Excepcion = new Exception("")
+                            }); //Termina Proceso
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_SPEI, dicParametros);
+
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación en espera para finalizar el servicio del CEP.");
+                        }
+
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionENT_SPEI|{ex}");
+                return false;
+            }
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones ENT_SPEI2,
+    /// incluyendo la actualización de estatus y la ejecución de los
+    /// procesos asociados en TOMI y SPEI.
+    /// </summary>
+    public class Servicio_ENT_SPEI2 : ServicioBase
+    {
+
+        private readonly IOperacionesSpei2 _IOPeracionesSpei2;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio ENT_SPEI2.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesSpei2">
+        /// Operaciones especializadas para SPEI2.
+        /// </param>
+        public Servicio_ENT_SPEI2(ConfiguracionServicio configuracion, OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesSpei2 operacionesSpei2, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _Configuracion = configuracion;
+            _IOPeracionesSpei2 = operacionesSpei2;
+        }
+
+        /// <summary>
+        /// Procesa una operación ENT_SPEI2 ejecutando las actualizaciones
+        /// de estatus y los procesos correspondientes de acuerdo con el
+        /// último proceso pendiente registrado.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionENT_SPEI2()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Leyendo los datos de la operación en base SPEI. ");
+
+                List<DatoSPEIDTO> datosSpei = await _IOPeracionesSpei2.EjecutaSPSPSPEI_Estatus_Recibidas(
+                    ConversionesComunes.ParseEnteroRequerido(_Configuracion.strFechayyyyMMdd, nameof(_Configuracion.strFechayyyyMMdd)));
+                DatoSPEIDTO datoSPEI = datosSpei?.Where(a => a?.Op_clave.ToString() == _Operacion.StrFolio).FirstOrDefault();
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasCambiaEstatusSPEI))
+                {
+                    if (datoSPEI == null)
+                        throw new Exception($"No se encontró el registro SPEI para el folio {_Operacion.StrFolio}");
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A actualizar estatus en SPEI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (datoSPEI.Op_clave.ToString() == _Operacion.StrFolio)
+                    {
+                        servicio = servicio ?? CrearServicioGeneral();
+                        bProcesado = await servicio.Responde_Entrada_SPEI(ConstantesServicios.ClaveOperacionA, null, datoSPEI.Op_clave, datoSPEI.Nf_opfechaoper_spei, datoSPEI.Op_folio, datoSPEI.Op_cve_rastreo, datoSPEI.Op_monto);
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de resgitro CAMBIA_ESTATUS_SPEI con folio: {_Operacion.StrFolio}");
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_SPEI2, dicParametros);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina el procesamiento del folio: {_Operacion.StrFolio}");
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        var dicParametros2 = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                        datosSpei = await _IParametrosOperaciones.EjecutarSP<DatoSPEIDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinEstradasSpei, dicParametros2);
+
+                        datoSPEI = datosSpei?.FirstOrDefault();
+
+                        if (datoSPEI == null)
+                            throw new Exception($"No se encontró la entrada de devolución SPEI para el folio {_Operacion.StrFolio}");
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Entrada Devolucion - {datoSPEI.Tp_clave}");
+
+                        if (datoSPEI.Tp_clave == 0)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando la operación {_Operacion.StrFolio} tipo - {datoSPEI.Tp_clave}");
+
+
+                            dicParametros["opcion"] = 2;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_SPEI2, dicParametros);
+
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación en espera para finalizar el servicio del CEP.");
+                        }
+
+                    }
+                    else
+                        throw new Exception($"Error en el proceamiento de registro de ESTATUS_TERMINADA con folio {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionENT_SPEI2|{ex}");
+                return false;
+            }
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones ENT_SPID,
+    /// incluyendo la actualización de estatus y la ejecución de los
+    /// procesos asociados en TOMI y SPID.
+    /// </summary>
+    public class Servicio_ENT_SPID : ServicioBase
+    {
+        private readonly IOperacionesSpid _ioperacionesSpid;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio ENT_SPID.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesSpid">
+        /// Operaciones especializadas para SPID.
+        /// </param>
+        public Servicio_ENT_SPID(ConfiguracionServicio configuracion, OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesSpid operacionesSpid, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _ioperacionesSpid = operacionesSpid;
+        }
+
+        /// <summary>
+        /// Procesa una operación ENT_SPID ejecutando las actualizaciones
+        /// de estatus y los procesos correspondientes de acuerdo con el
+        /// último proceso pendiente registrado.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionENT_SPID()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Leyendo los datos de la operación en base SPID");
+
+                List<DatoENT_SPIDDTO> datosENTSpid = await _ioperacionesSpid.EjecutaSPSPID_Estatus_Recibidas(
+                    ConversionesComunes.ParseEnteroRequerido(_Configuracion.strFechayyyyMMdd, nameof(_Configuracion.strFechayyyyMMdd)));
+                DatoENT_SPIDDTO datoENTSpid = datosENTSpid?.FirstOrDefault(dato => dato != null && dato.op_clave.ToString() == _Operacion.StrFolio);
+
+                var dicparametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasCambiaEstatusSPID))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar estatus en SPID");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (datoENTSpid != null)
+                    {
+                        servicio = servicio ?? CrearServicioGeneral();
+                        bProcesado = await servicio.Responde_Entrada_SPID(ConstantesServicios.ClaveOperacionA, null, datoENTSpid.op_clave, datoENTSpid.Op_fecha_oper, datoENTSpid.Op_folio, datoENTSpid.Op_cve_rastreo, datoENTSpid.Op_monto);
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro CAMBIA_ESTATUS_SPID con folio: {_Operacion.StrFolio}");
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada TOMI.");
+                    string strDev = string.Empty;
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_SPID, dicparametros2);
+
+                    dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                };
+
+                    List<SubtipoOperacionModelo> subtipoOP = await _IParametrosOperaciones.EjecutarSP<SubtipoOperacionModelo>(ProcedimientoAlmacenado.sp_ConsultarSubTipo_ENT_SPID, dicParametros);
+                    strDev = subtipoOP?.FirstOrDefault()?.subtipo_operacion ?? string.Empty;
+
+                    if (strDev.Equals(ConstantesServicios.SubTipoOperacionDevolucion) || datoENTSpid?.tp_clave == 0)
+                    {
+                        bProcesado = await ProcesarDevolucionEntSpid(datoENTSpid);
+
+                        if (!bProcesado)
+                        {
+                            dicparametros2["opcion"] = 2;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_SPID, dicparametros2);
+                            bProcesado = true;
+                        }
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operacion en espera para finalizar el servicio del CEP.");
+
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro CAMBIA_ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionENT_SPID|{ex}");
+                return false;
+            }
+
+               
+        }
+
+        private async Task<bool> ProcesarDevolucionEntSpid(DatoENT_SPIDDTO datoENTSpid)
+        {
+            if (datoENTSpid == null || string.IsNullOrEmpty(datoENTSpid.Op_cve_rastreo))
+                return false;
+
+            dicParametros = new Dictionary<string, object>()
+            {
+                {"op_cve_rastreo", datoENTSpid.Op_cve_rastreo},
+                {"op_monto", datoENTSpid.Op_monto},
+                {"op_fecha_ejecucion", datoENTSpid.Op_fecha_oper}
+            };
+
+            List<OperacionDevueltaSPIDDTO> operacionesDevueltas = await _IParametrosOperaciones.EjecutarSP<OperacionDevueltaSPIDDTO>(ProcedimientoAlmacenado.sp_ConsultarOperacionDevuelta_ENT_SPID, dicParametros);
+            OperacionDevueltaSPIDDTO operacionDevuelta = operacionesDevueltas?.LastOrDefault();
+
+            if (operacionDevuelta == null || operacionDevuelta.nf_folio <= 0 || string.IsNullOrEmpty(operacionDevuelta.canal))
+                return false;
+
+            string tablaTomi = ObtenerTablaTomi(operacionDevuelta.canal);
+
+            if (string.IsNullOrEmpty(tablaTomi))
+                return false;
+
+            dicParametros = new Dictionary<string, object>()
+            {
+                { "Folio", operacionDevuelta.nf_folio },
+                { "TablaTomi", tablaTomi },
+                { "CampoTomi", ConstantesServicios.CampoNFFolio },
+                { "EstatusInterno", ConstantesServicios.TomiEstatusD },
+                { "CdClave", datoENTSpid.cd_clave.ToString() }
+            };
+
+            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_EstatusInterno_SPID, dicParametros);
+
+            dicParametros = new Dictionary<string, object>()
+            {
+                { "TablaTomi", tablaTomi },
+                { "Folio", operacionDevuelta.nf_folio.ToString() }
+            };
+
+            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_Formato_SPID_Rechazado_TOMI, dicParametros);
+
+            dicParametros = new Dictionary<string, object>()
+            {
+                { "Clave", datoENTSpid.cd_clave },
+                { "TipoPago", ConstantesServicios.OperacionSPID }
+            };
+
+            List<CatRazonRechazoDTO> razonesRechazo = await _IParametrosOperaciones.EjecutarSP<CatRazonRechazoDTO>(ProcedimientoAlmacenado.sp_Consultar_Cat_RazonRechazo, dicParametros);
+            CatRazonRechazoDTO razonRechazo = razonesRechazo?.FirstOrDefault();
+
+            string tablaCms = ObtenerTablaCms(operacionDevuelta.canal);
+            if (!string.IsNullOrEmpty(tablaCms))
+            {
+                dicParametros = new Dictionary<string, object>()
+                {
+                    { "TablaCms", tablaCms },
+                    { "TablaTomi", tablaTomi },
+                    { "RazonRechazo", razonRechazo?.Descripcion ?? string.Empty },
+                    { "CodigoMensaje", operacionDevuelta.canal.Equals(ConstantesServicios.OperacionSPID) ? razonRechazo?.Codigo ?? string.Empty : string.Empty },
+                    { "Folio", operacionDevuelta.nf_folio.ToString() }
+                };
+
+                await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Actualizar_CmsFormato_SPID_Rechazado, dicParametros);
+            }
+
+            dicParametros = new Dictionary<string, object>()
+            {
+                { "Folio", operacionDevuelta.nf_folio },
+                { "Tipo_operacion", operacionDevuelta.canal },
+                { "Opcion", operacionDevuelta.canal.Equals(ConstantesServicios.OperacionSPID) ? 11 : 12 }
+            };
+
+            if (operacionDevuelta.canal.Equals(ConstantesServicios.OperacionSPID))
+            {
+                dicParametros.Add("Desc_mensaje", razonRechazo?.Descripcion ?? string.Empty);
+            }
+
+            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_Comunes_Actualizar_PlanTrabajoMaestro, dicParametros);
+
+            return true;
+        }
+
+        private static string ObtenerTablaTomi(string tipoOperacion)
+        {
+            switch (tipoOperacion)
+            {
+                case ConstantesServicios.OperacionSPID:
+                    return ConstantesServicios.TbTombinNFSpid;
+                case ConstantesServicios.OperacionSPIDGPH:
+                    return ConstantesServicios.TbTombinNFSpidGph;
+                case ConstantesServicios.OperacionSPIDH2H:
+                    return ConstantesServicios.TbTombinNFSpidH2H;
+                case ConstantesServicios.OperacionSPIDLocal:
+                    return ConstantesServicios.TbTombinNFSpidLocal;
+                case ConstantesServicios.OperacionPaPSPID:
+                    return ConstantesServicios.TbTombinNFSpidPaPDetalle;
+                default:
+                    return string.Empty;
+            }
+        }
+
+        private static string ObtenerTablaCms(string tipoOperacion)
+        {
+            switch (tipoOperacion)
+            {
+                case ConstantesServicios.OperacionSPID:
+                    return ConstantesServicios.TbSpidFormat;
+                case ConstantesServicios.OperacionPaPSPID:
+                    return "tbl_spid_formato_pap_detalle";
+                default:
+                    return string.Empty;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones ENT_TEF,
+    /// incluyendo la actualización de estatus y la ejecución de los
+    /// procesos asociados en TOMI y TEF.
+    /// </summary>
+    public class Servicio_ENT_TEF : ServicioBase
+    {
+        private readonly IOperacionesTef _IOperacionesTEF;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio ENT_TEF.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesTEF">
+        /// Operaciones especializadas para TEF.
+        /// </param>
+        public Servicio_ENT_TEF(ConfiguracionServicio configuracion, OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesTef operacionesTEF, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IOperacionesTEF = operacionesTEF;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación ENT_TEF ejecutando las actualizaciones
+        /// de estatus y los procesos correspondientes de acuerdo con el
+        /// último proceso pendiente registrado.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionENT_TEF()
+        {
+
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Leyendo los datos de la operación en base TEF");
+
+                datoENT_TEFDTO datoEntTef = await _IOperacionesTEF.EjecutaSPTefRecibidad(
+                    ConversionesComunes.ParseEnteroRequerido(_Configuracion.strFechayyyyMMdd, nameof(_Configuracion.strFechayyyyMMdd)));
+
+                var dicparametros2 = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion", 1 }
+                    };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasCambiaEstatusTEF))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar estatus en TEF");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (datoEntTef?.IDOperacion.ToString() == _Operacion.StrFolio)
+                    {
+                        servicio = servicio ?? CrearServicioGeneral();
+                        await servicio.Responde_Entrada_TEF(datoEntTef.IDOperacion, datoEntTef.FechaProceso, 0, ConstantesServicios.ClaveOperacionA);
+                        bProcesado = true;
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registros CAMBIA_ESTATUS_TEF con folio: {_Operacion.StrFolio}");
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como Operación terminada en TOMI.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    bProcesado = true;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_TEF, dicparametros2);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Termina Procesamiento de Folio {_Operacion.StrFolio}");
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        dicParametros = new Dictionary<string, object>() { { "Folio", _Operacion.StrFolio } };
+                        List<datoENT_TEFDTO> datosEntTef = await _IParametrosOperaciones.EjecutarSP<datoENT_TEFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_ENT_TEF, dicParametros);
+
+                        datoEntTef = datosEntTef?.FirstOrDefault();
+
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Entrada Tercero a Tercero {datoEntTef?.TipoOperacion}");
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado la operación :{_Operacion.StrFolio}, Tipo {datoEntTef?.TipoOperacion}");
+
+                        dicparametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_ENT_TEF, dicparametros2);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación en espera de finalizar en el servicio del CEP");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registros ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionENT_TEF|{ex}");
+                return false;
+            }
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXD,
+    /// incluyendo la validación de estatus en SPEI y la actualización
+    /// de información en CMS y TOMI.
+    /// </summary>
+    public class Servicio_FXD : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXD.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXD(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXD ejecutando las validaciones y
+        /// actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_FXD()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                _Operacion.AliasProceso = strAliasProceso;
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD, dicParametros);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPEIEstatus))
+                {
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|A verificar el estatus de la operación en SPEI.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    EstatusSPEIModel resultadoSpei = await servicio.ValidaEstatusSPEI(ConstantesServicios.TbTombinNFFxd, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    bool bProcesado = resultadoSpei?.BResultado ?? false;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                    }
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|Actualizando el estatus como operación en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD, dicParametros);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bool bProcesado = await servicio.Actualiza_CMS_origen_SPEI(ConstantesServicios.TbTombinNFFxd, _Operacion.StrFolio, _Operacion.StrTipoOperacion, null);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                        Config.EscribirLog("INFO|FDX.procesaOperacion|Operacion finalizada");
+                    }
+                    else
+                    {
+                        throw new Exception(string.Format("Error en procesamiento de registro {0} con folio {1}", ConstantesServicios.AliasEstatusTerminadaCMS, _Operacion.StrFolio));
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_FXD|{ex}");
+                return false;
+            }
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXD Local,
+    /// incluyendo la validación de estatus en SPEI y la actualización
+    /// de información en CMS y TOMI.
+    /// </summary>
+    public class Servicio_FXDLocal : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXD Local.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXDLocal(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXD Local ejecutando las validaciones y
+        /// actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_FXDLocal()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD_Local, dicParametros);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPEIEstatus))
+                {
+
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operaciónen SPEI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    EstatusSPEIModel resultadoSpei = await servicio.ValidaEstatusSPEI(ConstantesServicios.TbTombinNFFxdLocal, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    bool bProcesado = resultadoSpei?.BResultado ?? false;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                    }
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en base TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD_Local, dicParametros);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bool bProcesado = await servicio.Actualiza_CMS_origen_SPEI(ConstantesServicios.TbTombinNFFxdLocal, _Operacion.StrFolio, _Operacion.StrTipoOperacion, null);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_FXDLocal|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXD_GPH,
+    /// incluyendo la validación de estatus en SPEI y la actualización
+    /// de información en CMS y TOMI.
+    /// </summary>
+    public class Servicio_FXD_GPH : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXD_GPH.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXD_GPH(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXD_GPH ejecutando las validaciones y
+        /// actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_FXD()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+
+
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD_GPH, dicParametros);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPEIEstatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operaciónen SPID");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    EstatusSPEIModel resultadoSpei = await servicio.ValidaEstatusSPEI(ConstantesServicios.TbTombinNFFxdGph, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    bool bProcesado = resultadoSpei?.BResultado ?? false;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                    }
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en base TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD_GPH, dicParametros);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bool bProcesado = await servicio.Actualiza_CMS_origen_SPEI(ConstantesServicios.TbTombinNFFxdGph, _Operacion.StrFolio, _Operacion.StrTipoOperacion, null);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_FXD|{ex}");
+                return false;
+            }
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXD_H2H,
+    /// incluyendo la validación de estatus en SPEI y la actualización
+    /// de información en CMS y TOMI.
+    /// </summary>
+    public class Servicio_FXD_H2H : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXD_H2H.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXD_H2H(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXD_H2H ejecutando las validaciones y
+        /// actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_FXD_H2H()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                dicParametros = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD_H2H, dicParametros);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPEIEstatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operaciónen SPEI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    EstatusSPEIModel resultadoSpei = await servicio.ValidaEstatusSPEI(ConstantesServicios.TbTombinNFFxdH2H, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    bool bProcesado = resultadoSpei?.BResultado ?? false;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en base TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXD_H2H, dicParametros);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bool bProcesado = await servicio.Actualiza_CMS_origen_SPEI(ConstantesServicios.TbTombinNFFxdH2H, _Operacion.StrFolio, _Operacion.StrTipoOperacion, null);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_FXD_H2H|{ex}");
+                return false;
+            }
+
+        }
+    }
+}
+
+using MUFG_T24.Configuracion_utilidades;
+using System;
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Propiedades generales del servicio.
+    /// </summary>
+    public class ConfiguracionServicio : Configuracion
+    {
+  
+        public TimeSpan StrFechaSistema { get; set; }
+        public TimeSpan StrHoraLecturaInicio { get; set; }
+        public TimeSpan StrHoraLecturaFin { get; set; }
+        public TimeSpan StrHoraOperacionesInicio { get; set; }
+        public TimeSpan StrHoraOperacionesFin { get; set; }
+        public bool BHorarioLectura { get; set; } = false;
+        public new string NombreServicio { get; set; } = null;
+        public string StrNombreSPEI1 { get; set; } = null;
+        public string StrNombreSPEI2 { get; set; } = null;
+        public new bool? TimerEnabled { get; set; } = null;
+        public new double? TimerInterval { get; set; } = null;
+        public bool? BenHorario { get; set; } = false;
+
+        public string strFechayyyyMMdd { get; set; }
+
+        public new object RutaArchivoConfiguracion { get; set; }
+
+        public new string TamanoMaximoArchivoLogKB { get; set; } = null;
+        public string StrCompanyName { get; set; } = null;
+        public string StrPasswdReg { get; internal set; }
+        public string StrUserNameReg { get; set; }
+        public new string PathLog { get; set; }
+        public string configracion { get; set; }
+
+        public string UriReversa { get; set; }
+
+        public new ConfiguracionServicio Clone()
+        {
+            return (ConfiguracionServicio)MemberwiseClone();
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones TMD,
+    /// incluyendo la actualización de estatus en CMS y la
+    /// sincronización de información proveniente de TOMI.
+    /// </summary>
+    public class Servicio_TMD : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio TMD.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesCms">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_TMD(OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCms) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionesCms;
+        }
+
+        /// <summary>
+        /// Procesa una operación TMD ejecutando las actualizaciones
+        /// correspondientes en CMS y Plan de Trabajo Maestro de acuerdo
+        /// con el estatus registrado en TOMI.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionTMD()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+
+                    Config.EscribirLog("INFO|TMD.procesaOperacion|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_TMD, dicParametros);
+                    DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi?.Nf_estatus))
+                    {
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_TMD, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"sFT", datoTomi?.T24_transaction_id }
+                    });
+
+                        //bProcesado = true;
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|Terminado actualización de acpetación de operación.");
+
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TMD, dicParametros2);
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi?.Nf_estatus))
+                    {
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_TMD, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"razonrechazo", datoTomi?.Nf_razon }
+                    });
+
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|Terminando actualización de rechazo de operación.");
+                        //bProcesado = true;
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TMD, dicParametros2);
+
+                    }
+
+                    dicParametros2["opcion"] = 3;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TMD, dicParametros2);
+
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+                    Config.EscribirLog("INFO|TMD.procesaOperacion|Operación Finalizada.");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionTMD|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones TEF_H2H,
+    /// incluyendo la actualización de estatus, el manejo de devoluciones
+    /// TEF y la actualización del Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_TEF_H2H : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio TEF_H2H.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_TEF_H2H(OperacionDTO operacion, IParametrosOperaciones parametros) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación TEF_H2H ejecutando las actualizaciones
+        /// correspondientes de acuerdo con el estatus registrado en TOMI
+        /// y el flujo definido para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_TEF_H2H()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF_H2H, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiT24DTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiT24DTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_TEF_H2H, dicParametros);
+                    DatoTomiT24DTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado actualización de acpetación de operación.");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF_H2H, dicParametros2);
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+
+                        if (datoTomi.Nf_tef_id_master > 0)
+                        {
+                            SalidaTEFModel parametros = new SalidaTEFModel
+                            {
+                                iOperacionId = datoTomi.Nf_tef_id_master,
+                                iFechaProceso = ConversionesComunes.ParseEnteroRequerido(datoTomi.Nf_fecha_ejecucion.ToString("yyyyMMdd"), nameof(datoTomi.Nf_fecha_ejecucion)),
+                                sClaveRastreo = datoTomi.T24_transaction_id,
+                                dMonto = datoTomi.T24_debit_amount,
+                                sClaveOperacion = ConstantesServicios.ClaveOperacionR,
+                                sCausaDevolucion = ConstantesServicios.CausaDevolucionUno,
+                            };
+
+                            await _IParametrosOperaciones.Responde_Salida_Tef(parametros);
+                        }
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de rechazo de operación.");
+
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF_H2H, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina procesamiento del folio: {_Operacion.StrFolio}");
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_TEF_H2H|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones TEF_GPH,
+    /// incluyendo la actualización de estatus, el manejo de devoluciones
+    /// TEF y la actualización del Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_TEF_GPH : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio TEF_GPH.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_TEF_GPH(OperacionDTO operacion, IParametrosOperaciones parametros) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación TEF_GPH ejecutando las actualizaciones
+        /// correspondientes de acuerdo con el estatus registrado en TOMI
+        /// y el flujo definido para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_TEF_GPH()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF_GPH, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiT24DTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiT24DTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_TEF_GPH, dicParametros);
+                    DatoTomiT24DTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado actualización de acpetación de operación.");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF_GPH, dicParametros2);
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+
+                        if (datoTomi.Nf_tef_id_master > 0)
+                        {
+                            SalidaTEFModel parametros = new SalidaTEFModel
+                            {
+                                iOperacionId = datoTomi.Nf_tef_id_master,
+                                iFechaProceso = ConversionesComunes.ParseEnteroRequerido(datoTomi.Nf_fecha_ejecucion.ToString("yyyyMMdd"), nameof(datoTomi.Nf_fecha_ejecucion)),
+                                sClaveRastreo = datoTomi.T24_transaction_id,
+                                dMonto = datoTomi.T24_debit_amount,
+                                sClaveOperacion = ConstantesServicios.ClaveOperacionR,
+                                sCausaDevolucion = ConstantesServicios.CausaDevolucionUno,
+                            };
+
+                            await _IParametrosOperaciones.Responde_Salida_Tef(parametros);
+                        }
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de rechazo de operación.");
+
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF_GPH, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina procesamiento del folio: {_Operacion.StrFolio}");
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_TEF_GPH|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones TEF,
+    /// incluyendo la actualización de estatus en CMS, el manejo de
+    /// devoluciones TEF y la actualización del Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_TEF : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio TEF.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesCms">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_TEF(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCms)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionesCms;
+        }
+
+        /// <summary>
+        /// Procesa una operación TEF ejecutando las actualizaciones en CMS,
+        /// el manejo de devoluciones cuando corresponda y la actualización
+        /// del Plan de Trabajo Maestro.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionTEF()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiT24DTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiT24DTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNFEstatus_TEF, dicParametros);
+                    DatoTomiT24DTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+
+                        dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_TEF, dicParametros);
+
+                        Config.EscribirLog("INFO|TEF.procesaOperacion|Terminado actualización de acpetación de operación.");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF, dicParametros2);
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+
+                        dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_TEF, dicParametros);
+
+                        if (datoTomi.Nf_tef_id_master > 0)
+                        {
+                            SalidaTEFModel parametros = new SalidaTEFModel
+                            {
+                                iOperacionId = datoTomi.Nf_tef_id_master,
+                                iFechaProceso = ConversionesComunes.ParseEnteroRequerido(datoTomi.Nf_fecha_ejecucion.ToString("yyyyMMdd"), nameof(datoTomi.Nf_fecha_ejecucion)),
+                                sClaveRastreo = datoTomi.T24_transaction_id,
+                                dMonto = datoTomi.T24_debit_amount,
+                                sClaveOperacion = ConstantesServicios.ClaveOperacionR,
+                                sCausaDevolucion = ConstantesServicios.CausaDevolucionUno,
+                            };
+
+                            await _IParametrosOperaciones.Responde_Salida_Tef(parametros);
+                        }
+
+                        Config.EscribirLog("INFO|TEF.procesaOperacion|Terminando actualización de rechazo de operación.");
+
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TEF, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|TEF.procesaOperacion|Se termina procesamiento del folio: {_Operacion.StrFolio}");
+
+ 
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|Operación Finalizada.");
+
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionTEF|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones TAX,
+    /// incluyendo la validación de estatus en BBVA y la actualización
+    /// de información en CMS y Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_TAX : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio TAX.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_TAX(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación TAX ejecutando las validaciones de
+        /// estatus y las actualizaciones correspondientes de acuerdo
+        /// con el proceso pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionTAX()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+ 
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TAX, dicParametros2);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliastBBVAStatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operación en BBVA");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_BBVA(ConstantesServicios.TbTombinNFTaxPay, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrEstatusOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_TAX, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_BBVA(ConstantesServicios.TbTombinNFTaxPay, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbFormatPtPs);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionTAX|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones SPID_H2H,
+    /// incluyendo la validación de estatus en SPID y la actualización
+    /// de información en CMS y Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_SPID_H2H : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio SPID_H2H.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_SPID_H2H(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación SPID_H2H ejecutando las validaciones de
+        /// estatus y las actualizaciones correspondientes de acuerdo con
+        /// el proceso pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_SPID_H2H()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID_H2H, dicParametros2);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPIDEstatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operaciónen en SPID");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_SPID(ConstantesServicios.TbTombinNFSpidH2H, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en base TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID_H2H, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_SPID(ConstantesServicios.TbTombinNFSpidH2H, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbFormatPtPs);
+
+                    if (bProcesado)
+                    {
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_SPID_H2H|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones SPID_GPH,
+    /// incluyendo la validación de estatus en SPID y la actualización
+    /// de información en CMS y Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_SPID_GPH : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio SPID_GPH.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_SPID_GPH(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación SPID_GPH ejecutando las validaciones de
+        /// estatus y las actualizaciones correspondientes de acuerdo con
+        /// el proceso pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_SPID_GPH()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID_GPH, dicParametros2);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPIDEstatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operaciónen en SPID");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_SPID(ConstantesServicios.TbTombinNFSpidGph, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en base TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID_GPH, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_SPID(ConstantesServicios.TbTombinNFSpidGph, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbFormatPtPs);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_SPID_GPH|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones SPID Local,
+    /// incluyendo la validación de estatus en SPID y la actualización
+    /// de información en CMS y Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_SPIDLocal : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio SPID Local.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_SPIDLocal(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación SPID Local ejecutando las validaciones de
+        /// estatus y las actualizaciones correspondientes de acuerdo con
+        /// el proceso pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_SPIDLocal()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID_Local, dicParametros2);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPIDEstatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operaciónen en SPID");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_SPID(ConstantesServicios.TbTombinNFSpidLocal, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog("INFO|SPID.procesaOperacion|Operación finalizada.");
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID_Local, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_SPID(ConstantesServicios.TbTombinNFSpidLocal, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbSpidFormat);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog("INFO|SPID.procesaOperacion|Operación finalizada.");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_SPIDLocal|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones SPID,
+    /// incluyendo la validación de estatus en SPID y la actualización
+    /// de información en CMS y Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_SPID : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio SPID.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_SPID(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación SPID ejecutando las validaciones de
+        /// estatus y las actualizaciones correspondientes de acuerdo
+        /// con el proceso pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_SPID()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog("INFO|SPID.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID, dicParametros2);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPIDEstatus))
+                {
+
+                    Config.EscribirLog("INFO|SPID.procesaOperacion|A verificar el estatus de la operaciónen en SPID");
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_SPID(ConstantesServicios.TbTombinNFSpid, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                    }
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+
+                    Config.EscribirLog("INFO|SPID.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SPID, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_SPID(ConstantesServicios.TbTombinNFSpid, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbSpidFormat);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_SPID|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones SER,
+    /// incluyendo la validación de estatus en BBVA y la actualización
+    /// de información en CMS y Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_SER : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio SER.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_SER(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación SER ejecutando las validaciones de
+        /// estatus y las actualizaciones correspondientes de acuerdo
+        /// con el proceso pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionSER()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                bool bProcesado = true;
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                   
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SER, new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                });
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliastBBVAStatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operación en BBVA.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_BBVA(ConstantesServicios.TbTombinNFSerPay, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                    }
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SER, new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 2 }
+                });
+
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_BBVA(ConstantesServicios.TbTombinNFSerPay, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbFormatPtPs);
+
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionSER|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones SAT,
+    /// incluyendo la actualización de estatus en CMS y la sincronización
+    /// de información proveniente de TOMI.
+    /// </summary>
+    public class Servicio_SAT : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio SAT.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_SAT(OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionCMS) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación SAT ejecutando las actualizaciones
+        /// correspondientes en CMS y Plan de Trabajo Maestro de acuerdo
+        /// con el estatus registrado en TOMI.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionSAT()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+
+                    Config.EscribirLog("INFO|ProcesarOperacionSAT|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SAT, new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                });
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiSATDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiSATDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_SAT, dicParametros);
+                    DatoTomiSATDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.NF_estatus))
+                    {
+
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_SAT, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"llavepago", datoTomi.Nf_llave_pago },
+                        {"fechaejecucion", datoTomi.Nf_fecha_ejecucion },
+                        {"sellodigital", datoTomi.Nf_sello_digital },
+                        {"cadenaoriginal", datoTomi.Nf_cadena_original },
+                        {"sFT", datoTomi.T24_transaction_id },
+                    });
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado actualización de acpetación de operación.");
+
+                        
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SAT, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion" , 2 }
+                    });
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.NF_estatus))
+                    {
+                        
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_SAT, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"razonrechazo", datoTomi.Nf_observacion },
+                        {"fechaejecucion", datoTomi.Nf_fecha_ejecucion }
+                    });
+
+                        Config.EscribirLog("INFO|ProcesarOperacionSAT|Terminando actualización de rechazo de operación.");
+
+                       
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_SAT, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion" , 3 }
+                    });
+                    }
+
+                    Config.EscribirLog($"INFO|ProcesarOperacionSAT|Se termina procesamiento del folio: {_Operacion.StrFolio}");
+                }
+
+
+                await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                {
+                    Folio = _Operacion.StrFolio,
+                    TipoOperacion = _Operacion.StrTipoOperacion,
+                    NombreProceso = _Configuracion.NombreProceso,
+                    AliasProceso = strAliasProceso,
+                    Servicio = _Configuracion.NombreServicio,
+                    PId = (int)_Configuracion.Pid,
+                    Excepcion = new Exception("")
+                }); //Termina Proceso
+
+                Config.EscribirLog("INFO|ProcesarOperacionSAT|Operación Finalizada.");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionSAT|{ex}");
+                return false;
+            } 
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones PaP TEF,
+    /// incluyendo la actualización de estatus en CMS y la consolidación
+    /// de resultados sobre el folio maestro.
+    /// </summary>
+    public class Servicio_PaP_TEF : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio PaP_TEF.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_PaP_TEF(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionCMS, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación PaP TEF ejecutando las actualizaciones
+        /// correspondientes en CMS, TOMI y Plan de Trabajo Maestro,
+        /// consolidando los resultados asociados al folio maestro.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_PaP_TEF()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    ServicioGeneral servicio = CrearServicioGeneral();
+                    string strFolioMaestro = await servicio.DameFolioMaestro(_Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_TEF, new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                });
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiT24DTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiT24DTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_Detalle_PaP_TEF, dicParametros);
+                    DatoTomiT24DTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_PaP_TEF, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"sFT", datoTomi.T24_transaction_id }
+                    });
+
+
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarTombinNF_Detalle_PaP_TEF, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"opcion", 1 }
+                    });
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de aceptación de operación.");
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_TEF, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion", 2 }
+                    });
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_PaP_TEF, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"sFT", datoTomi.T24_transaction_id }
+                    });
+
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarTombinNF_Detalle_PaP_TEF, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"opcion", 2 }
+                    });
+
+
+                        if (datoTomi.Nf_tef_id_master > 0)
+                            await servicio.Responde_Salida_TEF(
+                                datoTomi.Nf_tef_id_master,
+                                ConversionesComunes.ParseEnteroRequerido(datoTomi.Nf_fecha_ejecucion.ToString("yyyyMMdd"), nameof(datoTomi.Nf_fecha_ejecucion)),
+                                datoTomi.T24_transaction_id,
+                                datoTomi.T24_debit_amount,
+                                ConstantesServicios.ClaveOperacionR,
+                                1);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de rechazo de operación.");
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_TEF, new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion", 3 }
+                    });
+
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina Procesamiento de Folio: {_Operacion.StrFolio}");
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Buscando actualizar el maestro: {strFolioMaestro}");
+
+                        dicParametros = new Dictionary<string, object>() { { "folio", strFolioMaestro } };
+
+                        List<DatoPaPDetalleDTO> datosPap = await _IParametrosOperaciones.EjecutarSP<DatoPaPDetalleDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_DetalleMaestro_PaP_TEF, dicParametros);
+                        DatoPaPDetalleDTO datoPap = datosPap?.FirstOrDefault();
+
+                        bool bAprobado = datoPap != null && (datoPap.Procesados + datoPap.Devueltos) == datoPap.Regs_totales;
+
+                        var dicParametros2 = new Dictionary<string, object>()
+                        {
+                            {"folio", strFolioMaestro },
+                            {"procesados", datoPap ?.Procesados },
+                            {"devueltos", datoPap ?.Devueltos },
+                            {"opcion", 1 }
+                        };
+
+                        if (bAprobado)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar maestro como aprobado, Folio Maestro: {strFolioMaestro}");
+
+                            
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizarFormatoCms_DetalleMaestro_PaP_TEF, dicParametros2);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarFormatoCms_DetalleMaestro_PaP_TEF, dicParametros2);
+
+                            
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_TEF, new Dictionary<string, object>()
+                        {
+                            {"folio", _Operacion.StrFolio },
+                            {"tipo_operacion", _Operacion.StrTipoOperacion },
+                            {"opcion", 4 }
+                        });
+
+                        }
+                        else
+                        {
+                            dicParametros2["opcion"] = 2;
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizarFormatoCms_DetalleMaestro_PaP_TEF, dicParametros2);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarFormatoCms_DetalleMaestro_PaP_TEF, dicParametros2);
+                        }
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_PaP_TEF|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones PaP SPID,
+    /// incluyendo la validación de estatus en SPID, la actualización
+    /// de información en CMS y la consolidación de resultados sobre
+    /// el folio maestro.
+    /// </summary>
+    public class Servicio_PaP_SPID : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio PaP_SPID.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesCms">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_PaP_SPID(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCms, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionesCms;
+        }
+
+        /// <summary>
+        /// Procesa una operación PaP SPID ejecutando las validaciones de
+        /// estatus, actualizaciones en CMS y consolidación de resultados
+        /// asociados al folio maestro.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_PaP_SPID()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_SPID, dicParametros2);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPIDEstatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operación en SPID.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_SPID(ConstantesServicios.TbTombinNFSpidPaPDetalle, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_SPID, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_SPID(ConstantesServicios.TbTombinNFSpidPaPDetalle, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbTombinNFSpidPaPDetalle);
+
+                    if (bProcesado)
+                    {
+                        string strFolioMaestro = await servicio.DameFolioMaestro(_Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Buscando ACtualizar el Maestro: {strFolioMaestro}");
+
+                        dicParametros = new Dictionary<string, object>() { { "folio", strFolioMaestro } };
+
+                        List<DatoPaPDetalleDTO> datosPap = await _IParametrosOperaciones.EjecutarSP<DatoPaPDetalleDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_PaP_SPID, dicParametros);
+                        DatoPaPDetalleDTO datoPap = datosPap?.FirstOrDefault();
+
+                        bool bAprobado = datoPap != null && (datoPap.Procesados + datoPap.Devueltos) == datoPap.Regs_totales;
+
+                        var dicParametros3 = new Dictionary<string, object>()
+                        {
+                            {"folio", strFolioMaestro },
+                            {"procesadas", datoPap ?    .Procesados },
+                            {"devueltas", datoPap ?.Devueltos },
+                            {"opcion", 1 }
+                        };
+
+                        if (bAprobado)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar maestro como aprobado, Folio Maestro: {strFolioMaestro}");
+                            
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_PaP_SPID, dicParametros3);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_PaP_SPID, dicParametros3);
+
+                            dicParametros2["folio"] = strFolioMaestro;
+                            dicParametros2["opcion"] = 2;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_SPID, dicParametros2);
+                        }
+                        else
+                        {
+                            dicParametros3["opcion"] = 2;
+
+                             await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_PaP_SPID, dicParametros3);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_PaP_SPID, dicParametros3);
+
+                        }
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_PaP_SPID|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones PaP FXT,
+    /// incluyendo la actualización de estatus en CMS y la consolidación
+    /// de resultados en el folio maestro.
+    /// </summary>
+    public class Servicio_PaP_FXT : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio PaP_FXT.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_PaP_FXT(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionCMS, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación PaP FXT ejecutando las actualizaciones
+        /// correspondientes en CMS, TOMI y Plan de Trabajo Maestro,
+        /// consolidando los resultados en el folio maestro.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_PaP_FXT()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    ServicioGeneral servicio = CrearServicioGeneral();
+                    string strFolioMaestro = await servicio.DameFolioMaestro(_Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_FXT, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+
+                    List<DatoTomiT24DTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiT24DTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNFEstatus_PaP_FXT, dicParametros);
+                    DatoTomiT24DTO datoTomi = datosTomi?.FirstOrDefault();
+
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    var dicParametros3 = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"sFT", datoTomi.T24_transaction_id }
+                    };
+
+                    var dicParametros4 = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"opcion", 1 }
+                    };
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_PaP_FXT, dicParametros3);
+
+                        
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinDetalle_PaP_FXT, dicParametros4);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de aceptación de operación.");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_FXT, dicParametros2);
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        dicParametros3["sFT"] = datoTomi.Nf_razon;
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_PaP_FXT, dicParametros3);
+
+                        dicParametros4["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinDetalle_PaP_FXT, dicParametros4);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de rechazo de operación.");
+
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_FXT, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina procesamiento de folio");
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Buscando ACtualizar el Maestro: {strFolioMaestro}");
+
+                        dicParametros = new Dictionary<string, object>() { { "Folio", strFolioMaestro } };
+
+                        List<DatoPaPDetalleDTO> datosPap = await _IParametrosOperaciones.EjecutarSP<DatoPaPDetalleDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_PaP_FXT, dicParametros);
+                        DatoPaPDetalleDTO datoPap = datosPap?.FirstOrDefault();
+
+                        bool bAprobado = datoPap != null && (datoPap.Procesados + datoPap.Devueltos) == datoPap.Regs_totales;
+
+                        var dicParametros5 = new Dictionary<string, object>()
+                        {
+                            {"folio", strFolioMaestro },
+                            {"procesadas", datoPap ?.Procesados },
+                            {"devueltas", datoPap ?.Devueltos },
+                            {"opcion", 1 }
+                        };
+
+                        if (bAprobado)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar maestro como aprobado, Folio Maestro: {strFolioMaestro}");
+
+                            
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_PaP_FXT, dicParametros5);
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_PaP_FXT, dicParametros5);
+
+                            dicParametros2["opcion"] = 4;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_FXT, dicParametros2);
+
+                        }
+                        else
+                        {
+                            dicParametros5["opcion"] = 2;
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_PaP_FXT, dicParametros5);
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_PaP_FXT, dicParametros5);
+                        }
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_PaP_FXT|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones PaP FXI,
+    /// incluyendo la validación de estatus en TOMI y SWIFT, la actualización
+    /// de información en CMS y la consolidación de resultados sobre el
+    /// folio maestro.
+    /// </summary>
+    public class Servicio_PaP_FXI : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio PaP_FXI.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_PaP_FXI(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCMS, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionesCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación PaP FXI ejecutando las validaciones de
+        /// estatus, actualizaciones en CMS y consolidación de resultados
+        /// asociados al folio maestro.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_PaP_FXI()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                bool bProcesado = true;
+
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+
+                dicParametros = new Dictionary<string, object>() { { "Folio", _Operacion.StrFolio } };
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_PaP_FXI, dicParametros);
+                DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontró el registro en TOMI");
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasValidaEstatusTOMI))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Confirmando el estatus de la operación en TOMI, estatus={datoTomi.Nf_estatus}.");
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_FXI, dicParametros2);
+
+                    switch (datoTomi.Nf_estatus)
+                    {
+                        case ConstantesServicios.TomiEstatusPROC:
+                        case ConstantesServicios.TomiEstatusAUAB:
+                        case ConstantesServicios.TomiEstatusRECC:
+                            break;
+                        default:
+                            return true;
+
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+
+
+
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSwitfEstatus))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        bProcesado = true;
+                    }
+                    else
+                    {
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_FXI, dicParametros2);
+
+                        bProcesado = false;
+
+                        servicio = servicio ?? CrearServicioGeneral();
+                        string strEstatusSwift = await servicio.Dame_Estatus_Swift(datoTomi.T24_transaction_id);
+
+                        if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusPROC))
+                            bProcesado = true;
+                        else
+                            throw new Exception($"Error Operación Viva en T24 y Swift con estatus cancelado; folio:{_Operacion.StrFolio}");
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Swift Estatus --, estatus={datoTomi.Nf_estatus}.");
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                    {
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|En espera de liberación de mensaje.");
+                        return false;
+                    }
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 3;
+
+                    bProcesado = await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_FXI, dicParametros2);
+
+                    if (!bProcesado)
+                        throw new Exception($"No fue posible actualizar el plan de trabajo maestro para el folio {_Operacion.StrFolio}");
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiNFDTO> datosDetalleTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_Detalle_PaP_FXI, dicParametros);
+                    datoTomi = datosDetalleTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    var dicParametros3 = new Dictionary<string, object>()
+                        {
+                            {"folio", _Operacion.StrFolio },
+                            {"opcion", 1 }
+                        };
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        dicParametros = new Dictionary<string, object>()
+                        {
+                            {"folio", _Operacion.StrFolio },
+                            {"sFT", datoTomi.T24_transaction_id }
+                        };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_PaP_FXI, dicParametros);
+
+                        
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinDetalle_PaP_FXI, dicParametros3);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando Actualización de acpetación de operación.");
+
+                        bProcesado = true;
+
+                        dicParametros2["opcion"] = 4;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_FXI, dicParametros2);
+
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        dicParametros = new Dictionary<string, object>()
+                        {
+                            {"folio", _Operacion.StrFolio },
+                            {"razonrechazo", datoTomi.Nf_razon}
+                        };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_PaP_FXI, dicParametros);
+
+                        dicParametros3["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinDetalle_PaP_FXI, dicParametros3);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando Actualización de rechazo de operación.");
+
+                        bProcesado = true;
+
+                        dicParametros2["opcion"] = 5;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_FXI, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina Procesamiento de Folio: {_Operacion.StrFolio}");
+
+                    if (bProcesado)
+                    {
+                        servicio = servicio ?? CrearServicioGeneral();
+                        string strFolioMaestro = await servicio.DameFolioMaestro(_Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Buscando ACtualizar el Maestro: {strFolioMaestro}");
+
+                        dicParametros = new Dictionary<string, object>() { { "Folio", strFolioMaestro } };
+
+                        List<DatoPaPDetalleDTO> datosPap = await _IParametrosOperaciones.EjecutarSP<DatoPaPDetalleDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_DetalleMaestro_PaP_FXI, dicParametros);
+                        DatoPaPDetalleDTO datoPap = datosPap?.FirstOrDefault();
+
+                        bool bAprobado = datoPap != null && (datoPap.Procesados + datoPap.Devueltos) == datoPap.Regs_totales;
+
+                        var dicParametros4 = new Dictionary<string, object>()
+                            {
+                                {"folio", strFolioMaestro },
+                                {"procesados", datoPap?.Procesados },
+                                {"devueltos", datoPap?.Devueltos },
+                                {"opcion", 1 }
+                            };
+
+                        if (bAprobado)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar maestro como aprobado, Folio Maestro: {strFolioMaestro}");
+
+                            
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizarFormatoCms_DetalleMaestro_PaP_FXI, dicParametros4);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarFormatoTomi_DetalleMaestro_PaP_FXI, dicParametros4);
+
+
+                            dicParametros2["opcion"] = 6;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_PaP_FXI, dicParametros2);
+
+                        }
+                        else
+                        {
+                            dicParametros4["opcion"] = 2;
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizarFormatoCms_DetalleMaestro_PaP_FXI, dicParametros4);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarFormatoTomi_DetalleMaestro_PaP_FXI, dicParametros4);
+                        }
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio {_Operacion.StrFolio}");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_PaP_FXI|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones PaP FXD,
+    /// incluyendo la validación de estatus en SPEI, actualización en CMS
+    /// y consolidación de resultados en el folio maestro.
+    /// </summary>
+    public class Servicio_PaP_FXD : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio PaP_FXD.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_PaP_FXD(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionCMS, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación PaP FXD ejecutando las validaciones de
+        /// estatus, actualizaciones en CMS y consolidación de resultados
+        /// asociados al folio maestro.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_PaP_FXD()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                bool bProcesado = true;
+
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion" , 1 }
+                    };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro(estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso((new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }));  //Inicia proceso
+
+                    
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_FXD, dicParametros2);
+                    await _IParametrosOperaciones.TerminarProceso((new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }));
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPEIEstatus))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operación en SPEI.");
+
+                    await _IParametrosOperaciones.IniciarProceso((new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    })); //Inicia proceso
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    EstatusSPEIModel resultadoSpei = await servicio.ValidaEstatusSPEI(ConstantesServicios.TbTombinNFFxdPaPDetalle, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+                    bProcesado = resultadoSpei?.BResultado ?? false;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso((new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        })); //Termina Proceso
+                    }
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso((new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }));  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_FXD, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.Actualiza_CMS_origen_SPEI(ConstantesServicios.TbTombinNFFxdPaPDetalle, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbFormatoPapDetalle);
+
+
+                    if (bProcesado)
+                    {
+                        string strFolioMaestro = await servicio.DameFolioMaestro(_Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Buscando ACtualizar el Maestro: {strFolioMaestro}");
+
+                        dicParametros = new Dictionary<string, object>() { { "Folio", strFolioMaestro } };
+
+                        List<DatoPaPDetalleDTO> datosPap = await _IParametrosOperaciones.EjecutarSP<DatoPaPDetalleDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_PaP_FXD, dicParametros);
+                        DatoPaPDetalleDTO datoPap = datosPap?.FirstOrDefault();
+
+                        bool bAprobado = datoPap != null && (datoPap.Procesados + datoPap.Devueltos) == datoPap.Regs_totales;
+
+                        var dicParametros3 = new Dictionary<string, object>()
+                            {
+                                {"folio", strFolioMaestro },
+                                {"procesadas", datoPap?.Procesados },
+                                {"devueltas", datoPap?.Devueltos },
+                                {"opcion", 1 }
+                            };
+
+                        if (bAprobado)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar maestro como aprobado, Folio Maestro: {strFolioMaestro}");
+
+                            
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_PaP_FXD, dicParametros3);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_PaP_FXD, dicParametros3);
+
+                            dicParametros2["opcion"] = 3;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_PaP_FXD, dicParametros2);
+
+                        }
+                        else
+                        {
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_PaP_FXD, dicParametros3);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_PaP_FXD, dicParametros3);
+                        }
+
+                        await _IParametrosOperaciones.TerminarProceso((new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        })); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio {_Operacion.StrFolio}");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_PaP_FXD|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones de Nómina FXD,
+    /// incluyendo la validación de estatus en SPEI, la actualización de
+    /// información en CMS y la consolidación de resultados en el folio maestro.
+    /// </summary>
+    public class Servicio_NOM_FXD : ServicioBase
+    {
+        private readonly IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio NOM_FXD.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_NOM_FXD(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionCMS, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación de Nómina FXD ejecutando las validaciones
+        /// de estatus, actualizaciones en CMS y consolidación de resultados
+        /// sobre el folio maestro de la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_NOM_FXD()
+        {
+            try 
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_NOM_FXD, dicParametros2);
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPEIEstatus))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operación en SPEI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_NOM_FXD, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    EstatusSPEIModel resultadoSpei = await servicio.ValidaEstatusSPEI(ConstantesServicios.TbTombinNFFXDNominaDetalle, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    bool bProcesado = resultadoSpei?.BResultado ?? false;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en CMS.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 3;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_NOM_FXD, dicParametros2);
+
+                    dicParametros2["opcion"] = 4;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_NOM_FXD, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bool bProcesado = await servicio.Actualiza_CMS_origen_SPEI(ConstantesServicios.TbTombinNFFXDNominaDetalle, _Operacion.StrFolio, _Operacion.StrTipoOperacion, ConstantesServicios.TbFormatoNominaDetalle);
+
+                    if (bProcesado)
+                    {
+                        string strFolioMaestro = await servicio.DameFolioMaestro(_Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Buscando ACtualizar el Maestro: {strFolioMaestro}");
+
+                        dicParametros = new Dictionary<string, object>() { { "folio", strFolioMaestro } };
+
+                        List<DatoPaPDetalleDTO> datosNomina = await _IParametrosOperaciones.EjecutarSP<DatoPaPDetalleDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_NOM_FXD, dicParametros);
+                        DatoPaPDetalleDTO datoNomina = datosNomina?.FirstOrDefault();
+
+                        bool bAprobado = datoNomina != null && (datoNomina.Procesados + datoNomina.Devueltos) == datoNomina.Regs_totales;
+
+                        var dicParametros3 = new Dictionary<string, object>()
+                        {
+                            {"folio", strFolioMaestro },
+                            {"procesadas", datoNomina ?.Procesados },
+                            {"devueltas", datoNomina ?.Devueltos },
+                            {"opcion", 1 }
+                        };
+
+                        if (bAprobado)
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizar maestro como aprobado, Folio Maestro: {strFolioMaestro}");
+
+                            
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_NOM_FXD, dicParametros3);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_NOM_FXD, dicParametros3);
+
+                            dicParametros2["opcion"] = 5;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_NOM_FXD, dicParametros2);
+
+                            dicParametros = new Dictionary<string, object>()
+                        {
+                            {"folio", strFolioMaestro },
+                            {"@sFT", string.Empty }
+                        };
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_InsertarFormatoCms_NOM_FXD, dicParametros);
+                        }
+                        else
+                        {
+                            dicParametros3["opcion"] = 2;
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoCms_NOM_FXD, dicParametros3);
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaFormatoTomi_NOM_FXD, dicParametros3);
+                        }
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio {_Operacion.StrFolio}");
+                }
+
+                return true;
+            }
+            catch(Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_NOM_FXD|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones de Mercado Dinero,
+    /// incluyendo la validación de estatus en SPEI y SPID, así como la
+    /// actualización de los procesos asociados en TOMI.
+    /// </summary>
+    public class Servicio_MercadoDinero : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio Mercado Dinero.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_MercadoDinero(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación de Mercado Dinero ejecutando las validaciones
+        /// de estatus y las actualizaciones correspondientes de acuerdo con el
+        /// proceso pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionMercadoDinero()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                string stsSPEI = string.Empty;
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasDatosGeneral))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc)");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    bProcesado = false;
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPEIEstatus))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operación en SPEI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_MercadoDinero, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    EstatusSPEIModel resultadoSpei = await servicio.ValidaEstatusSPEI(ConstantesServicios.TbCalypsoLiquidacion, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    bProcesado = resultadoSpei?.BResultado ?? false;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        });  //Inicia proceso
+                    }
+                    else
+                    {
+                        if (ConstantesServicios.OperacionMDSPEIS.Equals(_Operacion.StrTipoOperacion) && (stsSPEI.Equals(ConstantesServicios.SPEICl) || stsSPEI.Equals(ConstantesServicios.SPEIRl)))
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando la operación por rechazo local - {stsSPEI}");
+
+                            await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                            {
+                                Folio = _Operacion.StrFolio,
+                                TipoOperacion = _Operacion.StrTipoOperacion,
+                                NombreProceso = _Configuracion.NombreProceso,
+                                AliasProceso = strAliasProceso,
+                                Servicio = _Configuracion.NombreServicio,
+                                PId = (int)_Configuracion.Pid,
+                                Excepcion = new Exception("")
+                            });  //Inicia proceso
+                        }
+                    }
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSPIDEstatus))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|A verificar el estatus de la operación en SPID");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 2;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_MercadoDinero, dicParametros2);
+
+                    servicio = servicio ?? CrearServicioGeneral();
+                    bProcesado = await servicio.ValidaEstatus_SPID(ConstantesServicios.TbCalypsoLiquidacion, ConstantesServicios.CampoNFFolio, _Operacion.StrFolio, _Operacion.StrTipoOperacion);
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                    }
+
+                    strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualiza el estatus como operación terminada.");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 3;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_MercadoDinero, dicParametros2);
+
+                    bProcesado = true;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+                    }
+                    else
+                        throw new Exception(string.Format("Error en procesamiento de registro ESTATUS_TERMINADA con folio: {0}.", _Operacion.StrFolio));
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionMercadoDinero|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones MFX,
+    /// incluyendo la actualización de estatus en CMS y la sincronización
+    /// de información entre TOMI y los sistemas relacionados.
+    /// </summary>
+    public class Servicio_MFX : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio MFX.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesCms">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_MFX(OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCms) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionesCms;
+        }
+
+        /// <summary>
+        /// Procesa una operación MFX ejecutando las actualizaciones
+        /// correspondientes en CMS, TOMI y Plan de Trabajo Maestro
+        /// de acuerdo con el estatus de la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionMFX()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+
+                string FolioCMS = string.Empty;
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+
+                    Config.EscribirLog("INFO|ProcesarOperacionMFX|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_MXF, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "Folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_MFX, dicParametros);
+                    DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (string.IsNullOrEmpty(datoTomi?.NF_Folio))
+                        throw new Exception("No se encontró relación en TOMI para el folio");
+
+
+                    Config.EscribirLog($"INFO|ProcesarOperacionMFX|folioCMS={datoTomi.NF_Folio}");
+
+                    FolioCMS = datoTomi.NF_Folio;
+
+                    dicParametros = new Dictionary<string, object>() { { "Folio", FolioCMS } };
+
+                    datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNFEstatus_MFX, dicParametros);
+                    datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    switch (datoTomi.Nf_estatus)
+                    {
+                        case ConstantesServicios.TomiEstatusCONP:
+                        case ConstantesServicios.TomiEstatusCONF:
+                        case ConstantesServicios.TomiEstatusPROC:
+
+                            dicParametros = new Dictionary<string, object>() { { "Folio", FolioCMS } };
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_MXF, dicParametros);
+
+                            dicParametros = new Dictionary<string, object>() { { "Folio", FolioCMS }, { "Opcion", 1 } };
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinNF_MXF, dicParametros);
+
+                            Config.EscribirLog($"INFO|ProcesarOperacionMFX|Terminado actualización de operación");
+
+                            dicParametros2["opcion"] = 2;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_MXF, dicParametros2);
+
+                            break;
+                        case ConstantesServicios.TomiEstatusRECC:
+
+                            dicParametros = new Dictionary<string, object>() { { "Folio", FolioCMS } };
+
+                            await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_MXF, dicParametros);
+
+                            dicParametros = new Dictionary<string, object>() { { "Folio", FolioCMS }, { "Opcion", 2 } };
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinNF_MXF, dicParametros);
+
+                            Config.EscribirLog($"INFO|ProcesarOperacionMFX|Terminado actualización de rechazo de operación");
+
+                            dicParametros2["opcion"] = 3;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_MXF, dicParametros2);
+
+                            break;
+                        default:
+                            throw new Exception($"No se encontró el estatus '{datoTomi.Nf_estatus}' ");
+                    }
+
+                    Config.EscribirLog($"INFO|ProcesarOperacionMFX|Se termina procesamiento del folio: {_Operacion.StrFolio}");
+
+ 
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog("INFO|FXT.procesaOperacion|Operación Finalizada.");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionMFX|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXT_H2H,
+    /// incluyendo la actualización de estatus y el cierre de la
+    /// operación en el Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_FXT_H2H : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXT_H2H.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXT_H2H(OperacionDTO operacion, IParametrosOperaciones parametros) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXT_H2H ejecutando las actualizaciones
+        /// correspondientes de acuerdo con el proceso pendiente registrado
+        /// para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_FXT_H2H()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog("INFO|ProcesarOperacion_FXT_H2H|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_H2H, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXT_H2H, dicParametros);
+                    DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de aceptación de operación");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_H2H, dicParametros2);
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando actualización de rechazo de operación");
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_H2H, dicParametros2);
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando procesamiento de folio: {_Operacion.StrFolio}");
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_FXT_H2H|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXT_GPH,
+    /// incluyendo la actualización de estatus y el cierre de la
+    /// operación en el Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_FXT_GPH : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXT_GPH.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXT_GPH(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXT_GPH ejecutando las actualizaciones
+        /// correspondientes de acuerdo con el proceso pendiente registrado
+        /// para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_FXT_GPH()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog("INFO|ProcesarOperacion_FXT_GPH|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion" , 1 }
+                };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_GPH, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXT_GPH, dicParametros);
+                    DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog("INFO|ProcesarOperacion_FXT_GPH|Terminando actualización de aceptación de operación");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_GPH, dicParametros2);
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog("INFO|ProcesarOperacion_FXT_GPH|Terminando actualización de rechazo de operación");
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_GPH, dicParametros2);
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando procesamiento de folio: {_Operacion.StrFolio}");
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog("INFO|ProcesarOperacion_FXT_GPH|Operación Finalizada.");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_FXT_GPH|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXT Local,
+    /// incluyendo la actualización de estatus y el cierre de la
+    /// operación en el Plan de Trabajo Maestro.
+    /// </summary>
+    public class Servicio_FXTLocal : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXT Local.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXTLocal(OperacionDTO operacion, IParametrosOperaciones parametros) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXT Local ejecutando las actualizaciones
+        /// correspondientes de acuerdo con el proceso pendiente registrado
+        /// para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_FXTLocal()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog("INFO|TMD.procesaOperacion|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_Local, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXT_Local, dicParametros);
+                    DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro en TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|Terminando actualización de aceptación de operación");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_Local, dicParametros2);
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|Terminando actualización de rechazo de operación");
+
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT_Local, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminando procesamiento de folio: {_Operacion.StrFolio}");
+
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog("INFO|TMD.procesaOperacion|Operación Finalizada.");
+
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_FXTLocal|{ex}");
+                return false;
+            }
+
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXT,
+    /// incluyendo la actualización de información en CMS y la
+    /// finalización del flujo de la operación.
+    /// </summary>
+    public class Servicio_FXT : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXT.
+        /// </summary>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_FXT(OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCMS) 
+        {
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionesCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXT ejecutando las actualizaciones
+        /// correspondientes en CMS y Plan de Trabajo Maestro de acuerdo
+        /// con el proceso pendiente registrado.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionFXT()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    Config.EscribirLog("INFO|FXT.procesaOperacion|Actualizando el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    var dicParametros2 = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"tipo_operacion", _Operacion.StrTipoOperacion },
+                        {"opcion" , 1 }
+                    };
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT, dicParametros2);
+
+                    dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                    List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXT, dicParametros);
+                    DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                    if (datoTomi == null)
+                        throw new Exception("No se encontró el registro TOMI");
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus))
+                    {
+                        dicParametros = new Dictionary<string, object>()
+                        {
+                            {"folio", _Operacion.StrFolio },
+                            {"sFT", datoTomi.T24_transaction_id }
+                        };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_FXT, dicParametros);
+
+                        Config.EscribirLog("INFO|FXT.procesaOperacion|Terminado actualización de aceptación de operación");
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT, dicParametros2);
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        dicParametros = new Dictionary<string, object>()
+                        {
+                            {"folio", _Operacion.StrFolio },
+                            {"razonrechazo", datoTomi.Nf_razon }
+                        };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_FXT, dicParametros);
+
+                        Config.EscribirLog("INFO|FXT.procesaOperacion|Terminado actualización de rechazo de operación");
+
+                        dicParametros2["opcion"] = 3;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXT, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|FXT.procesaOperacion|Se termina procesamiento de folio {_Operacion.StrFolio}");
+
+                    await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    }); //Termina Proceso
+
+                    Config.EscribirLog("INFO|FXT.procesaOperacion|Operación Finalizada.");
+                    
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionFXT|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXI_H2H,
+    /// incluyendo la validación de estatus en TOMI, SWIFT y la
+    /// actualización de información en CMS.
+    /// </summary>
+    public class Servicio_FXI_H2H : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXI_H2H.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXI_H2H(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXI_H2H ejecutando las validaciones y
+        /// actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_FXI_H2H()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+
+
+                bool bProcesado = true;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXI_H2H, dicParametros);
+                DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontró el registro en TOMI");
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasValidaEstatusTOMI))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Confirmando el estatus de la operación en TOMI, estatus={datoTomi.Nf_estatus}.");
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_H2H, dicParametros2);
+
+                    switch (datoTomi.Nf_estatus)
+                    {
+                        case ConstantesServicios.TomiEstatusPROC:
+                        case ConstantesServicios.TomiEstatusAUAB:
+                        case ConstantesServicios.TomiEstatusRECC:
+                            return true;
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSwitfEstatus))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                        bProcesado = true;
+                    else
+                    {
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_H2H, dicParametros2);
+
+                        bProcesado = false;
+
+                        servicio = servicio ?? CrearServicioGeneral();
+                        string strEstatusSwift = await servicio.Dame_Estatus_Swift(datoTomi.T24_transaction_id);
+
+                        if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusPROC))
+                        {
+                            bProcesado = true;
+                        }
+                        else if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusRECC))
+                        {
+                            throw new Exception($"Error Operación viva en T24 y Swift con estatus cancelado, folio: {_Operacion.StrFolio}");
+                        }
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|SWIFT Status ---{datoTomi.Nf_fecha_autoriza}.");
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                    {
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|En espera de liberación de mensaje.");
+                        return false;
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizandp el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 3;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_H2H, dicParametros2);
+
+
+                    switch (datoTomi.Nf_estatus)
+                    {
+                        case ConstantesServicios.TomiEstatusPROC:
+                        case ConstantesServicios.TomiEstatusAUAB:
+
+                            dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinNF_FXI_H2H, dicParametros);
+
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado actualización de aceptación de operación.");
+
+                            bProcesado = true;
+
+                            dicParametros2["opcion"] = 4;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_H2H, dicParametros2);
+
+                            break;
+                        case ConstantesServicios.TomiEstatusRECC:
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado actualización de rechazo de operación.");
+
+                            bProcesado = true;
+
+                            dicParametros2["opcion"] = 5;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_H2H, dicParametros2);
+
+                            break;
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina procesamiento de folio:{_Operacion.StrFolio}.");
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}.");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_FXI_H2H|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXI_GPH,
+    /// incluyendo la validación de estatus en TOMI, SWIFT y la
+    /// actualización de información en CMS.
+    /// </summary>
+    public class Servicio_FXI_GPH : ServicioBase
+    {
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXI_GPH.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXI_GPH(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXI_GPH ejecutando las validaciones y
+        /// actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacion_FXI_GPH()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+
+                string strEstatusSwift = string.Empty;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                bool bProcesado = true;
+
+                dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXI_GPH, dicParametros);
+                DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontró el registro en TOMI");
+
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasValidaEstatusTOMI))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+                     
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXI_GPH, dicParametros2);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Confirmando el estatus de la operación en TOMI, estatus={datoTomi.Nf_estatus}.");
+
+                    switch (datoTomi.Nf_estatus)
+                    {
+                        case ConstantesServicios.TomiEstatusPROC:
+                        case ConstantesServicios.TomiEstatusAUAB:
+                        case ConstantesServicios.TomiEstatusRECC:
+                            return true;
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Eror en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSwitfEstatus))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        bProcesado = true;
+                    }
+                    else
+                    {
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXI_GPH, dicParametros2);
+
+                        bProcesado = false;
+
+                        servicio = servicio ?? CrearServicioGeneral();
+                        strEstatusSwift = await servicio.Dame_Estatus_Swift(datoTomi.T24_transaction_id);
+
+                        if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusPROC))
+                        {
+                            bProcesado = true;
+                        }
+                        else if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusRECC))
+                        {
+                            throw new Exception($"Error Operación viva en T24 y Swift con estatus cancelado, folio: {_Operacion.StrFolio}");
+                        }
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|SWIFT Status ---{datoTomi.Nf_estatus}.");
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                    {
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|En espera de liberación de mensaje.");
+                        return false;
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizandp el estatus como operación terminada en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 3;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXI_GPH, dicParametros2);
+
+
+                    switch (datoTomi.Nf_estatus)
+                    {
+                        case ConstantesServicios.TomiEstatusPROC:
+                        case ConstantesServicios.TomiEstatusAUAB:
+
+                            dicParametros = new Dictionary<string, object>() { { "Folio", _Operacion.StrFolio } };
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinNF_FXI_GPH, dicParametros);
+
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado actualización de aceptación de operación.");
+
+                            bProcesado = true;
+
+                            dicParametros2["opcion"] = 4;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXI_GPH, dicParametros2);
+
+                            break;
+                        case ConstantesServicios.TomiEstatusRECC:
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Terminado actualización de rechazo de operación.");
+
+                            dicParametros2["opcion"] = 5;
+
+                            await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaPlanTrabajo_Maestro_FXI_GPH, dicParametros2);
+
+                            break;
+                    }
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina procesamiento de folio:{_Operacion.StrFolio}.");
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada.");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}.");
+
+                }
+
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacion_FXI_GPH|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXI Local,
+    /// incluyendo la validación de estatus en TOMI, SWIFT y la
+    /// actualización de información correspondiente en TOMI.
+    /// </summary>
+    public class Servicio_FXILocal : ServicioBase
+    {
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXI Local.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        public Servicio_FXILocal(ConfiguracionServicio configuracion,OperacionDTO operacion, IParametrosOperaciones parametros, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXI Local ejecutando las validaciones
+        /// y actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionServicio_FXILocal()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                bool bProcesado = true;
+
+                string strEstatusSwift = string.Empty;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXI_Local, dicParametros);
+                DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontró el registro en TOMI");
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasValidaEstatusTOMI))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Confirmando el estatus de la operación en TOMI, estatus={datoTomi.Nf_estatus}.");
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_Local, dicParametros2);
+
+                    if (!(datoTomi.Nf_estatus == ConstantesServicios.TomiEstatusPROC || datoTomi.Nf_estatus == ConstantesServicios.TomiEstatusAUAB || datoTomi.Nf_estatus == ConstantesServicios.TomiEstatusRECC))
+                        return true;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Eror en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSwitfEstatus))
+                {
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+
+                    if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                        bProcesado = true;
+                    else
+                    {
+
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_Local, dicParametros2);
+
+                        bProcesado = false;
+
+                        servicio = servicio ?? CrearServicioGeneral();
+                        strEstatusSwift = await servicio.Dame_Estatus_Swift(datoTomi.T24_transaction_id);
+
+                        if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusPROC))
+                        {
+                            bProcesado = true;
+                        }
+                        else if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusRECC))
+                        {
+                            throw new Exception($"Error Operación viva en T24 y Swift con estatus cancelado, folio: {_Operacion.StrFolio}");
+                        }
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|SWIFT Status ---{datoTomi.Nf_estatus}.");
+
+                        if (bProcesado)
+                        {
+                            await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                            {
+                                Folio = _Operacion.StrFolio,
+                                TipoOperacion = _Operacion.StrTipoOperacion,
+                                NombreProceso = _Configuracion.NombreProceso,
+                                AliasProceso = strAliasProceso,
+                                Servicio = _Configuracion.NombreServicio,
+                                PId = (int)_Configuracion.Pid,
+                                Excepcion = new Exception("")
+                            }); //Termina Proceso
+
+                            strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                        }
+                        else
+                        {
+                            Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|En espera de liberación de mensaje.");
+                            return false;
+                        }
+
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.EstatusTerminada))
+                {
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Actualizando el estatus como operación terminada en TOMI");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 3;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_Local, dicParametros2);
+
+                    Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Se termina Procesamiento de Folio {_Operacion.StrFolio}");
+
+                    if (bProcesado)
+                    {
+                        switch (datoTomi.Nf_estatus)
+                        {
+                            case ConstantesServicios.TomiEstatusPROC:
+                            case ConstantesServicios.TomiEstatusAUAB:
+                                dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                                await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinNF_FXI_Local, dicParametros);
+
+                                dicParametros2["opcion"] = 4;
+
+                                await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_Local, dicParametros2);
+
+                                break;
+                            case ConstantesServicios.TomiEstatusRECC:
+
+
+                                dicParametros2["opcion"] = 5;
+
+                                await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI_Local, dicParametros2);
+
+                                break;
+                        }
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog($"INFO|{_Operacion.StrTipoOperacion}.procesaOperacion|Operación Finalizada");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA con folio: {_Operacion.StrFolio}.");
+
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionServicio_FXILocal|{ex}");
+                return false;
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using ConstantesServicios = Aplicacion.Enums.ConstantesServicios;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Servicio encargado del procesamiento de operaciones FXI,
+    /// incluyendo la validación de estatus en TOMI, SWIFT y la
+    /// actualización de información en CMS.
+    /// </summary>
+    public class Servicio_FXI : ServicioBase
+    {
+        IOperacionesCms _IOperacionesCms;
+
+        /// <summary>
+        /// Inicializa una nueva instancia del servicio FXI.
+        /// </summary>
+        /// <param name="configuracion">
+        /// Configuración general del servicio.
+        /// </param>
+        /// <param name="operacion">
+        /// Información de la operación que será procesada.
+        /// </param>
+        /// <param name="parametros">
+        /// Operaciones y parámetros requeridos durante la ejecución.
+        /// </param>
+        /// <param name="operacionesCMS">
+        /// Operaciones relacionadas con CMS.
+        /// </param>
+        public Servicio_FXI(ConfiguracionServicio configuracion, OperacionDTO operacion, IParametrosOperaciones parametros, IOperacionesCms operacionesCMS, IFabricaServicioGeneral fabricaServicioGeneral)
+            : base(fabricaServicioGeneral)
+        {
+            _Configuracion = configuracion;
+            _Operacion = operacion;
+            _IParametrosOperaciones = parametros;
+            _IOperacionesCms = operacionesCMS;
+        }
+
+        /// <summary>
+        /// Procesa una operación FXI ejecutando las validaciones y
+        /// actualizaciones correspondientes de acuerdo con el proceso
+        /// pendiente registrado para la operación.
+        /// </summary>
+        /// <returns>
+        /// True cuando el procesamiento finaliza correctamente;
+        /// en caso contrario, false.
+        /// </returns>
+        public async Task<bool> ProcesarOperacionFXI()
+        {
+            try
+            {
+                string strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                bool bProcesado = true;
+                string strEstatusSwift = string.Empty;
+
+                if (string.IsNullOrEmpty(strAliasProceso))
+                    return false;
+
+                ServicioGeneral servicio = null;
+
+                var dicParametros2 = new Dictionary<string, object>()
+                {
+                    {"folio", _Operacion.StrFolio },
+                    {"tipo_operacion", _Operacion.StrTipoOperacion },
+                    {"opcion", 1 }
+                };
+
+                dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                List<DatoTomiNFDTO> datosTomi = await _IParametrosOperaciones.EjecutarSP<DatoTomiNFDTO>(ProcedimientoAlmacenado.sp_ConsultarTombinNF_FXI, dicParametros);
+                DatoTomiNFDTO datoTomi = datosTomi?.FirstOrDefault();
+
+                if (datoTomi == null)
+                    throw new Exception("No se encontró el registro TOMI");
+
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasValidaEstatusTOMI))
+                {
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    Config.EscribirLog(string.Format("INFO|FXI.procesaOperacion|Confirmando el estatus de la operacion en TOMI, estatus={0} ", datoTomi.Nf_estatus));
+
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI, dicParametros2);
+
+                    if (!(ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus) || ConstantesServicios.TomiEstatusAUAB.Equals(datoTomi.Nf_estatus) || ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus)))
+                        return true;
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TERMINADA_CMS con folio: {_Operacion.StrFolio}");
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasSwitfEstatus))
+                {
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        bProcesado = true;
+                    }
+                    else
+                    {
+                        dicParametros2["opcion"] = 2;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI, dicParametros2);
+
+
+                        bProcesado = false;
+
+                        servicio = servicio ?? CrearServicioGeneral();
+                        strEstatusSwift = await servicio.Dame_Estatus_Swift(datoTomi.T24_transaction_id);
+
+                        if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusPROC))
+                            bProcesado = true;
+
+                        if (strEstatusSwift.Equals(ConstantesServicios.TomiEstatusRECC))
+                            throw new Exception($"Error Operación viva en T24 y Swift con estatus cancelado, folio: {_Operacion.StrFolio}");
+
+                        Config.EscribirLog(string.Format("INFO|{0}.prcesaOperacion|Swift Estatus --- {0}", strEstatusSwift));
+                    }
+
+                    if (bProcesado)
+                    {
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        strAliasProceso = await _IParametrosOperaciones.DameUltimoProceso(_Operacion);
+                    }
+                    else
+                    {
+                        Config.EscribirLog("INFO|{0}.prcesaOperacion|En espera de liberación de mensaje.");
+                        return false;
+                    }
+                }
+
+                if (strAliasProceso.Equals(ConstantesServicios.AliasEstatusTerminadaCMS))
+                {
+                    Config.EscribirLog("INFO|FXI.procesaOperacion|Actualizando el estatus como operación en CMS");
+
+                    await _IParametrosOperaciones.IniciarProceso(new ProcesoDTO()
+                    {
+                        Folio = _Operacion.StrFolio,
+                        TipoOperacion = _Operacion.StrTipoOperacion,
+                        NombreProceso = _Configuracion.NombreProceso,
+                        AliasProceso = strAliasProceso,
+                        Servicio = _Configuracion.NombreServicio,
+                        PId = (int)_Configuracion.Pid,
+                        Excepcion = new Exception("")
+                    });  //Inicia proceso
+
+                    dicParametros2["opcion"] = 3;
+
+                    await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI, dicParametros2);
+
+                    if (ConstantesServicios.TomiEstatusPROC.Equals(datoTomi.Nf_estatus) || ConstantesServicios.TomiEstatusAUAB.Equals(datoTomi.Nf_estatus))
+                    {
+                        dicParametros = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"lsft", datoTomi.T24_transaction_id }
+                    };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoAceptadoCms_FXI, dicParametros);
+
+                        dicParametros = new Dictionary<string, object>() { { "folio", _Operacion.StrFolio } };
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizaTombinDetalle_FXI, dicParametros);
+
+                        Config.EscribirLog("INFO|FXI.procesaOperacion|Terminado Actualizacíón de aceptación de operación");
+
+                        bProcesado = true;
+
+                        dicParametros2["opcion"] = 4;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI, dicParametros2);
+
+
+                    }
+                    else if (ConstantesServicios.TomiEstatusRECC.Equals(datoTomi.Nf_estatus))
+                    {
+                        dicParametros = new Dictionary<string, object>()
+                    {
+                        {"folio", _Operacion.StrFolio },
+                        {"razonRechazo", datoTomi.Nf_razon}
+                    };
+
+                        await _IOperacionesCms.EjecutaSPTransaccion(ProcedimientoAlmacenado.sp_ActualizaFormatoRechazadoCms_FXI, dicParametros);
+
+                        Config.EscribirLog("INFO|FXI.procesaOperacion|Terminado Actualizacíón de recazo de operación");
+
+                        bProcesado = true;
+
+                        dicParametros2["opcion"] = 5;
+
+                        await _IParametrosOperaciones.EjecutarSP(ProcedimientoAlmacenado.sp_ActualizarPlanTrabajo_Maestro_FXI, dicParametros2);
+
+                    }
+
+                    Config.EscribirLog($"INFO|FXI.procesaOperacion|Se termina procesamiento de folio: {_Operacion.StrFolio}");
+
+
+                    if (bProcesado)
+                    {
+
+                        await _IParametrosOperaciones.TerminarProceso(new ProcesoDTO()
+                        {
+                            Folio = _Operacion.StrFolio,
+                            TipoOperacion = _Operacion.StrTipoOperacion,
+                            NombreProceso = _Configuracion.NombreProceso,
+                            AliasProceso = strAliasProceso,
+                            Servicio = _Configuracion.NombreServicio,
+                            PId = (int)_Configuracion.Pid,
+                            Excepcion = new Exception("")
+                        }); //Termina Proceso
+
+                        Config.EscribirLog("INFO|FXI.procesaOperacion|Operación finalizada.");
+                    }
+                    else
+                        throw new Exception($"Error en procesamiento de registro ESTATUS_TTERMINADA_CMS con folio: {_Operacion.StrFolio}");
+
+                }
+
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesarOperacionFXI|{ex}");
+                return false;
+            }
+
+            
+        }
+    }
+}
+
