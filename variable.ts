@@ -1,1650 +1,580 @@
-using AplicacionZeus_Files.Enums;
-using AplicacionZeus_Files.Interfaces;
-using AplicacionZeus_Files.Modelos;
-using AplicacionZeus_Files.Operaciones;
-using MUFG_T24.Comunes;
-using MUFG_T24.Interfaces_utilidades;
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
+Lectura Recommendations
+Lectura - Architecture & Code Quality Recommendations
+Solution: General/Lectura/Lectura/Lectura.sln (../../General/Lectura/Lectura/Lectura.sln) Reviewed source: branch CodeReview2, commit 0c5d16fd1de4f047b4ab0751a43035c8e4f64842 Compared against: LoansApp architecture and coding baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md) See also: _ORCHESTRATION.md (./_ORCHESTRATION.md) for the portfolio methodology, template, and standing findings; _Lectura_FreshReview_Progress.md (./_Lectura_FreshReview_Progress.md) and _Lectura_FreshReview_FileList.txt (./_Lectura_FreshReview_FileList.txt) for the per-batch evidence and the file manifest.
+1. Solution Overview (low/no-dependency -> high dependency)
+Tier	Project	Kind	Path
+0	MUFG_T24 (external)	Shared .NET Framework library, not in the repository	D:\ServiceCMS\MUFG_T24.dll (absolute HintPath)
+1	AplicacionLectura	.NET Framework 4.8 class library (x86, LangVersion 7.3)	AplicacionLectura.csproj (../../General/Lectura/Aplicacion/AplicacionLectura.csproj)
+2	InfraestructuraLectura	.NET Framework 4.8 class library	InfraestructuraLectura.csproj (../../General/Lectura/Infraestructura/InfraestructuraLectura.csproj)
+2	PruebasUnitariasLectura	MSTest 3.6.4 / Moq 4.20.72 project	PruebasUnitariasLectura.csproj (../../General/Lectura/PruebasUnitarias/PruebasUnitariasLectura.csproj)
+3	Lectura	.NET Framework 4.8 Windows Service host	Lectura.csproj (../../General/Lectura/Lectura/Lectura.csproj)
+-	SQL assets	237 stored-procedure scripts in four generations	Lectura/Srcripts (../../General/Lectura/Lectura/Srcripts), Infraestructura/Scripts (../../General/Lectura/Infraestructura/Scripts)
 
-namespace AplicacionZeus_Files
+What this solution actually does: Lectura is a request-driven Windows service. A TCP package from the control service names an operation type and a list of folios; the host opens a SimpleInjector async scope per package and OperacionServicio dispatches each folio, by a string switch, to one of 37 operation classes (SPEI/SPID/TEF entradas, FXD/FXI/FXT forex payments, MFX, payroll NOMFXD, mass payments PaP_*, TAX, SER, TMD, SAT tax payments, Mercado de Dinero, and the concentrator CNT). Each class is a small phase machine (DATOS_GRAL, CMS_A_TOMI, TOMI_ENTRADA_SALIDA, status change, reconciliation) driven by IniciaProceso/TerminaProceso from the shared library. A phase reads the captured format from CMS, writes TOMI (InterfacesT24) tables and the Entrada/Salida ledger, signs SPEI/SPID orders with a PFX certificate, asks a T24 web service for account status, answers the SPEI/SPID/TEF participant systems, and, for SAT, validates and stamps tax declarations over a TCP validator. Every database call is a stored procedure (486 calls in the 70 infrastructure source files); the repository carries the SQL for 413 of the 446 procedures that running code calls.
+2. Scope & Methodology Note
+This is a fresh review after the authoritative portfolio reset dated 2026-10-07. Historical Lectura reports and finding IDs (including the earlier LEC-# series) were treated as leads only; every finding below was re-verified against the current source.
+Scope item	Result
+Repository state	Clean CodeReview2 branch at commit 0c5d16fd1de4f047b4ab0751a43035c8e4f64842; no untracked or ignored files before or after the review
+Git-tracked scope	599/599 physical files reconciled exactly to the fresh manifest (599 tracked = 599 manifest rows = 599 on disk); every file is assigned to exactly one of 37 review batches
+Text scope	588/588 text files, 180,746 lines: 578 authored text files (92,324 lines) were read in full or, for near-duplicate SQL, compared programmatically as described below; 10 vendored package text files (88,422 lines) were verified by byte comparison and read where authored by the vendor
+Authored C# scope	299/299 files, 49,012 lines (298 authored files plus the generated Reference.cs T24 proxy, which was inspected and excluded from findings)
+SQL scope	237/237 files, 37,155 lines: 37 family scripts (417 definitions), 150 per-procedure scripts, 5 nested legacy scripts, 3 consolidated scripts, 3 FirmaElectronica scripts, 39 verification scripts. The 129 per-procedure scripts that duplicate a family procedure were compared with a normalizing diff (every difference inspected); the other 21 per-procedure scripts and all family scripts were read in full
+Binary scope	11/11 files inspected: eight vendored Newtonsoft.Json DLLs and the .nupkg verified by hash (the .nupkg is byte-identical to the one published on the public NuGet feed and all 20 extracted files match their package entries), the .signature.p7s decoded (valid CMS signature by the .NET Foundation certificate), and the package icon viewed
+Review batches	Metadata/projects; application core, interfaces, DTOs, signing, 38 operation files; infrastructure (SOAP, 67 DAOs, SAT); consolidated scripts; host; tests; four SQL generations; audit artifacts; legacy service reference; vendored package; quantified scans and manifest reconciliation
+External contract context	MUFG_T24.dll (configuration, RepositorioMaestro, ConversionHelper, folio generators, process control) is untracked, so its semantics are confirmation items. The workspace project StoredProcedures/MWD_DB (1,568 procedure definitions) was used only to cross-reference procedure names; it is not counted as a Lectura file
+Requirements basis	No JIRA/ADO story or acceptance criteria were supplied; this is a baseline architecture and code-quality audit
+Executable validation	Build could not run: dotnet, MSBuild, VSTest, NuGet, VSWhere, and the .NET Framework 4.8 reference pack are unavailable, and D:\ServiceCMS\MUFG_T24.dll and the restored packages (SimpleInjector, MSTest, Moq) are absent
+Test execution	Not attempted for the same reason; the seven tests were read, not run
+Independent verification	Three read-only QA passes re-checked the report against source (the headline claims, findings LEC-FR-7 to LEC-FR-55, and the strengths in section 3); the scan figures were re-run over the 298 authored C# files, and every discrepancy found (counts, qualifiers, and line anchors) was corrected before release
+
+The full read was supplemented by quantified scans over the whole repository. Production C# contains 296 awaited calls to the 202 `Task<bool>` DAO methods; 206 (69.6 percent) discard the result, in 33 operation classes; 421 repeated new ProcesoDTO literals; 776 EscribirLog calls (644 tagged INFO); 374 throw new Exception( sites and 5 bare catch blocks; 16 hard-coded "JEAI" capturist values; 46 DateTime.Now uses; 267 UTF-8-as-Latin-1 and 15 CP437 mojibake lines; and 381 generated placeholder /// Ejecuta la operación ... comments. The SQL has 200 Afecto result sets, 417 family procedure definitions with one explicit transaction, and amount parameters of seven different numeric types.
+No xp_cmdshell, OPENROWSET, OPENQUERY, sp_OA*, sp_configure, TRUNCATE, DROP TABLE, GRANT/DENY, EXEC (@variable), password literal, hard-coded credential in C# or configuration, C# 8+ syntax (which would break LangVersion 7.3), async void, .Wait(), Task.Run, or Thread.Sleep was found. Newtonsoft.Json 13.0.4 is above the 13.0.1 release that fixed CVE-2024-21907.
+Finding Summary
+Category	Blocker	Major	Minor	Total
+MustChange/rewrite	3	20	0	23
+rewrite_recommended	0	14	15	29
+NiceToRewrite_ifTimePermits	0	0	3	3
+Total	3	34	18	55
+
+Fresh Cross-Cutting Checks
+Candidate	Result	Current evidence
+GEN-1 absolute DLL references	Yes	All four projects reference D:\ServiceCMS\MUFG_T24.dll (host (../../General/Lectura/Lectura/Lectura.csproj#L59-L62)); the repository ignores that file.
+GEN-2 zero automated tests	Partial	A real MSTest/Moq project exists, but it has seven tests and none covers money-moving code.
+GEN-5 sensitive logging/data exposure	Yes	Account numbers, amounts, trace keys, RFC, signature values, and whole signed frames are logged at INFO; developer paths and a customer CDL are committed.
+GEN-6 undisposed signing helper	No (as framed)	All 18 new MetodosFirma( sites are using expressions; the distinct defect is imported certificates that are never disposed (LEC-FR-14).
+GEN-7 finalization only on success	No	ActualizaTerminacion runs from finally (OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L552-L554)); its discarded result is covered by GEN-9.
+GEN-8 nullable PID dereference	No	Pid.HasValue is checked (OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L173)) and the host calls ValidarProcesoActual before .Pid.Value (ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L275-L276)).
+GEN-9 discarded service-state Boolean	Yes	MarcarPuertoEnUsoAsync and ActualizaTerminacion results are discarded at startup and shutdown, and shutdown logs success unconditionally (LEC-FR-44).
+
+Items Requiring Business or Integration Confirmation
+• Confirm the semantics of the untracked MUFG_T24.dll: what validarAfectacion does, whether GeneraFolioUnico/GeneraFolioPresupuesto are idempotent, what IniciaProceso guarantees under concurrent packages, and how ConversionHelper rounds and parses.
+• Confirm which SQL generation is deployed (family scripts, hardened per-procedure scripts, or neither) and obtain the definitions of the 18 procedures that no repository holds, including usp_Lectura_MarcarPlanTrabajoConError and the nine usp_TOMBIN_INSERT_FORMATO_* insert procedures that decide @Salida.
+• Define the SPID type-5 (forex-related) signature frame with the rail owner, and confirm whether a missing counterparty certificate serial may fall back to the service's own public key.
+• Confirm the intended order of control for incoming SPEI/SPID payments (signature before or after the response) and what should happen when the T24 account status is none of the four mapped strings.
+• Confirm the business rules behind: TMD special-rate authorizations (cancelled or missing), Mercado de Dinero exemption of non-folio forex references and its SWAP/REPO leg-ordering rule, the N2020 SWIFT rewrite, the numeric-forex-reference rule (and banker's rounding), NF_FECHA_EJECUCION source for PaP_TEF, NF_TIPO for PaP_FXI masters, and detail-row statuses (CONP/CONF versus SCNP/SCNF) across PaP families.
+• Confirm whether payroll and PaP files can reference a forex deal (four classes carry unreachable forex branches) and which FAD accounts and correspondent BICs are authoritative.
+• Confirm the SAT stamp algorithm and encoding (MD5 over Encoding.Default), the whole-peso rule for DRE amounts, the lifecycle and population of TB_CMS_SALIDAAPPLET, and the meaning of the @FormatoXmlDet parameter that callers fill with the payment key.
+• Confirm LimiteConcurrencia, the TCP listener bind address, ACL, and authentication, and which of the two T24 web-service hosts (10.97.38.163 or 10.97.38.242) is production.
+• Confirm whether MUFG_T24.dll needs Newtonsoft.Json at run time before the reference is removed.
+3. What's Already Good
+Good area	Evidence and value
+Parameterized database access	All 486 stored-procedure calls in the DAOs bind values through parameter factories (2,304 CrearParametro calls); no DAO concatenates input into SQL, and the four + hits in UtileriasSAT build the SAT stamp text, not SQL (ENTCOASTomiDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_COAS/ENTCOASTomiDao.cs#L101-L112)).
+Named procedure constants	ConstantesServicio holds 433 constants and every one is referenced by a DAO, so the procedure contract is explicit and has no dead entries (ConstantesServicio.cs (../../General/Lectura/Aplicacion/Enums/ConstantesServicio.cs)).
+Descriptive output-parameter errors	OutputParameterHelper.EsSalidaCero throws a message that names the procedure when the output parameter is missing, null, or DBNull (OutputParameterHelper.cs (../../General/Lectura/Infraestructura/Repositorio/OutputParameterHelper.cs#L7-L27)).
+Composition root	The host verifies the SimpleInjector container at startup and registers scoped clones of the base and service configuration, so one package cannot overwrite another's settings (ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L116-L117), #L261 (../../General/Lectura/Lectura/ServiceHost.cs#L261)).
+Per-package scope and cancellation	Each package runs in its own async scope and passes the cancellation token into OperacionServicio; shutdown waits for the startup task, the running task, and active clients (ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L304-L339)).
+Finalization placement	Execution-state termination is attempted from finally (OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L552-L554)).
+Signing helper ownership	MetodosFirma implements IDisposable and every one of its 18 construction sites is the expression of a using statement (MetodosFirma.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L17), #L260-L264 (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L260-L264)).
+Signing after either insert path	SPID signs after the insert and after the already-inserted path, so it does not have the retry gap of LEC-FR-15 (SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L245)).
+Strict parsing where it exists	TEF uses the strict Convertir*Requerido converters, and TAX/TMD share the validating ContenidoFormatoParser (ContenidoFormatoParser.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ContenidoFormatoParser.cs)).
+T24 client lifecycle	T24CuentaWebService closes or aborts its channel in finally and throws, with the inner exception, for transport failures, non-success indicators, and empty results, so an outage cannot look like an empty account (T24CuentaWebService.cs (../../General/Lectura/Infraestructura/SOAP/T24CuentaWebService.cs#L124-L131)).
+Hardened SQL pattern	149 per-procedure scripts use SET XACT_ABORT ON, TRY/CATCH, rollback, and THROW (148 also insert into auditoria.errorlog); the MFX, FXD cancel, and PaP cancel procedures guard cve_estatus in the WHERE clause (usp_LecturaENTTEF_InsertarEntradaSalida.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_TEF/usp_LecturaENTTEF_InsertarEntradaSalida.sql)).
+No dangerous SQL surface	None of the high-risk constructs listed in section 2 occur in the 237 scripts, and the dynamic-SQL procedures that take a table name (GFD_*, ComunFXD, ComunSPID) quote it with QUOTENAME/PARSENAME; only the Mercado de Dinero work-table procedure does not (LEC-FR-53).
+Dependency integrity	The vendored Newtonsoft.Json package is authentic, unmodified, and validly signed; no credential literal exists in C# or configuration.
+Real test wiring	MSTest, Moq, and the adapter packages are wired into the solution and the tests exercise the real orchestrator (OperacionServicioTests.cs (../../General/Lectura/PruebasUnitarias/OperacionServicioTests.cs#L19-L136)).
+
+4. Findings by Project (low/no-dependency -> high dependency)
+4.1 AplicacionLectura (Tier 1)
+MustChange / Rewrite
+LEC-FR-5 - Check every DAO result before a reject, return, or status change is considered done (Blocker)
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: ENT_COAS.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_COAS.cs#L373-L394), ENT_TEF.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs#L597-L656), ENTSPEI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L214-L240), ENTSPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L791), SAT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SAT.cs#L229-L280)
+Code block (csharp)
+causaDev = 1;
+procesado = true;
+...
+await _tomiDao.CancelarPlanTrabajoMaestroDevuelto(folio, tipoOperacion, razonRechazo, fechaEjecucion, moneda, speiImporte);
+await _tomiDao.MarcarOrdenRecibidaDevueltaPorFolio(folio, Convert.ToInt32(causaDev));
+await _tomiDao.InsertarDevolucionCoasDesdeOrdenRecibida(folio, Convert.ToInt32(_configuracion.StrFechaSistema), Convert.ToInt32(causaDev));
+ 
+if (!procesado)
+    throw new Exception($"Error en procesamiento de registro con folio: {folio}");
+A scan of the operation and signing services found 296 awaited calls to the 202 DAO methods declared as Task<bool>; 206 of them (69.6 percent) discard the result, in 33 of the 37 operation classes (ENT_COAS 20, MFX 16, SAT 14, PaP_TEF 12, PaPFXI 10, ENTSPEI 10, FXT 9, FXI 9, NOMFXD 9). In the incoming-payment classes the discarded calls are the ones that reject, return, or finalize money: ENT_COAS sets procesado = true before three awaited calls whose results it never reads, so the guard that follows can never fire; ENT_TEF discards CancelarMaestroPorDevolucion, MarcarMaestroRecibidaNoAbonada, and ActualizarEstatusFormatoEntradaTefAScnp; ENTSPEI and ENTSPID discard the processed, not-credited, rejected-without-credit, and return-plan updates; the forex, payroll, PaP, SAT, SER, TAX, TEF, and TMD classes discard their status transitions. PaP_FXD is the counter-example: it checks every result in CAMBIO_ESTATUS and throws on failure. Because most of these DAOs also switch off affected-row validation (LEC-FR-37), a procedure that updates no row still returns true, so the two defects compound.
+Recommendation: assign every DAO result, treat false as a failure that reaches OperacionServicio, delete the procesado = true pre-assignments, and use PaP_FXD as the reference pattern. Add an analyzer rule or review check that rejects a discarded Task<bool>.
+Benefit: a payment that must be rejected or returned is either completed or visibly failed and retried; a folio no longer reports success after a silent no-op.
+LEC-FR-6 - Honor the TEF accept/reject response (Blocker)
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: ENT_TEF.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs#L240-L244), ENT_TEF.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs#L813), RespondeEntradaTef (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs#L998)
+In the "T24 account not found" path procesado = await RespondeEntradaTef("R", 1, ...) is assigned but never checked before CancelarMaestroPorDevolucion and return true. In CONCILIAR the accept response procesado = await RespondeEntradaTef("A", ...) is assigned after the if (procesado) guard and then ignored before TerminaProceso. RespondeEntradaTef returns false for a null result or Codigo != 0. The CAMBIA_ESTATUS block, by contrast, throws when the response fails, so the guard exists but is applied inconsistently.
+Recommendation: check the response in both paths and fail the folio so it is retried and alerted; keep the participant response and the local finalization in one documented order.
+Benefit: the TEF participant system is told the real outcome of every incoming transfer, and the local plan is finalized only after that outcome is known.
+LEC-FR-7 - Count per-folio exceptions and keep the failure handler from aborting the batch (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L332-L333), #L466-L475 (../../General/Lectura/Aplicacion/OperacionServicio.cs#L466-L475), #L482-L509 (../../General/Lectura/Aplicacion/OperacionServicio.cs#L482-L509), #L515-L555 (../../General/Lectura/Aplicacion/OperacionServicio.cs#L515-L555)
+resumen.Procesadas++ runs for every folio and resumen.Error++ only when an operation returns false; the per-folio catch (Exception ex) records ActualizarFallo, ActualizaErrorProceso, and InsertarAlerta but never increments Error, so Procesadas no longer equals Ok + Error. The three awaited handler calls are not individually guarded: a database failure inside the handler escapes to the outer catch, which marks a global failure and abandons every remaining folio. The per-folio alert also sets Folio, TipoOPeracion, and Descipcion to null, so the alert row says nothing about what failed.
+Recommendation: count the failure before any I/O, wrap each handler step so one failed step does not stop the loop, and put folio, operation type, and message in the alert.
+Benefit: the batch summary matches what happened and a single bad folio cannot stop the rest of the package.
+LEC-FR-8 - Validate incoming payment signatures before any response or write (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: ENTSPEI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L372), #L387-L480 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L387-L480), #L651 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L651), #L738-L748 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L738-L748), ENTSPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L508), #L663 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L663), #L777 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L777)
+ENTSPEI computes firmaValida early but enforces it (if (!firmaValida) throw) only inside CAMBIA_ESTATUS, after DATOS_GRAL, SPEI_A_TOMI, and TOMI_ENTRADAS/SALIDAS have written TOMI and Entrada/Salida rows, and after CambiarEstatusRecibida or EjecutarDevolucion has already answered the SPEI system; the devolucion && rechazada path returns before the check. ENTSPID calls ResponderEntradaSpid("A", 0) or DevolverEntradaSpid(...) first and only then ValidaSPIDEntrada. A payment whose signature does not validate is therefore accepted or returned and recorded before the failure is raised, so the signature control does not gate processing.
+Recommendation: confirm the intended control with the rail owner, then validate the signature first (before DATOS_GRAL) and fail the folio without side effects.
+Benefit: a forged or corrupted incoming order cannot create ledger rows or trigger an irreversible response.
+LEC-FR-9 - Define the outcome when the T24 account status is unrecognized (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: ENTSPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L274-L333), #L720-L797 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L720-L797)
+ENTSPID maps only "CTA ACTIVA", "CTA NO EXISTE", "CTA CERRADA", and "CTA BLOQUEADA". Any other status leaves all four flags false; in CAMBIA_ESTATUS the not-found branch sets rechazada = true but calls DevolverEntradaSpid only for the three known flags, leaving procesado = true, so CancelarPlanTrabajoMaestroPorDevolucion runs and the folio ends successfully with no SPID return sent. T24CuentaWebService throws for transport failure, a non-success indicator, an empty result, or a missing detail, so only a successful reply with an unmapped status reaches this branch. ENTSPEI has a default: that treats an unknown status as "no existe", and ENTSPID also dereferences informacionCuentaT24.Status without the null check that ENTSPEI has and wraps the service exception twice with the same prefix.
+Recommendation: add an explicit unknown-status branch (reject with a defined cause, or fail and retry), null-check the service result, and wrap the exception once.
+Benefit: no incoming payment is cancelled without being returned to the sender.
+LEC-FR-10 - Use decimal for money and string or long for identifiers (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: ENT_COASDtos.cs (../../General/Lectura/Aplicacion/DTOs/ENT_COAS/ENT_COASDtos.cs#L240), FXTDtos.cs (../../General/Lectura/Aplicacion/DTOs/FXT/FXTDtos.cs#L86), MFXDtos.cs (../../General/Lectura/Aplicacion/DTOs/MFX/MFXDtos.cs#L26-L44), PaPTefInsertarEntradaSalidaTomiDto.cs (../../General/Lectura/Aplicacion/DTOs/PaP_TEF/PaPTefInsertarEntradaSalidaTomiDto.cs#L16-L42), PaPTefInsertarMaestroTomiDto.cs (../../General/Lectura/Aplicacion/DTOs/PaP_TEF/PaPTefInsertarMaestroTomiDto.cs#L47-L48), SpecialInternationalDto.cs (../../General/Lectura/Aplicacion/Modelos/SpecialInternationalDto.cs), ENT_COAS.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_COAS.cs#L1194), nested PaP_FXI.sql (../../General/Lectura/Lectura/Lectura/Srcripts/Operaciones/PaP_FXI.sql#L344)
+Amounts, exchange rates, customer numbers, account numbers, operation and via codes, and folios are typed double in several DTOs and DAO contracts (IFXDDao.InsertarEntradaSalidaSrv, IPaPFXDDao.InsertarEntradaSalidaSrv, ITAXTomiDao.InsertarEntradaSalidaTax/InsertarFormatoTaxPay, MFXCmsDao.InsertarAutorizacionForexDesdeTomi), and the services feed them with Convert.ToDouble; the types are inconsistent between sibling DTOs (for example the PaP TEF Entrada/Salida DTO holds Importe and Saldo as decimal but Cdl, Operacion, Cuenta, Via, Fad, and ReferenciaControlCont as double). ENT_COAS converts a double? amount back to decimal with an unguarded .Value to post the ledger row. The SQL side is float as well: the four live PaP FXI/TEF insert procedures declare @T24_DEBIT_AMOUNT float, usp_LecturaTAX_ActualizarDatosGeneralesMaestro declares @Importe FLOAT, the MFX authorization declares @EcRate FLOAT, and StoredProcedures/MWD_DB has 14 more float amount parameters, so the path is binary floating point end to end. Operation codes and types that are string in sibling TEF DTOs are double in the PaP TEF master DTO, which would lose leading zeros, and an 18-digit CLABE cannot be held exactly in a double.
+Recommendation: use decimal for amounts and rates, string or long for identifiers and codes, align every sibling DTO and procedure parameter type, and map object[] rows by column name with length/DBNull guards.
+Benefit: amounts and account numbers survive every layer exactly, and reconciliation comparisons stop depending on floating-point rounding.
+LEC-FR-11 - Load the SAT cutoff HORA_SAT_FIN and fail visibly when it is missing (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: Enum.cs (../../General/Lectura/Aplicacion/Enums/Enum.cs#L24), ConfiguracionModelo.cs (../../General/Lectura/Aplicacion/Modelos/ConfiguracionModelo.cs#L21), UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L286-L288)
+HORA_SAT_FIN is declared but OperacionServicio neither requests nor handles it, so ConfiguracionModelo.StrHoraCierreSAT is never assigned and Calcula_Fecha_Recaudacion always falls back to TimeSpan.Parse("13:30"). The cutoff decides the collection date for NEPE (EJE/PRV/CRF/DPA) and DRE payments (an authorization after 13:30 moves to the next business day), so a business rule cannot change without redeploying.
+Recommendation: request and validate HORA_SAT_FIN with the other system parameters and stop the operation visibly when it is missing or malformed.
+Benefit: the SAT cutoff is operated data, not an invisible constant.
+LEC-FR-12 - Resolve the SPID type-5 (forex-related) signing frame (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: ComunSPID.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunSPID.cs#L114), #L213 (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunSPID.cs#L213), #L379 (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunSPID.cs#L379), ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L323), SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L245)
+GeneraFirmaDigitalSPID and ValidaFirmaDigitalSPID set tipoPago = 5 when NF_FOREX_RELACIONADO is non-empty and the payment type is 1, but ObtieneTrama handles only case 0, 1, and 2 and otherwise throws "No existe definición para pago SPEI del tipo de pago 5"; the outer catch logs and returns false. The sibling ComunFXD.ObtieneTrama does define case 5, and a history search (git log --all -G"case\s+5\s*:") finds no commit that ever added one to ComunSPID.cs. SPID.cs reaches the forex path (it stores NF_FOREX_RELACIONADO and carries forex branches in several phases) and signs after either insert path, so a forex-related SPID order fails to sign on every tick and the folio never advances; PaP_SPID keeps an always-empty forex reference, so for it the path is dead.
+Recommendation: define the intended SPID type-5 frame with the rail owner and add it with a test, or stop promoting the type.
+Benefit: SPID payments with a related forex deal can be signed and validated.
+LEC-FR-13 - Reject empty signatures before persisting them as success (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: MetodosFirma.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L64-L113), ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L118-L135), ComunSPID.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunSPID.cs#L132), GFD_ACTUALIZAR_FIRMA_DIGITAL (../../General/Lectura/Lectura/Srcripts/Operaciones/FXD_H2H.sql#L99)
+GenerateSign initializes resultBase64 = string.Empty; when the self-verification with the PFX public key and the ConfirmaFirma fallback both fail it only logs a warning and returns string.Empty. ComunSPID.GeneraFirmaDigitalSPID passes that value to _spidDao.ActualizarFirma(...) and returns its Boolean, and ComunFXD.GeneraFirmaDigital passes it to GFD_ACTUALIZAR_FIRMA_DIGITAL and returns true. That procedure's affected-row result is ignored (validarAfectacion: false), so even a signature update that matched no row is logged as successful (LEC-FR-52).
+Recommendation: throw or return a failure when verification fails, reject an empty or missing signature before persisting it, and check the affected-row count of the update.
+Benefit: a mis-provisioned certificate or a missing row stops the payment instead of leaving a blank OP_FIRMA_DIG and a successful result.
+LEC-FR-14 - Dispose imported certificates and load the signing certificate once (Major)
+• Category / severity: MustChange/rewrite - Major (GEN-6 variant)
+• Evidence: MetodosFirma.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L238-L247), FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXD.cs#L87-L89), SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L78-L80), PaP_FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXD.cs#L102-L104), UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L695-L724)
+CertificadoEncontrado() imports the PFX into an X509Certificate2Collection and returns collection[0].HasPrivateKey without disposing any certificate. Twelve operation classes (FXD, FXDGPH, FXDH2H, FXDLocal, MercadoDinero, NOMFXD, PaP_FXD, PaP_SPID, SPID_H2H, SPID, SPIDGPH, SPIDLocal) call it at the top of every folio inside a using (new MetodosFirma(...)), so each folio parses the PFX at least twice and a third time when a signature is generated. UtileriasSAT.GenerarSelloDigital creates a new X509Certificate2 from the same PFX for every SAT folio and never disposes it.
+Recommendation: dispose every imported certificate (or use an ephemeral key set), load the certificate once per tick or service lifetime, and inject it.
+Benefit: private-key handles stop accumulating under sustained volume and each folio avoids repeated PFX parsing and a per-folio file dependency.
+LEC-FR-15 - Sign in an explicit phase so a retry cannot skip the signature (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXD.cs#L282-L289), NOMFXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/NOMFXD.cs#L296-L304), PaP_FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXD.cs#L298-L306), PaP_SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_SPID.cs#L400-L407)
+In the CMS_A_TOMI phase of FXD, NOMFXD, PaP_FXD, and PaP_SPID the signature is generated only inside if (resultado) (the insert just succeeded). If signing fails after the row was inserted, the next tick's insert reports false (the row exists), the else branch counts the rows, sets procesado = true ("Posiblemente se restauró el servicio"), and the phase finishes without ever signing. In the repository, usp_TOMBIN_INSERT_FORMATO_SPEI, usp_TOMBIN_INSERT_FORMATO_TEF, and usp_TOMBIN_INSERT_SRV_ENTRADAS_SALIDAS are plain inserts with no duplicate guard, and the FXD/FXI/FXT/SPID/TAX/TMD insert procedures are not in the repository (LEC-FR-49), so the "false on duplicate" assumption cannot be verified.
+Recommendation: make signing an explicit phase (or verify a stored signature on the idempotent path) and keep insert and sign in one step.
+Benefit: an order whose signing failed cannot continue downstream unsigned.
+LEC-FR-16 - Stop logging account numbers, amounts, signatures, and frames at INFO (Major)
+• Category / severity: MustChange/rewrite - Major (GEN-5)
+• Evidence: ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L95), ComunSPID.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunSPID.cs#L109), MetodosFirma.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L102), CNT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/CNT.cs#L356), FXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L1195)
+ComunFXD.GeneraFirmaDigital and ComunSPID.GeneraFirmaDigitalSPID log every signature input (bank, amount, debit and beneficiary accounts, reference); ObtieneTrama logs OpMonto, account numbers, and the trace key; LogueDatosTrama and LogueoDatosTrama* log the hex bytes and the complete assembled frame; ValidaFirmaDigitalSPID logs the computed and stored signature; MetodosFirma logs the PFX path and the Base64 signature; CNT.TOMI_ENTRADA_SALIDA logs all 24 field values; PaP_TEF writes 24 INFO lines per Entrada/Salida row plus one for the configured date; and FXI logs the ordering customer's RFC twice. Across the solution EscribirLog is called 776 times and 644 of those lines are tagged INFO.
+Recommendation: log a correlation identifier, operation type, phase, and outcome; mask account numbers and drop amounts, RFC values, signatures, and frames; gate diagnostic dumps behind an explicit debug switch.
+Benefit: the log stops being a second copy of customer financial data and signature material.
+LEC-FR-17 - Act on the FXI SPEI-cover routing result (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: FXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L228-L251), #L1058-L1086 (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L1058-L1086)
+CheckIfOperationHasSpeiCover returns Result<bool>.Failed(...) for a missing or invalid beneficiary BIC, a failed NOSTRO lookup, and the explicit invalid-combination guard ("Caso no válido, es posible que se haya encontrado una vostro y la salida sea por SPEI, o lo contrario"), but the caller reads only operationHasSpeiCoverResult.Data (default false) and never checks IsSuccess. InsertarRegistroSpeiCobertura (also result-discarded) is awaited on every invocation where the computed cover flag is true, before the phase machine. A settlement-route failure silently becomes "no SPEI cover" and the call repeats on every tick.
+Recommendation: fail the folio, with the reason, when IsSuccess is false, and make cover registration idempotent and phase-scoped.
+Benefit: a payment is routed by a validated settlement path, and a routing error is visible instead of being treated as the default route.
+LEC-FR-18 - Let Mercado de Dinero DATOS_GRAL exceptions surface (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L316-L320), #L76 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L76), #L134 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L134)
+Code block (csharp)
+catch (Exception ex)
 {
-    /// <summary>
-    /// Servicio que maneja la operacion principal
-    /// </summary>
-    public class OperacionServicio
-    {
-        #region Propiedades
-
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IOperacionesDWH _operacionDWH;
-        private readonly Productos _productos;
-        private readonly Archivos _archivos;
-
-        #endregion
-
-        #region Constructor
-
-        /// <summary>
-        /// Constructor de clase para ejecutar las operaciones
-        /// </summary>
-        /// <param name="configuracion">Inyección de la configuración</param>
-        /// <param name="operacionesDWH">Inyección para la base de datos DWH</param>
-        public OperacionServicio(ConfiguracionModelo configuracion,
-                                IOperacionesDWH operacionesDWH,
-                                Productos productos,
-                                Archivos archivos)
-        {
-            _configuracion = configuracion;
-            _operacionDWH = operacionesDWH;
-            _productos = productos;
-            _archivos = archivos;
-        }
-
-        #endregion
-
-        #region Métodos
-
-        /// <summary>
-        /// Función Principal para ejecutar las operaciones del Servicio.
-        /// </summary>
-        /// <returns></returns>
-        public async Task EjecutarProcedimientosAsync(CancellationToken ct)
-        {
-            try
-            {
-                #region Validaciones Parámetros
-
-                ct.ThrowIfCancellationRequested();
-
-                // Carga los parametros de configuración para el inicio de las operaciones
-                Dictionary<string, string> dicParametrosSistema = await _operacionDWH.ParametrosSistema();
-
-                foreach (var paramSistema in dicParametrosSistema)
-                {
-                    if (!Enum.TryParse(paramSistema.Key, out ParametrosSistema parametro)) continue;
-
-                    switch (parametro)
-                    {
-                        case ParametrosSistema.RUTA_ZEUS_ENVIO:
-                            _configuracion.StrRutaZeusEnvio = paramSistema.Value;
-                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Ruta de envio de archivo local '{paramSistema.Value}'");
-                            break;
-
-                        case ParametrosSistema.RUTA_ZEUS_RESP:
-                            _configuracion.StrRutaZeusResp = paramSistema.Value;
-                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Ruta de respaldo de archivo en red '{paramSistema.Value}'");
-                            break;
-
-                        case ParametrosSistema.MAIL_ZEUS_TO:
-                            _configuracion.StrMailZeusTo = paramSistema.Value;
-                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Mails zeus to '{paramSistema.Value}'");
-                            break;
-
-                        case ParametrosSistema.MAIL_ZEUS_CC:
-                            _configuracion.StrMailZeusCc = paramSistema.Value;
-                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Mails zeus to '{paramSistema.Value}'");
-                            break;
-                    }
-                }
-
-                #endregion
-
-                int numeroProductos = await _productos.BuscaProductos(ct);
-
-                if (numeroProductos > 0)
-                {
-                    Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Se encontraron {numeroProductos} productos a generar (Zeus->Files).");
-                    await _archivos.ProcesaArchivos(ct);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Se presenta exception: {ex}");
-                throw;
-            }
-        }
-        #endregion
-    }
+    //Se conserva comportamiento legacy: en DATOS_GRAL se loguea la excepción y no se relanza.
+    Config.EscribirLog($"ERROR|procesaOperacion|Se presenta exception: {ex}");
 }
-
-using AplicacionZeus_Files.Enums;
-using AplicacionZeus_Files.Interfaces;
-using AplicacionZeus_Files.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace AplicacionZeus_Files.Operaciones
-{
-    /// <summary>
-    /// Clase donde implementan métodos archivos
-    /// </summary>
-    public class Archivos
-    {
-        #region Propiedades
-
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IOperacionesDWH _operacionesDWH;
-
-        #endregion
-
-        #region Constructor
-
-        /// <summary>
-        /// Contructor de la case archivos
-        /// </summary>
-        /// <param name="configuracion">Inyección de la configuracíon</param>
-        /// <param name="operacionesDwh">Inyección del acceso a base de datos</param>
-        public Archivos(ConfiguracionModelo configuracion, IOperacionesDWH operacionesDwh)
-        {
-            _configuracion = configuracion;
-            _operacionesDWH = operacionesDwh;
-        }
-
-        #endregion
-
-        #region Métodos
-
-        /// <summary>
-        /// Función para Procesar los archivos de Zeus
-        /// </summary>
-        /// <returns></returns>
-        public async Task<bool> ProcesaArchivos(CancellationToken ct)
-        {
-            try
-            {
-                RegistrosModelo registros;
-                FileInfo oFile = null;
-                string strBuffer = string.Empty;
-                string strFechaArchivo = string.Empty;
-                string strZeus_file_name = string.Empty;
-                string strZeus_file = string.Empty;
-                string strZeus_fileResp = string.Empty;
-                string strZeus_file_noExt = string.Empty;
-                string fechaProceso = string.Empty;
-                long iFileSize = 0;
-                int iRegs = 0;
-
-                Config.EscribirLog("INFO|ProcesaArchivos|Inicio de procesa_Archivos.");
-
-                //Lista de Procesos a Realizar
-                List<ProcesosEjecutarModelo> listaProcesos = await _operacionesDWH.ListarProcesosEjecutar(Constantes.CLAVE_PROYECTO);
-
-                //Bsucams que no tenga repetido la misma tabla Zeus y el mismo archivo
-                List<ProcesosEjecutarModelo> listaProcesar = listaProcesos
-                                                            .GroupBy(x => new { x.des_proyecto_tabla, x.des_proyecto_files })
-                                                            .Select(g => g.First())
-                                                            .ToList();
-
-                //Lista de tareas de Queries de ajuste de datos solicitados por NY
-                List<TareasAjusteDtosModelo> listaTareasAjuste = await _operacionesDWH.ListarTareasAjusteDatos();
-
-
-                foreach (var item in listaTareasAjuste)
-                    item.des_query = item.des_query.Replace("$id_trabajo$", item.id_trabajo.ToString());
-
-                //Hay queries a realizar al INICIO antes de la realización de los procesos?
-                List<TareasAjusteDtosModelo> lstTareasInicio = listaTareasAjuste.Where(x => string.Equals(x.cve_momento,
-                                                                                                         Constantes.INI,
-                                                                                                         StringComparison.OrdinalIgnoreCase)).ToList();
-
-                if (string.IsNullOrWhiteSpace(_configuracion.StrRutaZeusEnvio))
-                    throw new InvalidOperationException("ERROR|ProcesaArchivos|No se encontro la ruta de StrRutaZeusEnvio.");
-
-                if (string.IsNullOrWhiteSpace(_configuracion.StrRutaZeusResp))
-                    throw new InvalidOperationException("ERROR|ProcesaArchivos|No se encontro la ruta de StrRutaZeusResp.");
-
-                if (string.IsNullOrWhiteSpace(_configuracion.StrMailZeusTo))
-                    throw new InvalidOperationException("ERROR|ProcesaArchivos|No se encontro la ruta de StrMailZeusTo.");
-
-                foreach (var queryAjuste in lstTareasInicio)
-                {
-                    try
-                    {
-                        //Marco el inicio del proceso de control
-                        registros = await _operacionesDWH.MarcarInicioFinProcesoControl(queryAjuste.id_trabajo, queryAjuste.num_orden);
-
-                        Config.EscribirLog($"INFO|ProcesaArchivos|QueryAjuste|Procesando: IdTrabajo: {queryAjuste.id_trabajo}, " +
-                            $"NumeroOrden: {queryAjuste.num_orden}, Producto: '{queryAjuste.cve_producto}', Tipo: '{queryAjuste.cve_tipo}', " +
-                            $"Tabla: '{queryAjuste.des_tabla}', Descripcion: '{queryAjuste.des_tabla}', SQL: *{queryAjuste.des_query}*.");
-
-                        Config.EscribirLog($"INFO|ProcesaArchivos|QueryAjuste|Número de registros procesados:  {registros.num_regs}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Config.EscribirLog($"ERROR|ProcesaArchivos|QueryAjuste|Se presenta exception: Procedimiento: '{ProcedimientoAlmacenado.sp_MarcarInicioFinProcesoControl}', Error:{ex}");
-                        await _operacionesDWH.MarcarErrorProcesoControl(queryAjuste.id_trabajo, queryAjuste.num_orden, ex.Message);
-                    }
-                }
-
-                //Valida si hay PreQueries pendientes de procesar
-                registros = await _operacionesDWH.ObtenerPreQueriesPendientes();
-                if (registros.num_regs > 0)
-                {
-                    Config.EscribirLog($"ERROR|ProcesaArchivos|QueryAjuste|Hay {registros.num_regs} reglas de ajustes de datos iniciales pendientes de realizar.");
-                    return false;
-                }
-
-                //Barrido de los Procesos a realizar
-                foreach (var tarea in listaProcesar)
-                {
-                    ct.ThrowIfCancellationRequested();
-
-                    try
-                    {
-                        int registrosPorTerminar = 0;
-                        string listaProcPorTerminar = string.Empty;
-
-                        Config.EscribirLog($"INFO|ProcesaArchivos|Procesando: IdTrabajo: {tarea.id_trabajo}, Producto: '{tarea.cve_producto}', Tipo: '{tarea.cve_tipo}', " +
-                                            $"TipoLayout: '{(tarea.cve_producto == Constantes.GENERAL ? Constantes.GENERAL : Constantes.SALDO)}', Sistema: '{tarea.cve_sistema}'," +
-                                            $" FechaProceso: '{tarea.fecha_proceso}', TablaProyecto: '{tarea.des_proyecto_tabla}', Archivo:'{tarea.des_proyecto_files}'");
-
-                        //Busca por trabajos compuestos (ejemplo DEPOSITS y DEPOSITS_CH son un solo archivo y se debe esperar a que terminen ambos para escribir el archivo)
-                        var listaProcesosTerminar = await _operacionesDWH
-                                                            .BuscarTrabajosCompuestos(tarea.id_trabajo, tarea.cve_producto, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
-
-                        if (listaProcesosTerminar.Count > 0)
-                        {
-                            registrosPorTerminar = listaProcesosTerminar.Count;
-                            listaProcPorTerminar = string.Join(Environment.NewLine, listaProcesosTerminar.Select(x => $" - Producto: {x.cve_producto}, Tipo: {x.cve_tipo}, Sistema: {x.cve_sistema}"));
-                        }
-
-                        if (registrosPorTerminar > 0)
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Es necesario esperar la terminación de los siguientes procesos para escribir en archivo: {listaProcPorTerminar}");
-                        else
-                        {
-                            // Marca proceso(s) como terminado para aquellos que no tienen proyecto y se no escriben archivo pero complementarios la información de productos
-                            // (ej. FX_TRADE + FX_POSTING + FX_PRICER = FX, pero solo FX escribe archivo, con esto todos los productos terminaron la fase FILE)
-                            RegistrosModelo registrosModelo = await _operacionesDWH.MarcarTerminadosSinProyecto(tarea.id_trabajo, Constantes.CLAVE_PROYECTO);
-                            registrosPorTerminar = registrosModelo.num_regs;
-
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {registrosPorTerminar} registros como termino de proceso para trabajos generadores de productos.");
-
-                            // Marca proceso(s) como iniciado
-                            registrosModelo = await _operacionesDWH.MarcarProcesosInicio(tarea.id_trabajo, tarea.cve_producto, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
-
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {registrosPorTerminar} registros como inicio de proceso.");
-
-                            //Validaciones Especiales o Complementarias
-                            //Proceso Estandard
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Obteniendo la estructura en Zeus la tabla '{tarea.des_proyecto_tabla}'.");
-
-                            //Proceso creacion archivo
-                            fechaProceso = tarea.fecha_proceso.ToString();
-                            strFechaArchivo = ObtenerFechaFormato(fechaProceso, "MMddyyyy");
-                            strZeus_file_name = tarea.des_proyecto_files.Replace("$fecha_presentacion$", strFechaArchivo);
-                            strZeus_file_noExt = strZeus_file_name.Replace(".TXT", "");
-
-                            try
-                            {
-                                if (!Directory.Exists($"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\"))
-                                    Directory.CreateDirectory($"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\");
-
-                                if (!Directory.Exists($"{_configuracion.StrRutaZeusResp}{fechaProceso}\\"))
-                                    Directory.CreateDirectory($"{_configuracion.StrRutaZeusResp}{fechaProceso}\\");
-                            }
-                            catch (Exception ex)
-                            {
-                                Config.EscribirLog($"ERROR|ProcesaArchivos|Error: {ex}");
-                            }
-
-                            strZeus_fileResp = $"{_configuracion.StrRutaZeusResp}{fechaProceso}\\{strZeus_file_name}";
-                            strZeus_file = $"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\{strZeus_file_name}";
-
-                            string strZeus_fileTmp = $"{strZeus_file}.tmp";
-                            string strZeus_fileRespTmp = $"{strZeus_fileResp}.tmp";
-
-                            if (File.Exists(strZeus_fileTmp))
-                                File.Delete(strZeus_fileTmp);
-
-                            if (File.Exists(strZeus_fileRespTmp))
-                                File.Delete(strZeus_fileRespTmp);
-
-                            //Se obtiene la estructura de una tabla zeus
-                            List<EstructuraTablaZeusModel> tabla = await _operacionesDWH.ObtenerEstructuraTablaZeus(
-                                tarea.cve_producto,
-                                tarea.cve_tipo,
-                                tarea.cve_sistema,
-                                tarea.des_proyecto_tabla);
-
-                            if (tabla.Count == 0)
-                                throw new Exception($"No fue posible obtener la estructura en Zeus de la tabla '{tarea.des_proyecto_tabla}" +
-                                    $"', posiblemente la tabla no existe o no hay los permisos necesarios para obtener la información.");
-
-                            List<DatosArchivoModelo> datosZeus = await _operacionesDWH.ProcesoDatosArchivoModelo(
-                                tarea.cve_producto,
-                                tarea.cve_tipo,
-                                tarea.cve_sistema,
-                                tarea.des_proyecto_tabla,
-                                tarea.id_trabajo);
-
-                            iRegs = 0;
-                            using (StreamWriter writterPrincipal = new StreamWriter(strZeus_fileTmp, true, Encoding.ASCII))
-                            using (StreamWriter writterRespaldo = new StreamWriter(strZeus_fileRespTmp, true, Encoding.ASCII))
-                            {
-                                foreach (var datosZ in datosZeus)
-                                {
-                                    strBuffer = "";
-                                    strBuffer = datosZ.datos_archivo;
-
-                                    await EscribeArchivo(writterPrincipal, strBuffer);
-                                    await EscribeArchivo(writterRespaldo, strBuffer);
-
-                                    iRegs++;
-                                }
-                            }
-
-                            if (File.Exists(strZeus_file))
-                                File.Replace(
-                                    strZeus_fileTmp,
-                                    strZeus_file,
-                                    null);
-                            else
-                                File.Move(strZeus_fileTmp, strZeus_file);
-
-                            if (File.Exists(strZeus_fileResp))
-                                File.Replace(
-                                    strZeus_fileRespTmp,
-                                    strZeus_fileResp,
-                                    null);
-                            else
-                                File.Move(strZeus_fileRespTmp, strZeus_fileResp);
-
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Número de registros procesados: {iRegs}");
-                            iFileSize = 0;
-                            if (iRegs > 0)
-                            {
-                                try
-                                {
-                                    oFile = new FileInfo(strZeus_file);
-                                    iFileSize = oFile.Length;
-                                }
-                                catch (Exception ex)
-                                {
-                                    Config.EscribirLog($"AVISO|ProcesaArchivos|No se pudo obtener información del tamaño del archivo {strZeus_file}, error: {ex}");
-                                }
-                            }
-
-                            //Marco Procesos como Terminados
-                            registrosModelo = await _operacionesDWH.MarcarTerminados(tarea.id_trabajo, Constantes.CLAVE_PROYECTO, iRegs, strZeus_file_noExt, iFileSize, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
-
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {registrosModelo.num_regs} registros como termino de proceso.");
-                            //parte agregada para el TrailerRecord 
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Escribiendo Detalle a el Archivo {strZeus_file_name} con: {iRegs} al final del Archivo");
-
-                            List<TrailerRecordModelo> oTrailerRecordFinal = await _operacionesDWH.ObtenerDatosTrailerRecord(tarea.id_trabajo, strZeus_file_noExt);
-
-                            if (oTrailerRecordFinal != null && oTrailerRecordFinal.Count > 0)
-                            {
-                                string strTrailerRecordFinal = string.Empty;
-                                foreach (var _record in oTrailerRecordFinal)
-                                {
-                                    strTrailerRecordFinal = _record.Datos.Replace(":", "");
-                                }
-
-                                using (StreamWriter writterPrincipal = new StreamWriter(strZeus_file, true, Encoding.ASCII))
-                                using (StreamWriter writterRespaldo = new StreamWriter(strZeus_fileResp, true, Encoding.ASCII))
-                                {
-
-                                    await EscribeArchivo(writterPrincipal, strTrailerRecordFinal);
-                                    await EscribeArchivo(writterRespaldo, strTrailerRecordFinal);
-                                }
-                            }
-                        }
-
-                        Config.EscribirLog("INFO|ProcesaArchivos|Verificando si ya se Pueden emitir Archivos por SFTP");
-
-                        int iArchivosFaltantes = 0;
-                        registros = await _operacionesDWH.ComprobarArchivosFaltantes(tarea.id_trabajo);
-
-                        if (registros != null)
-                            iArchivosFaltantes = registros.Faltantes;
-
-
-                        if (iArchivosFaltantes == 0)
-                        {
-                            Config.EscribirLog("INFO|ProcesaArchivos|* * * * * * CREACION DE ARCHIVOS COMPLETA !!!!!!");
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Generando una lista de archivos de la ruta '{_configuracion.StrRutaZeusEnvio}'.");
-
-                            // Realizo la extracción de una visualización del mail
-                            string listadoArchivos = ConstruirListadoArchivos(_configuracion.StrRutaZeusEnvio, fechaProceso);
-
-                            Config.EscribirLog($"INFO|envia_Archivos|Proceso Ejecutado 'dir' {_configuracion.StrRutaZeusEnvio}, salida: \n {listadoArchivos}");
-                            int iResultado = 0;
-
-                            iResultado = await EnviarAviso(
-                                            tarea.id_trabajo,
-                                            tarea.fecha_proceso,
-                                            listadoArchivos);
-
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Envío email de archivos creados: {iResultado}");
-                        }
-                        else
-                            Config.EscribirLog($"INFO|ProcesaArchivos|Faltan: {iArchivosFaltantes} Registros de la Tabla de Control para Enviarse los Archivos");
-
-                    }
-                    catch (Exception ex)
-                    {
-                        Config.EscribirLog($"ERROR|ProcesaArchivos|Procesando idTrabajo: {tarea.id_trabajo}, claveProducto: {tarea.cve_producto}, claveTipo: {tarea.cve_tipo}," +
-                            $" ClaveSistema: {tarea.cve_sistema}. Se presenta exception: {ex} ");
-
-                        // Marco el Proceso como con error
-                        try
-                        {
-                            await _operacionesDWH.MarcarProcesoConError(tarea.id_trabajo, ex.Message, tarea.cve_producto, tarea.cve_tipo, tarea.cve_sistema);
-                        }
-                        catch (Exception ex2)
-                        {
-                            Config.EscribirLog($"ERROR|ProcesaArchivos|***** NO SE PUDO MARCAR ERROR EN id_trabajo={tarea.id_trabajo}, exception: {ex2.Message}");
-                        }
-                    }
-                }
-
-                // Verificar Si termino la Carga
-                iRegs = 0;
-                registros = await _operacionesDWH.ValidarFinCarga();
-
-                if (registros != null)
-                    iRegs = registros.num_regs;
-
-                if (iRegs == 0)
-                {
-                    foreach (var ajuste in listaTareasAjuste)
-                    {
-                        try
-                        {
-                            //Marco el inicio del proceso de control
-                            await _operacionesDWH.MarcarInicioControl(ajuste.id_trabajo, ajuste.num_orden, ajuste.des_query);
-
-                            Config.EscribirLog($"INFO|ProcesaArchivos|queryAjuste_FIN|" + $"IdTrabajo={ajuste.id_trabajo}, " + $"NumOrden={ajuste.num_orden}");
-                            Config.EscribirLog($"INFO|ProcesaArchivos|queryAjuste_FIN|Número de registros procesados:{iRegs}");
-                        }
-                        catch (Exception ex)
-                        {
-                            Config.EscribirLog($"ERROR|ProcesaArchivos|queryAjuste_FIN|" + $"IdTrabajo={ajuste.id_trabajo}, " + $"NumOrden={ajuste.num_orden}, Error={ex.Message}");
-                            await _operacionesDWH.MarcarAjusteConError(ajuste.id_trabajo, ajuste.num_orden, ex.Message);
-                        }
-                    }
-                }
-
-                // Verificar si hay Pre-queries pendientes de procesar
-                iRegs = 0;
-                registros = await _operacionesDWH.ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlPrcZeusReglasDatD_Pendientes);
-
-                if (registros != null)
-                    iRegs = registros.num_regs;
-
-                if (iRegs > 0)
-                {
-                    Config.EscribirLog($"ERROR|ProcesaArchivos|queryAjuste|Hay {iRegs} reglas de ajustes de datos pendientes de realizar al final del proceso.");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|ProcesaArchivos|Se presenta exception:{ex.Message}");
-                throw;
-            }
-
-            return true;
-        }
-
-        /// <summary>
-        /// Función para Envíar el aviso de archivos por correo
-        /// </summary>
-        /// <param name="strMailZeusTo">Dirección de Correo a donde se va a enviar</param>
-        /// <param name="strMailZeusCc">Dirección de correo con copia</param>
-        /// <param name="id_trabajo">Id del trabajo</param>
-        /// <param name="fecha_proceso">Fecha del Proceso</param>
-        /// <param name="listaArchivos">Listado de los archivos generados</param>
-        /// <returns></returns>
-        private async Task<int> EnviarAviso(long id_trabajo, int fecha_proceso, string listaArchivos)
-        {
-            try
-            {
-                string rutaPlantilla = Path.Combine(
-                     Path.GetDirectoryName(typeof(Archivos).Assembly.Location),
-                    "Plantillas", "AvisoEmail.html");
-
-                if (!File.Exists(rutaPlantilla))
-                    throw new FileNotFoundException($"No se encontró la plantilla de correo {rutaPlantilla}");
-
-                string html = File.ReadAllText(rutaPlantilla, Encoding.UTF8);
-                string fechaProceso = WebUtility.HtmlEncode(fecha_proceso.ToString());
-                string asunto = $"{Constantes.SUBJECT} {fecha_proceso}";
-                string idTrabajo = WebUtility.HtmlEncode(id_trabajo.ToString());
-                string rutaZeusResp = WebUtility.HtmlEncode(_configuracion.StrRutaZeusResp);
-                string rutaZeusEnv = WebUtility.HtmlEncode(_configuracion.StrRutaZeusEnvio);
-
-                string listaArchivos_ = WebUtility.HtmlEncode(listaArchivos)
-                .Replace(" ", "&nbsp;")
-                .Replace(Environment.NewLine, "<br>");
-
-                html = html
-                    .Replace("{{FECHA_PROCESO}}", fechaProceso)
-                    .Replace("{{ID_TRABAJO}}", idTrabajo)
-                    .Replace("{{RUTA_ZEUS_RESP}}", rutaZeusResp)
-                    .Replace("{{RUTA_ZEUS_ENVIO}}", rutaZeusEnv)
-                    .Replace("{{LISTA_ARCHIVOS}}", listaArchivos_);
-
-                bool respuestaCorreo = await CorreoHelper.EnviarCorreo(
-                    new string[] { Constantes.MAIL_FROM },
-                    _configuracion.StrMailZeusTo,
-                    _configuracion.StrMailZeusCc,
-                    string.Empty,
-                    asunto,
-                    html);
-
-                if (respuestaCorreo)
-                    return 1;
-                else
-                    return 0;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|EnviaAviso|Ocurre exception: {ex}");
-            }
-
-            return 0;
-        }
-
-        /// <summary>
-        /// Función para escribir el archivo en la carpeta de Zeus
-        /// </summary>
-        /// <param name="archivoNombre">Nombre del archivo</param>
-        /// <param name="texto">Contenido del archivo</param>
-        /// <returns></returns>
-        private Task EscribeArchivo(StreamWriter writter, string texto) =>  writter.WriteLineAsync(texto);
-
-        /// <summary>
-        /// Hace un parse a una fecha en un formato especifico
-        /// </summary>
-        /// <param name="fechaProceso"></param>
-        /// <param name="formato"></param>
-        /// <returns></returns>
-        /// <exception cref="ArgumentException"></exception>
-        private string ObtenerFechaFormato(string fechaProceso, string formato)
-        {
-            if (DateTime.TryParseExact(
-                fechaProceso, "yyyyMMdd",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.None,
-                out var fecha))
-            {
-                return fecha.ToString(formato);
-            }
-            else
-            {
-                throw new ArgumentException("La fecha no posee un formato válido");
-            }
-        }
-
-        /// <summary>
-        /// Construye el listado de archivos que se incorpora en el cuerpo del correo
-        /// </summary>
-        /// <param name="rutaBase"></param>
-        /// <param name="fechaProceso"></param>
-        /// <returns></returns>
-        private string ConstruirListadoArchivos(string rutaBase, string fechaProceso)
-        {
-            string rutaDirectorio = Path.Combine(rutaBase, fechaProceso);
-
-            if (!Directory.Exists(rutaDirectorio))
-                return $"No se encontró el directorio {rutaDirectorio}";
-
-            var archivos = Directory
-                .EnumerateFiles(rutaDirectorio, "*", SearchOption.TopDirectoryOnly)
-                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
-
-            var salida = new StringBuilder();
-            foreach (string archivo in archivos)
-            {
-                salida.AppendLine(Path.GetFileName(archivo));
-            }
-
-            return salida.Length > 0
-                ? salida.ToString()
-                : "No se encontraron archivos";
-        }
-
-        #endregion
-    }
-}
-
-using AplicacionZeus_Files.Enums;
-using AplicacionZeus_Files.Interfaces;
-using AplicacionZeus_Files.Modelos;
-using MUFG_T24.Comunes;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace AplicacionZeus_Files.Operaciones
-{
-    /// <summary>
-    /// Clase que implementa los métodos de productos
-    /// </summary>
-    public class Productos
-    {
-        #region Propiedades
-
-        private readonly IOperacionesDWH _OperacionesDWH;
-
-        #endregion
-
-        #region Constructor
-
-        /// <summary>
-        /// Constructor de la clase
-        /// </summary>
-        /// <param name="operacionesDwh"></param>
-        public Productos(IOperacionesDWH operacionesDwh)
-        {
-            _OperacionesDWH = operacionesDwh;
-        }
-
-        #endregion
-
-        #region Métodos
-
-        /// <summary>
-        /// Método que implementa la busqueda de productos
-        /// </summary>
-        /// <returns></returns>
-        public async Task<int> BuscaProductos(CancellationToken ct)
-        {
-            try
-            {
-                ct.ThrowIfCancellationRequested();
-                int pendientes = 0;
-                int iRegs = 0;
-
-                RegistrosModelo regsCtlProceso = await _OperacionesDWH
-                    .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlProcesoD);
-
-                RegistrosModelo regsZeusreglas = await _OperacionesDWH
-                    .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlPrcZeusReglasDatD);
-
-                if (regsCtlProceso != null)
-                    pendientes = regsCtlProceso.num_regs;
-
-                if (regsZeusreglas != null)
-                    pendientes += regsZeusreglas.num_regs;
-
-                if (pendientes == 0)
-                {
-                    RegistrosModelo regsCtlProcesoPend = await _OperacionesDWH
-                        .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlProcesoD_Pendientes);
-
-                    RegistrosModelo regsZeusreglasPend = await _OperacionesDWH
-                        .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlPrcZeusReglasDatD_Pendientes);
-
-                    if (regsCtlProcesoPend != null)
-                        iRegs = regsCtlProcesoPend.num_regs;
-
-                    if (regsZeusreglasPend != null)
-                        iRegs += regsZeusreglasPend.num_regs;
-                }
-
-                return iRegs;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|BuscaProductos|Se presentó una excepción {ex}");
-                throw;
-            }
-        }
-
-        #endregion
-    }
-}
-
-using AplicacionZeus_Files.Modelos;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-
-namespace AplicacionZeus_Files.Interfaces
-{
-    /// <summary>
-    /// Interfaz de operaciones DWH
-    /// </summary>
-    public interface IOperacionesDWH
-    {
-        Task<Dictionary<string, string>> ParametrosSistema();
-        Task<RegistrosModelo> ConsultarRegistrosSP(string strSPName);
-        Task<List<ProcesosEjecutarModelo>> ListarProcesosEjecutar(string Cve_proyecto);
-        Task<List<TareasAjusteDtosModelo>> ListarTareasAjusteDatos();
-        Task<RegistrosModelo> MarcarInicioFinProcesoControl(long id_trabajo, int num_orden);
-        Task<RegistrosModelo> ObtenerPreQueriesPendientes();
-        Task<List<TrabajosCompuestosModelo>> BuscarTrabajosCompuestos(long IdTrabajo, string CveProyecto, string DesProyectotabla, string DesProyectoFiles);
-        Task<RegistrosModelo> MarcarTerminadosSinProyecto(long IdTrabajo, string CveProyecto);
-        Task<RegistrosModelo> MarcarProcesosInicio(long IdTrabajo, string CveProyecto, string DesProyectotabla, string DesProyectoFiles);
-        Task<List<EstructuraTablaZeusModel>> ObtenerEstructuraTablaZeus(string CveProducto, string CveTipo, string CveSistema, string TablaZeus);
-        Task<RegistrosModelo> MarcarTerminados(long IdTrabajo, string CveProyecto, int NumReg, string ZeusFileName, long FileSize, string TablaZeus, string ArchivoOriginal);
-        Task<List<TrailerRecordModelo>> ObtenerDatosTrailerRecord(long IdTrabajo, string ZeusFileName);
-        Task<RegistrosModelo> ComprobarArchivosFaltantes(long IdTrabajo);
-        Task<RegistrosModelo> ValidarFinCarga();
-        Task<bool> MarcarInicioControl(long IdTrabajo, int NumOrden, string SqlQuery);
-        Task MarcarAjusteConError(long IdTrabajo, int NumOrden, string MensajeError);
-        Task MarcarErrorProcesoControl(long id_trabajo, int num_orden, string mensaje_error);
-        Task MarcarProcesoConError(long IdTrabajo, string MensajeError, string CveProducto, string CveTipo, string CveSistema);
-        Task<List<DatosArchivoModelo>> ProcesoDatosArchivoModelo(string claveProducto, string claveTipo, string claveSistema, string tablaZeus, long idTrabajo);
-    }
-}
-
-namespace AplicacionZeus_Files.Enums
-{
-    /// <summary>
-    /// Clase donde se almacenan las constantes del servicio
-    /// </summary>
-    public class Constantes
-    {
-        public const string CLAVE_PROYECTO = "ZEUS";
-        public const string MAIL_FROM = "avisos_zeus@mx.mufg.jp";
-        public const string SUBJECT = "Generacion de archivos Zeus, fechaProceso:";
-        public const string GENERAL = "GRAL";
-        public const string SALDO = "SALDO";
-        public const string ID_TRABAJO = "ID_TRABAJO";
-        public const string INI = "INI";
-    }
-}
-
-namespace AplicacionZeus_Files.Enums
-{
-    /// <summary>
-    /// Clases donde almacenan los procedimientos almacenados en constantes
-    /// </summary>
-    public class ProcedimientoAlmacenado
-    {
-        public const string sp_Parametros_Sistema = "dbo.MUFG_MX2_Comun_ObtenerParametrosSistema";
-        public const string sp_ConsultarRegistrosCtlProcesoD = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsCtlProcesos_d";
-        public const string sp_ConsultarRegistrosCtlPrcZeusReglasDatD = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsZeusReglasDat_d";
-        public const string sp_ConsultarRegistrosCtlProcesoD_Pendientes = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsCtlProcesos_d_Pendientes";
-        public const string sp_ConsultarRegistrosCtlPrcZeusReglasDatD_Pendientes = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsZeusReglasDat_d_Pendientes";
-        public const string sp_ConsultarProcesosEjecutar = "dbo.MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar";
-        public const string sp_ConsultarTareasAjusteDatos = "dbo.MUFG_MX2_ZeuzFiles_ListarTareasAjusteDatos";
-        public const string sp_MarcarInicioFinProcesoControl = "dbo.MUFG_MX2_ZeuzFiles_MarcarInicioFinProcesoControl";
-        public const string sp_MarcarErrorControl = "dbo.MUFG_MX2_ZeuzFiles_MarcarErrorProcesoControl";
-        public const string sp_ConsultarPreQueriesPendientes = "dbo.MUFG_MX2_ZeuzFiles_ObtenerPreQuerisPendientesProc";
-        public const string sp_ConsultarTrabajosCompuestos = "dbo.MUFG_MX2_ZeusFiles_BuscarTrabajosCompuestos";
-        public const string sp_MarcarTerminadosSinProyecto = "dbo.MUFG_MX2_ZeusFiles_MarcarTerminadosSinProyecto";
-        public const string sp_MarcarInicioProcesos = "dbo.MUFG_MX2_ZeusFiles_MarcarProcesosInicio";
-        public const string sp_ObtenerEstructuraTablaZeus = "dbo.MUFG_MX2_ZeusFiles_ObtenerEstructuraTablaZeus";
-        public const string sp_ConsultaDatosArchivo = "dbo.MUFG_MX2_ZeusFiles_DatosArchivoConsulta";
-        public const string sp_MarcarTerminados = "dbo.MUFG_MX2_ZeusFiles_MarcarTerminados";
-        public const string sp_ObtenerDatosTrailerRecord = "dbo.MUFG_MX2_ZeusFiles_ObtenerDatosTrailerRecord";
-        public const string sp_ComprobarArchivosFaltantes = "dbo.MUFG_MX2_ZeusFiles_ComprobarArchivosFaltantes";
-        public const string sp_MarcarProcesoConError = "dbo.MUFG_MX2_ZeusFiles_MarcarProcesoConError";
-        public const string sp_ValidarFinalCarga = "dbo.MUFG_MX2_ZeusFiles_ValidarFinalCarga";
-        public const string sp_MarcarInicioControl = "dbo.MUFG_MX2_ZeusFiles_MarcarInicioControl";
-        public const string sp_MarcarAjusteConError = "dbo.MUFG_MX2_ZeusFiles_MarcarAjusteConError";
-        public const string sp_ProcesoDatosArchivoModelo = "dbo.MUFG_MX2_ZeusFiles_ProcesoDatosArchivoModelo";
-    }
-}
-
-using MUFG_T24.Configuracion_utilidades;
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase configuracion Modelo
-    /// </summary>
-    public class ConfiguracionModelo : Configuracion
-    {
-        public string StrRutaZeusEnvio { get; set; }
-        public string StrRutaZeusResp { get; set; }
-        public string StrMailZeusTo { get; set; }
-        public string StrMailZeusCc { get; set; }
-        public new ConfiguracionModelo Clone()
-        {
-            return (ConfiguracionModelo)MemberwiseClone();
-        }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase datos modelo archivo
-    /// </summary>
-    public class DatosArchivoModelo
-    {
-        public string datos_archivo { get; set; }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Estructura Tabla Zeus Model
-    /// </summary>
-    public class EstructuraTablaZeusModel
-    {
-        public string column_name { get; set; }
-        public int? character_maximum_length { get; set; }
-        public string des_alineacion { get; set; }
-        public int num_posicion { get; set; }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase de modelo ParametrosModelo
-    /// </summary>
-    public class ParametrosModelo
-    {
-        public string Id_parametro { get; set; }
-        public string des_valor { get; set; }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase de modelo ProcesosEjecutarModelo
-    /// </summary>
-    public class ProcesosEjecutarModelo
-    {
-        public long id_trabajo { get; set; }
-        public string cve_producto { get; set; }
-        public string cve_tipo { get; set; }
-        public string cve_sistema { get; set; }
-        public int fecha_proceso { get; set; }
-        public string des_proyecto_tabla { get; set; }
-        public string des_proyecto_files { get; set; }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase de modelo RegistrosModelo
-    /// </summary>
-    public class RegistrosModelo
-    {
-        public int num_regs { get; set; }
-        public int Faltantes { get; set; }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase modelo TareasAjusteDtosModelo
-    /// </summary>
-    public class TareasAjusteDtosModelo
-    {
-        public long id_trabajo { get; set; }
-        public string cve_momento { get; set; }
-        public string cve_producto { get; set; }
-        public string cve_tipo { get; set; }
-        public string cve_sistema { get; set; }
-        public int num_orden { get; set; }
-        public string des_tabla { get; set; }
-        public string des_descripcion { get; set; }
-        public string des_query { get; set; }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase modelo TrabajosCompuestosModelo
-    /// </summary>
-    public class TrabajosCompuestosModelo
-    {
-        public string cve_producto { get; set; }
-        public string cve_tipo { get; set; }
-        public string cve_sistema { get; set; }
-    }
-}
-
-namespace AplicacionZeus_Files.Modelos
-{
-    /// <summary>
-    /// Clase modelo TrailerRecordModelo
-    /// </summary>
-    public class TrailerRecordModelo
-    {
-        public string Datos { get; set; }
-    }
-}
-
-using System.Reflection;
-using System.Runtime.InteropServices;
-
-// General Information about an assembly is controlled through the following
-// set of attributes. Change these attribute values to modify the information
-// associated with an assembly.
-[assembly: AssemblyTitle("InfraestructuraZeus_Files")]
-[assembly: AssemblyDescription("")]
-[assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("InfraestructuraZeus_Files")]
-[assembly: AssemblyCopyright("Copyright ©  2026")]
-[assembly: AssemblyTrademark("")]
-[assembly: AssemblyCulture("")]
-
-// Setting ComVisible to false makes the types in this assembly not visible
-// to COM components.  If you need to access a type in this assembly from
-// COM, set the ComVisible attribute to true on that type.
-[assembly: ComVisible(false)]
-
-// The following GUID is for the ID of the typelib if this project is exposed to COM
-[assembly: Guid("a2d06809-77b4-45be-95cc-6b29ee61a766")]
-
-// Version information for an assembly consists of the following four values:
-//
-//      Major Version
-//      Minor Version
-//      Build Number
-//      Revision
-//
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
-
-using AplicacionZeus_Files.Enums;
-using AplicacionZeus_Files.Interfaces;
-using AplicacionZeus_Files.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Repositorios;
-using System;
-using System.Collections.Generic;
-using System.Data;
-using System.Linq;
-using System.Threading.Tasks;
-
-namespace InfraestructuraZeus_Files.Repositorios
-{
-    /// <summary>
-    /// Clase donde se implementan llamadas a BD
-    /// </summary>
-    public class DWHRepository : RepositorioMaestro, IOperacionesDWH
-    {
-        #region Constructor
-
-        /// <summary>
-        /// Constructor del repositorio para acceso a Base de datos
-        /// </summary>
-        /// <param name="alertaT"></param>
-        public DWHRepository() :
-            base(BasedatosProveedor.SqlServer, NombreBasedatos.DWH, null, null)
-        { }
-
-        #endregion
-
-        #region Métodos
-
-        /// <summary>
-        /// Función para obtener los parametros del Sistema
-        /// </summary>
-        /// <returns></returns>
-        public async Task<Dictionary<string, string>> ParametrosSistema()
-        {
-            string parametrosSistema = string.Join(",", Enum.GetNames(typeof(ParametrosSistema)).Select(p => $"'{p}'"));
-            var result = await EjecutarStoredProcedureQuery<ParametrosModelo>(ProcedimientoAlmacenado.sp_Parametros_Sistema, cmd =>
-            {
-                IDbDataParameter param = cmd.CreateParameter();
-                param.ParameterName = "@strParametros";
-                param.Value = parametrosSistema;
-                cmd.Parameters.Add(param);
-            });
-
-            if (result.Data == null) return new Dictionary<string, string>();
-
-            Dictionary<string, string> parametros = new Dictionary<string, string>();
-            foreach (var parametro in result.Data)
-            {
-                if (parametros.ContainsKey(parametro.Id_parametro))
-                {
-                    Config.EscribirLog($"ERROR|obtenerParametrosSistema|El parámetro '{parametro.Id_parametro}' está duplicado en la base de datos.");
-                    continue;
-                }
-
-                parametros.Add(parametro.Id_parametro, parametro.des_valor);
-            }
-
-            return parametros;
-        }
-
-        /// <summary>
-        /// Función para consultar los Registros Pendientes
-        /// </summary>
-        /// <param name="strSPName"></param>
-        /// <returns></returns>
-        public async Task<RegistrosModelo> ConsultarRegistrosSP(string strSPName)
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(strSPName);
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para obtener los Procesos que se ejecutarán
-        /// </summary>
-        /// <param name="claveProyecto">Clave del proyecto a consultar</param>
-        /// <returns></returns>
-        public async Task<List<ProcesosEjecutarModelo>> ListarProcesosEjecutar(string claveProyecto)
-        {
-            var result = await EjecutarStoredProcedureQuery<ProcesosEjecutarModelo>(ProcedimientoAlmacenado.sp_ConsultarProcesosEjecutar, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", claveProyecto));
-            });
-
-            if (result.Exito)
-                return result.Data ?? new List<ProcesosEjecutarModelo>();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
-        }
-
-        /// <summary>
-        /// Obtener la lista de Tareas a Ejecutar
-        /// </summary>
-        /// <returns></returns>
-        public async Task<List<TareasAjusteDtosModelo>> ListarTareasAjusteDatos()
-        {
-            var result = await EjecutarStoredProcedureQuery<TareasAjusteDtosModelo>(ProcedimientoAlmacenado.sp_ConsultarTareasAjusteDatos);
-
-            if (result.Exito)
-                return result.Data ?? new List<TareasAjusteDtosModelo>();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
-        }
-
-        /// <summary>
-        /// Actualiza el estado del Proceso
-        /// </summary>
-        /// <param name="idTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="numeroOrden">Número de Orden de la tarea a ejecutar</param>
-        /// <returns></returns>
-        public async Task<RegistrosModelo> MarcarInicioFinProcesoControl(long idTrabajo, int numeroOrden)
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarInicioFinProcesoControl, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", idTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@num_orden", numeroOrden));
-            });
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para obtener las sentencias pendientes de ejecutar 
-        /// </summary>
-        /// <returns></returns>
-        public async Task<RegistrosModelo> ObtenerPreQueriesPendientes()
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_ConsultarPreQueriesPendientes);
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para obtener trabajos adicionales Pendientes
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="claveProyecto">Clave del proyecto a consultar</param>
-        /// <param name="DesProyectotabla">Tabla de donde se obtiene la información</param>
-        /// <param name="DesProyectoFiles">Nombre del archivo</param>
-        /// <returns></returns>
-        public async Task<List<TrabajosCompuestosModelo>> BuscarTrabajosCompuestos(long IdTrabajo, string claveProyecto, string DesProyectotabla, string DesProyectoFiles)
-        {
-            var result = await EjecutarStoredProcedureQuery<TrabajosCompuestosModelo>(ProcedimientoAlmacenado.sp_ConsultarTrabajosCompuestos, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", IdTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", claveProyecto));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_tabla", DesProyectotabla));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_files", DesProyectoFiles));
-            });
-
-            if (result.Exito)
-                return result.Data ?? new List<TrabajosCompuestosModelo>();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
-
-        }
-
-        /// <summary>
-        /// Función para actualizar el estado de los procesos que no tienen asignado nombre de proyecto
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="claveProyecto">Clave del proyecto a consultar</param>
-        /// <returns></returns>
-        public async Task<RegistrosModelo> MarcarTerminadosSinProyecto(long IdTrabajo, string claveProyecto)
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarTerminadosSinProyecto, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", IdTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", claveProyecto));
-            });
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para actualizar el estado del proyecto cuando el proceso inicia
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="CveProyecto">Clave del proyecto a consultar</param>
-        /// <param name="DesProyectotabla">Tabla a consultar</param>
-        /// <param name="DesProyectoFiles">Nombre del archivo</param>
-        /// <returns></returns>
-
-        public async Task<RegistrosModelo> MarcarProcesosInicio(long IdTrabajo, string CveProyecto, string DesProyectotabla, string DesProyectoFiles)
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarInicioProcesos, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", IdTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", CveProyecto));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_tabla", DesProyectotabla));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_files", DesProyectoFiles));
-            });
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para obtener las columnas y el formato que deben llevar los datos
-        /// </summary>
-        /// <param name="CveProducto">Código del producto que generará el archivo</param>
-        /// <param name="CveTipo">Tipo de Movimiento</param>
-        /// <param name="CveSistema">Sistema</param>
-        /// <param name="TablaZeus">Tabla a consultar</param>
-        /// <returns></returns>
-        public async Task<List<EstructuraTablaZeusModel>> ObtenerEstructuraTablaZeus(string CveProducto, string CveTipo, string CveSistema, string TablaZeus)
-        {
-            var result = await EjecutarStoredProcedureQuery<EstructuraTablaZeusModel>(ProcedimientoAlmacenado.sp_ObtenerEstructuraTablaZeus, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_producto", CveProducto));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_tipo", CveTipo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_sistema", CveSistema));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tabla_zeus", TablaZeus));
-            });
-
-            if (result.Exito)
-                return result.Data ?? new List<EstructuraTablaZeusModel>();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
-        }
-
-        /// <summary>
-        /// Función para actualizar el estado a terminado del proceso
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="CveProyecto">Clave del proyecto a consultar</param>
-        /// <param name="NumReg">Numero de registros procesados</param>
-        /// <param name="ZeusFileName">Nombre del Archivo</param>
-        /// <param name="FileSize">Tamaño del Archivo</param>
-        /// <param name="TablaZeus">Tabla con la que se trabajó</param>
-        /// <param name="ArchivoOriginal">Nombre original del archivo</param>
-        /// <returns></returns>
-        public async Task<RegistrosModelo> MarcarTerminados(long IdTrabajo, string CveProyecto, int NumReg, string ZeusFileName, long FileSize, string TablaZeus, string ArchivoOriginal)
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarTerminados, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@numregs", NumReg));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@zeusfilename", ZeusFileName));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@filesize", FileSize));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cveproyecto", CveProyecto));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tablazeus", TablaZeus));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@fileori", ArchivoOriginal));
-            });
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para obtener el Total de registros del archivo
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="ZeusFileName">Nombre del archivo</param>
-        /// <returns></returns>
-        public async Task<List<TrailerRecordModelo>> ObtenerDatosTrailerRecord(long IdTrabajo, string ZeusFileName)
-        {
-            var result = await EjecutarStoredProcedureQuery<TrailerRecordModelo>(ProcedimientoAlmacenado.sp_ObtenerDatosTrailerRecord, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@zeusfilename", ZeusFileName));
-            });
-
-            if (result.Exito)
-                return result.Data ?? new List<TrailerRecordModelo>();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
-        }
-
-        /// <summary>
-        /// Función para verificar si existen procesos por ejecutar
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <returns></returns>
-        public async Task<RegistrosModelo> ComprobarArchivosFaltantes(long IdTrabajo)
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_ComprobarArchivosFaltantes, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
-            });
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para actualizar si algún proceso tuvo errores
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="MensajeError">Mensaje de error que se guardará</param>
-        /// <param name="CveProducto">Código del producto que generará el archivo</param>
-        /// <param name="CveTipo">Tipo</param>
-        /// <param name="CveSistema">Sistema</param>
-        /// <returns></returns>
-        public async Task MarcarProcesoConError(long IdTrabajo, string MensajeError, string CveProducto, string CveTipo, string CveSistema)
-        {
-            await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarProcesoConError, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@mensajeerror", MensajeError));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cveproducto", CveProducto));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cvetipo", CveTipo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cvesistema", CveSistema));
-            });
-        }
-
-        /// <summary>
-        /// Función para comprobar que no existen mas archivos por procesar
-        /// </summary>
-        /// <returns></returns>
-        public async Task<RegistrosModelo> ValidarFinCarga()
-        {
-            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_ValidarFinalCarga);
-
-            if (result.Exito)
-                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
-        }
-
-        /// <summary>
-        /// Función para marcar el inicio de un proceso
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="NumOrden">Número de Orden de la tarea a ejecutar</param>
-        /// <param name="SqlQuery">Consulta a ejecutar</param>
-        /// <returns></returns>
-        public async Task<bool> MarcarInicioControl(long IdTrabajo, int NumOrden, string SqlQuery)
-        {
-            var result = await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarInicioControl, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@numorden", NumOrden));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@sqlquery", SqlQuery));
-            });
-
-            return result.Exito ? true : throw new Exception(result.MensajeError);//Error de des_query si es que hay.
-        }
-
-        /// <summary>
-        ///  Función para Actualizar el estado del Proceso si existe algún error.
-        /// </summary>
-        /// <param name="idTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="numeroOrden">Número de Orden de la tarea a ejecutar</param>
-        /// <param name="mensajeError">El mensaje con el que se actualizará el trabajo</param>
-        /// <returns></returns>
-        public async Task MarcarErrorProcesoControl(long idTrabajo, int numeroOrden, string mensajeError)
-        {
-            try
-            {
-                await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarErrorControl, cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", idTrabajo));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@num_orden", numeroOrden));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@error_descripcion", mensajeError));
-                });
-
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|Se presentó una excepcion al guardar el error. {ex}");
-            }
-        }
-
-        /// <summary>
-        /// Función para marcar las tareas de sentencias que no se ejecutaron y tienen error
-        /// </summary>
-        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
-        /// <param name="NumOrden">Número de Orden de la tarea a ejecutar</param>
-        /// <param name="MensajeError">Mensaje de error</param>
-        /// <returns></returns>
-        public async Task MarcarAjusteConError(long IdTrabajo, int NumOrden, string MensajeError)
-        {
-            try
-            {
-                await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarAjusteConError, cmd =>
-                {
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@numorden", NumOrden));
-                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@mensajeerror", MensajeError));
-                });
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|Se presentó una excepción en al Marcar Ajuste con Error, ex: {ex}");
-            }
-        }
-
-        /// <summary>
-        /// Procesa y configura un script, ademas de ejecutarlo
-        /// Devuelve un objeto de tipo DatosArchivoModelo
-        /// </summary>
-        /// <param name="claveProducto"></param>
-        /// <param name="claveTipo"></param>
-        /// <param name="claveSistema"></param>
-        /// <param name="tablaZeus"></param>
-        /// <param name="idTrabajo"></param>
-        /// <returns></returns>
-        /// <exception cref="ArgumentException"></exception>
-        public async Task<List<DatosArchivoModelo>> ProcesoDatosArchivoModelo(string claveProducto, string claveTipo, string claveSistema, string tablaZeus, long idTrabajo)
-        {
-            var result = await EjecutarStoredProcedureQuery<DatosArchivoModelo>(ProcedimientoAlmacenado.sp_ProcesoDatosArchivoModelo, cmd =>
-            {
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pClaveProducto", claveProducto));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pCLaveTipo", claveTipo));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pClaveSistema", claveSistema));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pTablaZeus", tablaZeus));
-                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pIdTrabajo", idTrabajo));
-            });
-
-            if (result.Exito)
-                return result.Data ?? new List<DatosArchivoModelo>();
-            else
-                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
-        }
-
-        #endregion
-    }
-}
-
-using AplicacionZeus_Files;
-using AplicacionZeus_Files.Interfaces;
-using AplicacionZeus_Files.Modelos;
-using AplicacionZeus_Files.Operaciones;
-using InfraestructuraZeus_Files.Repositorios;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Encriptacion;
-using MUFG_T24.Configuracion_utilidades;
-using MUFG_T24.ControladorServicios_Utilidades;
-using MUFG_T24.Enums_utilidades;
-using MUFG_T24.Inicializacion_utilidades;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Logeo_utilidades;
-using MUFG_T24.Modelos;
-using SimpleInjector;
-using SimpleInjector.Lifestyles;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Zeus_Files
-{
-    /// <summary>
-    /// Clase principal del servicio Windows (presentación).
-    /// </summary>
-    public partial class ServiceHost : WindowsServiceHostBase
-    {
-        #region Propiedades
-
-        private Container _containerDI;
-        private Configuracion _configuracionBase;
-        private ConfiguracionModelo _configuracionModelo;
-
-        protected override string NombreServicioLog => NombreServicio.Zeus_Files.ToString();
-        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
-        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 5000;
-
-        #endregion
-
-        #region Constructor
-
-        /// <summary>
-        /// Constructor 
-        /// </summary>|
-        public ServiceHost() { }
-
-        #endregion
-
-        #region Procesos
-
-        /// <summary>
-        /// Realiza la inyección y establece un timer
-        /// que ejecutará su delegado por tick del intervalo.
-        /// </summary>
-        protected override void Inicializacion(string[] args, CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            //Realiza la configuracion del _containerDI...
-            _containerDI = new SimpleInjector.Container();
-            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
-            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
-            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
-            _containerDI.Register<IControlServicio, ControlServicio>();
-            _containerDI.Register<IParametrizacion, Parametrizacion>();
-
-            //Almacena configuracion necesaria para el funcionamiento del servicio
-            _configuracionBase = new Configuracion();
-            _configuracionModelo = new ConfiguracionModelo();
-
-            //Inicializa la obtención de la configuracion general y el logging...
-            {
-                ConfiguracionEncriptadaHelper.Inicializar();
-                ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.Zeus_Files.ToString());
-                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
-                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
-                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
-                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
-                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
-                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
-
-                RutasConfiguracion rutas = new RutasConfiguracion()
-                {
-                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
-                };
-
-                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
-                Logging.Write("INFO|OnStart|Leyendo archivo de configuración.");
-            }
-
-            //Registra la configuración...
-            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
-            _containerDI.Register<ConfiguracionModelo>(() => _configuracionModelo.Clone(), Lifestyle.Scoped);
-            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
-
-            //Registra los componentes
-            _containerDI.Register<IOperacionesDWH, DWHRepository>();
-            _containerDI.Register<Productos>();
-            _containerDI.Register<Archivos>();
-            _containerDI.Register<OperacionServicio>();
-
-            _containerDI.Verify();
-        }
-
-        /// <summary>
-        /// Realiza la obtención inicial de parámetros (una sola vez).
-        /// </summary>
-        protected override async Task ParametrizacionesAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                //Obtiene el proceso actual.
-                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
-                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, cancellationToken);
-
-                if (!_configuracionBase.Pid.HasValue)
-                {
-                    throw new InvalidOperationException(
-                        "No fue posible obtener el PID del proceso.");
-                }
-
-                //Marca el servicio en uso.
-                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
-                await _controlServicio.MarcarPuertoEnUsoAsync(
-                    _configuracionBase.Pid.Value, _configuracionBase.NombreProceso,
-                    _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio,
-                    cancellationToken);
-
-                //Parametrizacion de la configuracion local
-                {
-                    _configuracionModelo.NombreServicio = _configuracionBase.NombreServicio;
-                    _configuracionModelo.TimerInterval = _configuracionBase.TimerInterval;
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|Parametrizaciones|Error: {ex}");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Ejecuta el funcionamiento principal del servicio en cada tick.
-        /// </summary>
-        /// <param name="ct"></param>
-        /// <returns></returns>
-        protected override async Task OnTimerAsync(CancellationToken ct)
-        {
-            try
-            {
-                //Ejecuta el procedimiento principal del servicio...
-                using (AsyncScopedLifestyle.BeginScope(_containerDI))
-                {
-                    var operacionServicio = _containerDI.GetInstance<OperacionServicio>();
-                    await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
-                }
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
-            }
-        }
-
-        /// <summary>
-        /// Realiza ciertas operaciones antes de finalizar el servicio.
-        /// </summary>
-        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
-        {
-            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
-
-            try
-            {
-                if (_containerDI == null || _configuracionBase == null)
-                {
-                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
-                    return;
-                }
-
-                using (AsyncScopedLifestyle.BeginScope(_containerDI))
-                {
-                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
-
-                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
-                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
-
-                    //Marca el servicio en uso...
-                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
-
-                    //Marca el termino del servicio...
-                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
-
-                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                //Apagado normal
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
-            }
-            finally
-            {
-                _containerDI?.Dispose();
-            }
-        }
-
-        #endregion
-    }
-}
-
-namespace Zeus_Files
-{
-    partial class ServiceHost {}
-}
-
-using MUFG_T24.Comunes;
-using MUFG_T24.ControladorServicios_Utilidades;
-
-namespace Zeus_Files
-{
-    /// <summary>
-    /// Clase de entrada.
-    /// </summary>
-    internal static class Program
-    {
-        /// <summary>
-        /// Punto de entrada Main.
-        /// </summary>
-        static void Main(string[] args)
-        {
-            WindowsServiceProgramRunner.Run(
-                NombreServicio.Zeus_Files.ToString(),
-                    () => new ServiceHost(), args
-#if DEBUG
-                        , (service, startupArgs) => ((ServiceHost)service).DebugRun(startupArgs)
-#endif
-            );
-        }
-    }
-}
-
-Zeus_Files/App.config
-<?xml version="1.0" encoding="utf-8" ?>
-<configuration>
-    <startup> 
-        <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" />
-    </startup>
-</configuration>
-
+The whole DATOS_GRAL block (complement lookup, work-table update, master-plan update, SPEI signature, TerminaProceso) is wrapped in this catch. Afterwards AliasProceso is still DATOS_GRAL, no later phase matches, and the method returns true. Every other operation class lets exceptions reach OperacionServicio, which records the failure and raises an alert. Failure sources inside the block include a missing liquidation complement, GeneraFirmaDigital returning false, SQL errors, and Convert.ToInt16(tipoPagoSpeiTexto) on an empty string (tipoPagoSpeiTexto is read before the block writes nf_tipo_pago_spei, so when the column is empty the first attempt fails and only a later tick can succeed).
+Recommendation: remove the catch so OperacionServicio records the failure, and sign with the value just written (datosComplemento.SpxxTipoPago).
+Benefit: a missing complement, a signing failure, or a SQL error produces a failure record and an alert instead of a silently retried "processed" folio.
+Rewrite Recommended
+LEC-FR-19 - Query received payments by folio instead of re-reading the day's list (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: ENTSPEI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L121-L126), ENTSPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L134-L148), ENTTEFTefDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_TEF/ENTTEFTefDao.cs#L58-L67)
+ENTSPEI.procesaOperacion calls ObtenerParticipantes() and ObtenerOperacionesRecibidasPorFecha(...) (60-column rows) for every folio and then FirstOrDefault(x => x.op_clave.ToString() == folio); ENTSPID does the same with its by-date list; ENT_COAS and ENT_TEF re-read the participant lists per folio. At the DAO the shape is explicit: ENTTEFTefDao.ObtenerRecibidaPorFolio(fechaAplicacion, idOperacion) calls the legacy procedure SP_INTERFACE_TOMI_TEF_RECIBIDAS with only the date and filters on the folio in memory. Work per tick grows with (folios per batch) x (receipts per day).
+Recommendation: query by folio (pass the folio that the DAO method already receives, or add a by-folio procedure) and cache the small participant catalog per tick.
+Benefit: throughput stops degrading with daily volume.
+LEC-FR-20 - Resolve FAD and nostro accounts from T24 for every currency (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: FXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L1089-L1130), FXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L1204), PaPFXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaPFXI.cs#L1093-L1100), SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L302-L311)
+FXI.AsignarCuentaFadPorMoneda embeds eight FAD account numbers with Via codes and, for HKD/CAD/SGD/GBP/AUD, reuses Via = 810/"TRF ENVIADA USD BTMNY"; GetNostro forces correspondent BICs only for USD/EUR/GBP/JPY/CAD (a different currency set); PaPFXI.cs repeats the same eight accounts. Both copies fall through silently for any currency outside the list, so Cuenta, Nombre, CuentaMoneda, and Via stay unset and the Entrada/Salida row is inserted anyway; the later reconciliation then fails on the currency comparison. FXD.TOMI_ENTRADA_SALIDA obtains its MXN FAD account from _vwT24.ObtieneDatosCuentasFad(). The forex-related branch of SPID selects the MXN FAD account but labels the row "BTMM USD FAD"/"USD".
+Recommendation: resolve FAD and nostro accounts from T24 or configuration for every currency, fail on an unsupported currency, and add a test for it.
+Benefit: a changed FAD or nostro account in T24 cannot silently post ledger rows to a stale account.
+LEC-FR-21 - Replace the Mercado de Dinero forex message match with a typed result (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L490-L506)
+In VALIDAR_FLUJO, ValidaDatosForex(...) returns RazonRechazo/Encontrado; when the forex is not found and razonRechazo == $"El forex '{externalRef}' no existe." (an exact string; the local code only exempts that text, and its production by the external MUFG_T24 assembly cannot be checked here) the code sets procesado = true ("Puede ser un external ref que no es folio, lo dejo pasar"). A mistyped or non-existent forex reference therefore skips amount, currency, and account validation, and any wording or whitespace change in the text that the external library returns would silently flip the behavior.
+Recommendation: return a typed status (Found/NotFound/Mismatch) from ValidaDatosForex, document which external references are exempt, and add tests.
+Benefit: the exemption is an explicit business rule rather than a string coincidence.
+LEC-FR-22 - Keep MFX per-folio state out of instance fields and parse CMS content safely (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: MFX.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MFX.cs#L31), #L212-L214 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MFX.cs#L212-L214), #L262-L268 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MFX.cs#L262-L268), #L302-L323 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MFX.cs#L302-L323), #L831-L863 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MFX.cs#L831-L863), #L981-L996 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MFX.cs#L981-L996)
+MFX.estatusInicial is set in TOMI_A_CMS and compared in ESPERANDO_CONFIRMACION, which run on different ticks: with a long-lived instance another folio overwrites it, with a fresh instance it is empty, so the "CAPTURADA -> ELIMINAR" test is unreliable either way. CMS content is parsed inline (split on |, then on =, taking element [1]) for positions 0-11 (no folio context on IndexOutOfRange, unlike the shared parser), the matching loop keeps values from the last non-matching format when none matches, the TOMI_A_CMS result is assigned and ignored before the plan is cancelled, and TOMI_A_CMS inserts the CMS authorization before MarcarSolicitudForexProcesada with no existence check, so a failure between them re-inserts it on retry. ValoresIguales parses with NumberStyles.Any ("1,5" equals "15", "1E3" equals "1000") and the mismatch message labels CMS/TOMI/FOREX values with the wrong source.
+Recommendation: keep per-folio state in the process table or a local context, use the shared validating parser, check every DAO and TOMI_A_CMS result, and make waiting states return a distinct outcome.
+Benefit: forex authorizations are not duplicated, mixed between folios, or compared with lenient number parsing.
+LEC-FR-23 - Reject TMD operations whose special-rate authorization is cancelled or missing (Major)
+• Category / severity: rewrite_recommended - Major (confirm the business rule)
+• Evidence: TMD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/TMD.cs#L78-L103), #L196-L208 (../../General/Lectura/Aplicacion/Servicios/Operaciones/TMD.cs#L196-L208)
+TMD treats a time deposit as special only when Id_tasa_especial parses as long; it then loads the request and runs switch (lsEstatusTmd) { case "AUTORIZADO": log; case "CANCELADO": log; default: throw }, so a cancelled authorization is only logged and processing continues exactly as for an authorized one. When ObtenerSolicitudEspecialPorId returns null, the whole guard is skipped, so a reference to a non-existent request is accepted; a non-numeric id silently downgrades the deposit to a regular one; and the rate and spread come from the CMS content and are never compared with the authorized request. Every forex-aware class, by contrast, rejects the operation when the related forex is cancelled.
+Recommendation: reject on CANCELADO or a missing request, treat a malformed id as an error, and compare rate, amount, and currency with the authorization before inserting.
+Benefit: no deposit is booked at a special rate whose authorization was cancelled, never existed, or differs from the captured rate.
+LEC-FR-24 - Handle every SAT validation outcome (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: SAT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SAT.cs#L174-L318), UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L357-L359), #L418-L420 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L418-L420), #L514 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L514)
+UtileriasSAT.CMS_NEPE_A_TOMI returns Resultado = false, ResultadoValidacion = 1 when the validator answers with a failure code or the stamp is empty, but SAT.cs enters the branch that rejects the format (ActualizarFormatoRechazado, ActualizarTombinFormatoRechazado, CancelarPlanTrabajoInvalida) only when datosRegreso.Resultado is true; the only other way to set it is ContarTombinCmsSatPorFolio > 0, which resets the code to 0. The reject branch is unreachable, and a rejected declaration ends in throw new Exception("Error en procesamiento de registro CMS_A_TOMI ...") on every tick, re-running the validator and rewriting For{folio}.001 each time. CMS_DREF_A_TOMI returns the same Resultado = false for a DRE authorized after the cutoff, so it raises an exception every tick until the collection date. Both methods catch Exception and return false, so a missing format, an unknown TipoFormato, a validator rejection, an empty stamp, and a technical error all surface as one generic message. In addition, every CMS/TOMI update in SAT.cs (including ActualizarFormatoAceptadoConSello, which stores the stamp) discards its result.
+Recommendation: return a typed outcome (accepted, rejected by validator, not yet due, failed with reason), have SAT.cs handle each explicitly, check every update result, order completion after persistence, and throw only for technical failures.
+Benefit: an invalid SAT payment is rejected for the customer instead of looping, and operators can tell a business rejection from a technical failure.
+LEC-FR-25 - Surface unparsable amounts, accounts, and dates instead of falling back to zero or null (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: PaP_FXT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXT.cs#L831), UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L457), #L522 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L522), #L549 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L549), PaP_FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXD.cs), TAX.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/TAX.cs), TMD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/TMD.cs#L196-L197)
+Several classes turn a failed parse into 0, null, or the current clock: PaP_FXT writes a 0m master amount when decimal.TryParse fails; PaP_FXD.TOMI_ENTRADA_SALIDA uses ParseDoubleOrZero/ParseIntOrZero, so an unparsable customer or account is posted as 0; TAX.TOMI_ENTRADA_SALIDA falls back to DateTime.Now for capture and value dates; SER and SPID use ...OrDefault/TryParse ? x : 0 for the captured and sent amounts, so a zero-amount operation passes the amount-consistency check; TMD.CMS_A_TOMI stores an unparsable maturity date, amount, or rate as 0; FXT.CMS_A_TOMI converts the folio with ConvertirIntDirecto while the rest of the solution uses long, so a folio above Int32.MaxValue would loop on the generic CMS_A_TOMI error. In SAT, NF_FECHA_EJECUCION becomes 0 and NF_FOLIO becomes 0 for unparsable text, and the DRE payment key rounds MontoOperacion half-to-even through Convert.ToInt64. TEF.cs, in contrast, uses the strict Convertir*Requerido converters.
+Recommendation: fail with a named, folio-bearing error on an unparsable amount, account, folio, or date, and parse with an explicit invariant culture; use long for every folio.
+Benefit: malformed content is rejected at the boundary instead of being persisted as zero-valued records.
+LEC-FR-26 - Replace hard-coded reference data and a hard-coded capturist value with configuration (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: ENT_COAS.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_COAS.cs#L58), #L1200 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_COAS.cs#L1200), ENT_TEF.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs#L275), #L975 (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs#L975), SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L336), ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L20)
+ENT_COAS hard-codes three own-bank CLABEs and a 10-entry SWIFT BIC to T24 nostro map plus a second, different substring map (4500261 only in one, MTBCUS33/5005256 only in the other); ENTSPEI copies both and adds its own constants; ENT_TEF/ENTSPID hard-code the CLABE prefix "1081800000"; CASFIM_MUFG = "40108" is a constant in both signing classes and a model property. The capturist value "JEAI" (a hard-coded user identity) is written by 16 classes (as Capturista = "JEAI" in 10 of them and as an array slot, a positional or named argument, or EntCaptura in the other six), with Hora = DateTime.Now.ToLongTimeString() (culture-dependent) in 16 classes, and the surrounding literals drift between classes: Via is 810 (x7), 800 (x4), 850 (x3), 820, and 830; Operacion is 218 (x5) or 198 (x3); ViaDesc has eight distinct strings (for example TRF ENVIADA USD BTMNY x15); TipoDesc is Doméstica, Doméstica TEF, Internacional, or a mojibake variant. RFC validation exists in four variants, and the ENTSPID copy writes its character classes as [A-Z,Ñ,&], so a literal comma is accepted and CURP is not recognized.
+Recommendation: move reference data to configuration or lookup tables, use a service identity and an invariant time format, and keep one RFC/CURP validator and one Entrada/Salida literal table.
+Benefit: a changed account, BIC, or participant code is an operational change, and ledger rows carry consistent codes.
+LEC-FR-27 - Tidy the signing helpers and the entrada services (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L157), ComunSPID.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunSPID.cs#L395), MetodosFirma.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L120-L142), ENT_TEF.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs), ENTSPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs)
+• Signing helpers: ObtieneTrama, ObtieneCampoFirma, and ValidaSPEIEntrada/ValidaSPIDEntrada rethrow new Exception("..." + ex) (stringified, no inner exception) and wrap the default: throw a second time; ComunFXD : RepositorioMaestro runs stored procedures inside the Application project; the ~60-line reference/value assembly is copy-pasted three times; LogueoDatosTrama and LogueoDatosTramaSPID are near-identical; ConfirmaFirma falls back (with a WARN log line) to the PFX's own public key when the counterparty serial is blank or no matching certificate is found, so a missing or mistyped serial rejects every incoming signature that was not made with that key, and nothing validates the serial at startup.
+• Entrada services: ENT_TEF sets rfcCurpValido = true inside the "RFC invalid" branch (documented as legacy behavior) while ENT_COAS rejects the same case, and the two differ on the execution-date rule; CNT checks a value for null right after throwing when it is null and has an unreachable else { throw }; ENTSPID labels USD credits "TRF RECIBIDA MXN SPEUA" and injects the concrete ComunSPID; ENTSPEI converts op_monto with Convert.ToDecimal (null becomes 0m), unwraps .Value unguarded, and turns every null numeric into 0 in SPEI_A_TOMI.
+Recommendation: one signing service behind IComunFXD/IComunSPID with a shared input builder and configuration-supplied participant code, throw; or typed exceptions with the inner exception, startup validation of the counterparty certificate, and a documented RFC/date policy shared by the entrada classes.
+Benefit: fewer divergent copies of security-relevant code and clearer failures.
+LEC-FR-28 - Fix the smaller correctness defects in the FXD, FXI, FXT, and Mercado de Dinero flows (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXD.cs#L188), FXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L969), MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L149-L189), MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L536), MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L608)
+FXD.TOMI_ENTRADA_SALIDA dereferences FirstOrDefault().Cuenta with no null check; FXI.TOMI_ENTRADA_SALIDA builds a DTO per row of ObtenerFormatosFxi but inserts only the last; FXI formats the confirmation time with the current culture before an invariant ParseExact and passes SettledAmount through Convert.ToDouble(string) then Convert.ToDecimal(double); FXD_Local.CalculaComision divides without a zero guard, declares about 12 unused locals, and uses default banker's rounding; the numeric-forex-reference rule (decimal.TryParse, marked "//Bug legacy¿?") is copied into FXD, FXI, and FXT; FXT tolerates a null CMS row until CompararMontos and copies a log line labelled FXD.procesaOperacion. In Mercado de Dinero the execution-date gate throws for any date other than today (including future dates), the intended wait-for-entrada branch is unreachable because razonRechazo is set before the next if (razonRechazo != "") throw, the SWF_OUT path rewrites the MT-300 payload with the literal datoCalypso.Replace("N2020}{3:{108", "N}{3:{108") and inserts the outbound message with no existence check, and GeneraFolioUnico and GeneraFolioPresupuesto run on every invocation before the phase gate.
+Recommendation: guard nulls and zero divisors, use invariant formats, remove dead locals, confirm the rounding rule and the N2020 rewrite with the business owner, make the outbound insert idempotent, and define the future-date and wait-for-leg behavior explicitly.
+Benefit: fewer latent exceptions and no duplicate outbound SWIFT message after a partial failure.
+LEC-FR-29 - Remove unreachable forex logic and align the payroll, PaP, and SPID variants (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: NOMFXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/NOMFXD.cs#L65-L140), PaP_FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXD.cs#L78-L135), PaP_FXT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXT.cs#L64-L125), PaPFXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaPFXI.cs#L1169), PaP_TEF.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_TEF.cs#L880-L904), SPID_H2H.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID_H2H.cs#L176-L182)
+NOMFXD, PaP_FXD, PaP_FXT, PaP_SPID, PaP_TEF, and PaPFXI assign empty forex references and never read one from the content, so their forex, forex-cancelled, and "rechazada por forex cancelado" branches cannot execute, and the numeric-forex-reference rule now has seven implementations. PaPFXI.CargarValoresFormatoMaestro writes NF_TIPO = "FXD" for the master (the detail writes "FXI"), hard-codes NfMontoEnviar = 0, and parses optional beneficiary address fields by fixed index after testing for |10053=, so a missing optional key shifts every later field. PaP_TEF writes both NfFechaEjecucion and NfFechaCargo from content position 42 (the cargo date) while the plan and the date gate use position 13, and injects IComunFXD it never uses. SPID_H2H, SPIDGPH, and SPIDLocal sign after marking the plan with an invalid-account error (results discarded), so a signing failure can replace the account error; SPIDLocal.ValidarCuentaSpid reports any exception from EsCuentaSpidValida as "No existe la cuenta en el sistema T24" while SPIDGPH rethrows; SPID_H2H dereferences resltado.EsClienteValido before its own null check.
+Recommendation: delete or implement the forex branches, use one validated content parser and one forex-reference validator, confirm the PaP master NF_TIPO and authoritative date, validate before signing, and distinguish "invalid" from "could not validate".
+Benefit: less dead code to maintain and consistent behavior across the family variants.
+LEC-FR-30 - Collapse the copy-pasted single-phase classes and move repeated lookups into their phase (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: FXT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXT.cs#L131-L139), NOMFXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/NOMFXD.cs#L151-L168), PaP_FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXD.cs#L155-L171), PaP_SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_SPID.cs#L884), FXI_H2H.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI_H2H.cs)
+Nine classes (FXI_H2H, FXIGPH, FXILocal, FXTGPH, FXTH2H, FXTLocal, TEF_H2H, TEFGPH, TEFLocal, 128-176 lines each) implement only DATOS_GRAL with the same skeleton and keep per-folio state in an instance field and in the shared mutable ConfiguracionModelo.AliasProceso. The past-date rule and the ID generators run before the phase dispatch on every tick: GeneraFolioUnico at 32 call sites (22 before the phase gate) and the T24-backed GeneraFolioPresupuesto at 12 (FXD.cs:171, MercadoDinero.cs:184, NOMFXD.cs:165, PaP_FXD.cs:168, PaP_SPID.cs:237, SPID.cs:142, and the GPH/H2H/Local variants), and because the date rule precedes the gate a folio whose late phase retries after midnight is marked MarcarErrorFechaPasada even if it was already posted. The previous-business-day search (a 366-iteration loop of awaited calendar calls) is copied five times, and in PaP_SPID and the Insight address lookups its result is never consumed: SpidVistasT24Dao.ObtenerDireccionRawPorCdl and SpidH2hVistasT24Dao.ObtenerCustomerEdoCta ignore their bsDate argument.
+Recommendation: one parameterized DATOS_GRAL handler with a small per-family strategy, a per-folio context object, each lookup or generator inside the phase that needs it, the past-date rule only before irreversible phases, and one calendar service (GetPreviousBusinessDay).
+Benefit: less duplicated code, lower per-tick cost, and no spurious past-date errors after midnight.
+LEC-FR-31 - Fix mojibake, placeholder, and misleading XML documentation (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L324), SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L422), TMD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/TMD.cs#L279), IFXI_GPHDao.cs (../../General/Lectura/Aplicacion/Interfaces/FXI_GPH/IFXI_GPHDao.cs#L11-L30), ConstantesServicio.cs (../../General/Lectura/Aplicacion/Enums/ConstantesServicio.cs)
+A scan of the 298 authored C# files found 267 lines with UTF-8-as-Latin-1 sequences in 52 files (a Ã followed by a U+0080-U+00BF character; 248 in XML comments, 19 in code, log, or exception text) and 15 CP437 double-encoded lines in `SPID.cs`. Three are persisted business data: TipoDesc = "Dom├⌐stica" (SPID.cs:324, in the Entrada/Salida row) and the CMS status message "Formato recibido pendiente ejecuci├│n" (SPID.cs:422), and TMD.cs persists "Formato recibido pendiente ejecuciÃ³n"; sibling classes write the correct spelling, so a filter on the correct text misses these rows. 381 generated placeholder comments /// Ejecuta la operación ... exist in 70 files (240 with mojibake, some inside method bodies and one attached to a throw), plus 36 /// Representa ... placeholders in ConstantesServicio.cs. Of the 277 interface members documented as Ejecuta el procedimiento <name> (53 interface files), a comparison of the documented procedure's family prefix with the interface's own family flags 88 members in 35 files (abbreviations such as MD for Mercado de Dinero inflate the count slightly); for example IFXI_GPHDao documents usp_LecturaTEFLocal_*, usp_LecturaTMD_*, and usp_LecturaFXTH2H_* procedures and INOMFXDTomiDao documents usp_LecturaTMD_* and usp_LecturaTAX_* procedures, so a maintainer following the comment lands on the wrong procedure.
+Recommendation: repair the corrupted text (re-save the files as UTF-8 and replace the characters that are already damaged), starting with the three persisted literals, delete the placeholder comments or generate the docs from the real procedure constants, and add an encoding check to CI.
+Benefit: persisted text is correct, and documentation stops pointing at the wrong database objects.
+LEC-FR-32 - Normalize interface contracts, namespaces, and DTO families (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: IMFXCmsDao.cs (../../General/Lectura/Aplicacion/Interfaces/MFX/IMFXCmsDao.cs), IENTCOASTomiDao.cs (../../General/Lectura/Aplicacion/Interfaces/ENT_COAS/IENTCOASTomiDao.cs), PaP_FXTDto.cs (../../General/Lectura/Aplicacion/DTOs/PaP_FXT/PaP_FXTDto.cs), RespuestaResumenDto.cs (../../General/Lectura/Aplicacion/DTOs/RespuestaResumenDto.cs), OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L163), ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L66)
+Namespaces and folders disagree in many files (five interface files declare Infraestructura.Repositorio.* inside the Application project; PaPTEFCmsDao/PaPTEFDao sit in the PaP_FXD namespace; FXI_GPHDao/FXI_H2HDao sit in Aplicacion.Interfaces.*; several interfaces and DAOs have no namespace), contracts are weakly or inconsistently typed (object folioCms on IMFXCmsDao; fechaValor as int, string, or decimal; numCliente as string, int, int?, or long; one synchronous method among Task siblings), DTO families are copy-pasted and have drifted (ConteoRegistrosDto/ConteoDto/ResultadoSalidaDto per family; a 40-property CMS Formato row re-declared in about nine files with AutorizacionTomitas typed string in some and long? in others), and the six Respuesta*/Solicitud* DTOs in Aplicacion/DTOs duplicate the MUFG_T24.Modelos types that OperacionServicio returns and the host imports (ServiceHost.cs has no using Aplicacion.DTOs), so they are referenced only by each other.
+Recommendation: one namespace per folder, one typed contract per concept (long customer id, DateTime or int yyyymmdd dates), one generic count/result type and one base CMS format DTO with nullable LEFT-JOIN columns, and delete or adopt the unreferenced Respuesta*/Solicitud* DTOs.
+Benefit: a smaller, discoverable contract surface that does not drift between families.
+LEC-FR-33 - Slim the OperacionServicio orchestrator and fix its small hygiene defects (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L51-L116), #L206-L211 (../../General/Lectura/Aplicacion/OperacionServicio.cs#L206-L211), #L338-L463 (../../General/Lectura/Aplicacion/OperacionServicio.cs#L338-L463), #L448 (../../General/Lectura/Aplicacion/OperacionServicio.cs#L448)
+The orchestrator takes 42 constructor parameters (the concrete operation classes plus services) and dispatches on TipoOperacion with a string switch plus ten MD_* literals (including the typo MD_UNKNOW); method names are inconsistent (ProcesaOperacion, procesaOperacion, ProcesOperacion). TimeSpan.Parse(paramSistema.Value) runs on unvalidated database values, (value == "1") ? true : false ignores the trimmed value, a local alertaSistema is unused, two Process.GetCurrentProcess() results are never disposed, there are two PID sources, and ConfiguracionModelo carries never-referenced properties (BHorarioLectura, BenHorario, StrFechaSistemaJuliana, StrFechaSistema_T24_Juliana).
+Recommendation: introduce an IOperacionProcessor with a keyed registry so adding an operation does not edit the orchestrator, use TimeSpan.TryParse with named validation, and delete dead locals and properties.
+Benefit: adding or changing an operation touches one class and invalid parameters fail with a clear message.
+Nice to Rewrite if Time Permits
+LEC-FR-34 - Delete the dead legacy ProcedimientoAlmacenado constants (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: Enum.cs (../../General/Lectura/Aplicacion/Enums/Enum.cs#L72-L603), UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs)
+The static class ProcedimientoAlmacenado declares 374 mutable public static string members (holding 372 distinct values; 365 procedure names and nine hard-coded bank/office codes such as Union_Bank, New_York, and BTMU_*); only UtileriasSAT uses it (30 call sites for 12 distinct members), and every other DAO uses ConstantesServicio. It also carries copy-paste defects: SP_UPD_FORMATO_RECC_TOMI_FXI (line 255) holds the CMS procedure name, SP_UPD_TOMBIN_FORMATOACEPTADO_REPE_TOMI_SAT (line 149) holds the pending-debit procedure name, and SP_GET_FORMATO_PaP_FXT (line 386) and SP_GET_FORMATO_PAP_FXT (line 492) differ only by case and point to different procedures.
+Recommendation: delete the 362 unused members, make the remaining ones const, and move counterparty codes to configuration or data.
+Benefit: the procedure catalog has one authoritative source and mutable global state disappears.
+4.2 InfraestructuraLectura (Tier 2)
+MustChange / Rewrite
+LEC-FR-35 - Call the T24 account-status service over TLS and stop sending credentials in clear text (Major)
+• Category / severity: MustChange/rewrite - Major (security; OWASP A02/A07)
+• Evidence: T24CuentaWebService.cs (../../General/Lectura/Infraestructura/SOAP/T24CuentaWebService.cs#L33-L44), configuration91.svcinfo (../../General/Lectura/Infraestructura/Connected%20Services/wsInfoCuentaT24/configuration91.svcinfo#L115), orphan copy (../../General/Lectura/Service%20References/wsInfoCuentaT24/configuration91.svcinfo)
+Code block (csharp)
+var wsInfoCuentaT24Ref = new wsInfoCuentaT24.T24WebServicesImplClient(
+    new BasicHttpBinding(),
+    new EndpointAddress(endpointWebService));
+...
+company = _configuracion.StrWSCompany,
+password = _configuracion.StrWSRegisterPassword,
+userName = _configuracion.StrWSRegisterUserName
+new BasicHttpBinding() defaults to SecurityMode.None, and the SOAP body carries the company, user name, and password in clear text. The endpoint is read from the database parameter WST24_MW_ENDPOINT, but because the binding is fixed to no transport security an https address cannot work without a code change (WCF rejects an https address on a None-security basic binding). The design-time metadata points at http://10.97.38.163:8085/WS.ACCT.STATUS/services and records basicHttpBinding with security/mode = None; the three app.config files are empty, so nothing configures transport security externally. The orphan VB proxy under Service References records the same cleartext design but points at a second host, 10.97.38.242:8085; the repository does not say which host is production. The account status returned by this call decides whether incoming SPID payments are accepted or returned (LEC-FR-9).
+Recommendation: use BasicHttpSecurityMode.Transport (or TransportWithMessageCredential) with TLS, keep the credentials in a secret store, make the binding configurable, and confirm the production host.
+Benefit: service credentials and account identifiers no longer cross the network unencrypted, and the account-status control does not depend on an unauthenticated transport.
+LEC-FR-36 - Never skip the SAT validator because a database check failed, and log the bypass flag (Major)
+• Category / severity: MustChange/rewrite - Major (confirm the intent of the bypass flag)
+• Evidence: UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L340-L349), #L695-L724 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L695-L724), #L799-L812 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L799-L812)
+Code block (csharp)
+bool appletDisponible = await TieneSalidaApplet();
+string resultadoValidador = "00000010";
+string archivoValidador = appletDisponible ? await Archivo_Validacion(folio, tipoFormato) : string.Empty;
+bool ignorarValidador = string.Equals(_configuracion?.StrValidadorSAT_IgnoraValidador, "1", StringComparison.Ordinal);
+if (ignorarValidador)
+    resultadoValidador = "0000000";
+else if (!string.IsNullOrWhiteSpace(archivoValidador))
+    resultadoValidador = Validador(archivoValidador);
+else if (!appletDisponible)
+    resultadoValidador = "0000000";
+TieneSalidaApplet returns false on any exception (bare catch, :809) or when the applet output result set is empty, and the last branch then substitutes the passing result "0000000". A database error while checking the applet tables therefore silently skips the SAT validator and lets the declaration continue to stamping and insertion. StrValidadorSAT_IgnoraValidador = "1" also skips it, by configuration, with no log line. By contrast, a missing validator host or port, a failed Archivo_Validacion, and a response shorter than seven characters fail closed. GenerarSelloDigital returns string.Empty for every failure (missing or unreadable PFX, wrong password, no private key, any exception; bare catch at :721 with no log), and the caller turns an empty stamp into the same "validation failed" outcome, so a certificate or configuration problem leaves no trace of its cause.
+Recommendation: treat an unavailable applet or validator input as an error rather than a pass, log and alert while the bypass flag is active (and restrict it to non-production), and log or return a specific reason for stamp failures.
+Benefit: a transient database error cannot let a declaration bypass validation, and an expired certificate no longer looks like a stream of invalid declarations.
+Rewrite Recommended
+LEC-FR-37 - Validate affected rows by default and keep one output-parameter convention (Major)
+• Category / severity: rewrite_recommended - Major (confirm library semantics)
+• Evidence: ENTCOASTomiDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_COAS/ENTCOASTomiDao.cs#L63-L399), OutputParameterHelper.cs (../../General/Lectura/Infraestructura/Repositorio/OutputParameterHelper.cs#L7-L27), ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L121-L130), PaPFXDDao.cs (../../General/Lectura/Infraestructura/Repositorio/PaP/PaPFXDDao.cs)
+193 of the 253 EjecutarStoredProcedureQuery<ResultadoVacioDto> calls in Infraestructura (252 in Repositorio plus the single call in GeneralDao) pass validarAfectacion: false; all 193 are in Repositorio (largest: ENTCOASTomiDao 14, MFXTomiDao 13, PaPFXITomiDao 8, NOMFXDTomiDao 7, EntSpeiDao 7, MercadoDineroTomiDao 7, PaP_SPIDTomiDao 6, PaPFXDDao 6); no call passes true explicitly. The family copies of the write procedures end with SELECT @FilasAfectadas AS FilasAfectadas, CAST(CASE WHEN @FilasAfectadas > 0 THEN 1 ELSE 0 END AS bit) AS Afecto, so a zero-row update is detectable, yet with validation off r.Exito stays true. The check is switched off because the hardened per-procedure copies do not return Afecto (LEC-FR-47), and a caller that must work against either version passes false. The SAT procedures return no row count at all, and SAT.cs discards the results anyway (LEC-FR-5). Together with the discarded results in the Application layer, a WHERE that matches nothing is invisible. Output-parameter handling has five conventions: OutputParameterHelper.EsSalidaCero (6 uses; descriptive error on null/DBNull), ObtenerSalidaLegacy (11 private copies; returns -1), raw Convert.ToInt32(salida.Value) (four uses) and Convert.ToInt32(salidaParam?.Value ?? -1) (three uses; InvalidCastException on DBNull because ?? -1 covers only null), int.Parse(salidaParam.Value.ToString()) / Convert.ToInt16 in the FXT, FXI, and MFX DAOs, and PaPFXDDao.EsSalidaExitosa; @Salida is declared Int16 in some DAOs and Int32 in others.
+Recommendation: validate affected rows by default (opt out only with a documented reason), return Afecto from every write procedure, keep one output-parameter helper, and migrate the private copies to it.
+Benefit: failed status transitions, cancellations, and returns surface as failures, and the behavior on a missing output value is the same in every DAO.
+LEC-FR-38 - Dispose the SAT validator socket and bound the exchange (Major)
+• Category / severity: rewrite_recommended - Major (confirm the validator protocol)
+• Evidence: UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L963-L1015), #L63 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L63), #L362-L373 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L362-L373)
+Code block (csharp)
+loTCP_Client= new TcpClient();
+loTCP_Client.Connect(gsValidadorSAT_servidor, gsValidadorSAT_puerto);
+loNetworkStream= loTCP_Client.GetStream();
+...
+do { liNumberOfBytesRead = loNetworkStream.Read(laReadBytes,0,laReadBytes.Length); ... }
+while (loNetworkStream.DataAvailable);
+Validador never closes or disposes the client or the stream, so each validated folio leaves a socket until finalization. Connect has no timeout (it blocks for the operating-system default) and the method is synchronous inside an async chain, so it blocks the service thread; only ReadTimeout is set (30 s). The reply is assembled with do { Read } while (DataAvailable), which can stop on a partial frame. The request file is written with Encoding.Default (:63) but the reply is decoded as Encoding.ASCII, and the exchange is plain TCP to the host and port from the configuration. The validation file (For{folio}.001, with taxpayer data) is deleted only on the success path, with a bare catch around the deletion, so a rejected declaration leaves it in the shared folder.
+Recommendation: wrap the client and stream in using, connect with a bounded timeout, read until the protocol's end marker or length, and delete the validation file in a finally block.
+Benefit: no handle accumulation under volume, no hangs on an unreachable validator, and no taxpayer data left on a shared path.
+LEC-FR-39 - Split UtileriasSAT into services and key the applet output by folio (Major)
+• Category / severity: rewrite_recommended - Major
+• Evidence: UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L30), #L43 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L43), #L1018-L1048 (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L1018-L1048), SAT.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/SAT.sql#L38-L176), #L179-L190 (../../General/Lectura/Lectura/Srcripts/Operaciones/SAT.sql#L179-L190), #L338 (../../General/Lectura/Lectura/Srcripts/Operaciones/SAT.sql#L338)
+UtileriasSAT : RepositorioMaestro (1,097 lines) combines stored-procedure access, file I/O, TCP, X.509 signing, CRC/check-digit algorithms, the 13:30 cutoff, and business-day calendar logic. SATLegacyProcessor creates it with new, and it creates new SATCmsDao(), so neither can be substituted in a test; the Application layer reaches it through ISATTomiDao.ProcesarCmsATomi, a DAO interface that performs a business operation. Archivo_Validacion and Archivo_Envio repeat about 120 lines of branching and differ in a final else branch that is dead because GetTipoFormatoNepe returns only EJE/PRV/CRF/DPA. Two CRC-32 plus check-digit implementations coexist; one fills a shared static uint[] table with llena_tabla() on every call, which is a race if two SAT folios are ever processed concurrently.
+More important, the Archivo_* readers call the usp_GET_SALIDAAPPLET_*_UTILERIAS_SAT procedures with no folio argument. Those procedures read the global TB_CMS_SALIDAAPPLET and filter only by renglon, grupo, and clave (never by NF_FOLIO); usp_LecturaSAT_ActualizarSelloSalidaApplet overwrites the stamp of every row with renglon = 'A14'; and no C# code or script in this repository inserts into the table (the wrapper usp_LecturaSAT_InsertCmsApplet has no caller and delegates to usp_TOMBIN_INSERT_CMS_APPLET, which is not defined here). The validation file and the sent file are therefore correct only if that table holds exactly one folio at a time.
+Recommendation: move validation and stamping into Application services behind interfaces (ISatValidator, ISatStampService, a calendar service), keep one CRC/check-digit implementation, delete the dead branch, and key the applet output by folio (or pass the folio to the procedures).
+Benefit: SAT logic becomes testable, concurrent folios cannot corrupt each other's payload, and the applet table has an explicit owner and lifecycle.
+LEC-FR-40 - Confirm and isolate the SAT stamp algorithm and encoding (Minor)
+• Category / severity: rewrite_recommended - Minor (confirm the SAT specification)
+• Evidence: UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L716-L717)
+Code block (csharp)
+byte[] data = Encoding.Default.GetBytes(cadenaOriginal);
+byte[] signature = rsa.SignData(data, HashAlgorithmName.MD5, RSASignaturePadding.Pkcs1);
+Encoding.Default is the host ANSI code page, so the same string signs differently on a host whose regional code page differs (taxpayer names often contain Ñ and accents), and MD5 is cryptographically weak. Llave_Pago hashes UTF-16 code units (int valor_decimal = cadena[i], only the low byte used through & 255), which equals the ANSI byte only for characters below 256. MD5 may be mandatory for this legacy SAT interface.
+Recommendation: confirm the algorithm and encoding required by the SAT specification, state the encoding explicitly, and isolate the algorithm behind one documented helper.
+Benefit: a host migration or a locale change cannot invalidate stamps.
+LEC-FR-41 - Make the DAO layer consistent (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: EntSpeiDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_SPEI/EntSpeiDao.cs#L426), ENTSPIDSpidDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_SPID/ENTSPIDSpidDao.cs#L195-L217), PaP_SPIDTomiDao.cs (../../General/Lectura/Infraestructura/Repositorio/PaP_SPID/PaP_SPIDTomiDao.cs#L382), FXT_GPHDao.cs (../../General/Lectura/Infraestructura/Repositorio/FXT_GPH/FXT_GPHDao.cs), TAXTomiDao.cs (../../General/Lectura/Infraestructura/Repositorio/TAX/TAXTomiDao.cs)
+• Row selection: the same by-folio "basic data" query (ObtenerDatosBasicosPorFolio, declared in 11 DAOs) returns LastOrDefault() in five (FXT_GPH, FXT_Local, SPIDGph, TEFGph, TEFLocal) but FirstOrDefault() in six (FXD_Local, FXI_GPH, FXI_H2H, FXI_Local, FXTH2H, SPID_Local), and other by-folio lookups also take the last row (ComunSPID, SERTomi, SpidH2hTomi, TAXTomi, TEFTomi, TefH2hTomi, PaPTEFDao), so the result differs when a procedure returns more than one row.
+• Sentinels and silent fallbacks: EntSpeiDao.ObtenerCuentaVostro returns the literal "0" when no row exists or the procedure fails; ENTSPIDSpidDao maps columns by name with a silent ordinal fallback, so a renamed column reads whichever column sits at the old position; TMDTomiDao.ObtenerSolicitudEspecialPorId returns null for a missing request.
+• No cancellation: mapped queries pass CancellationToken.None and no DAO accepts a token, so a service stop cannot interrupt an in-flight database call.
+• Typing and naming drift: PaPSpidTomiDao.AgregarParametrosFormato(dynamic cmd, ...) is late-bound; PaPTEFDao has two pass-through wrappers; the PaP TEF, FXT, and FXI insert DAOs hard-code @NF_ESTATUS = "PEND" and @NF_MONTO_ENVIAR = 0 and ignore the DTO values; TAXTomiDao takes the value date as decimal and the customer as int?; file names differ from class names (SPID_H2HDao.cs holds SpidH2hTomiDao); FxiCmsDao.ObtenerRfcOrdenante duplicates FxiT24Dao.ObtenerRfcOrdenante; SpidVistasT24Dao and SpidH2hVistasT24Dao ignore their bsDate argument.
+Recommendation: pick one row-selection rule and one not-found policy, add CancellationToken parameters, map columns by name only, honor the DTO values in the insert DAOs, and delete the duplicate lookups and pass-through wrappers.
+Benefit: equivalent DAO calls behave the same, and a schema or data change fails loudly instead of reading the wrong value.
+LEC-FR-42 - Harden T24CuentaWebService and delete the stale proxy artifacts (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: T24CuentaWebService.cs (../../General/Lectura/Infraestructura/SOAP/T24CuentaWebService.cs#L33-L36), #L91 (../../General/Lectura/Infraestructura/SOAP/T24CuentaWebService.cs#L91), #L102 (../../General/Lectura/Infraestructura/SOAP/T24CuentaWebService.cs#L102), Reference.vb (../../General/Lectura/Service%20References/wsInfoCuentaT24/Reference.vb)
+The response is read through the magic index detalles[1] (after a Length <= 1 guard; the first element is evidently the HDR row) with no explanation. A new client and channel factory is created and closed on every call, and the client constructor sits outside the try. No timeout, cancellation token, or retry is configured (WCF defaults apply). The "no records" case is a generic Exception with an English message, indistinguishable by type from an outage. Connected Services carries three stale .datasource files that point at an assembly that does not exist, and the same WSDL is checked in again as a legacy VB proxy under General/Lectura/Service References/wsInfoCuentaT24 (nine files, including the only .vb file in the repository), which no project references and which has not changed since the initial commit.
+Recommendation: return a typed result (Found, NotFound, Error), reuse one client factory, set explicit timeouts and honor cancellation, name the response index, and delete the stale designer artifacts and the duplicate legacy proxy.
+Benefit: an outage is distinguishable from a missing account, and the repository holds one proxy.
+4.3 PruebasUnitariasLectura (Tier 2)
+Rewrite Recommended
+LEC-FR-43 - Cover the money-moving code with automated tests (Major)
+• Category / severity: rewrite_recommended - Major (GEN-2)
+• Evidence: OperacionServicioTests.cs (../../General/Lectura/PruebasUnitarias/OperacionServicioTests.cs#L94-L136), #L160-L202 (../../General/Lectura/PruebasUnitarias/OperacionServicioTests.cs#L160-L202), SpecialInternationalDtoTests.cs (../../General/Lectura/PruebasUnitarias/SpecialInternationalDtoTests.cs#L10-L21), SpecialInternationalDto.cs (../../General/Lectura/Aplicacion/Modelos/SpecialInternationalDto.cs#L88-L89)
+PruebasUnitarias contains 7 tests (four argument checks, the global-failure path, the unknown-operation path, and one DTO mapper) against 299 C# files and about 49,000 lines. None of the 37 operation classes, 67 DAOs, signing services, SAT stamping, content parsers, or reconciliation logic has a test. The system under test is built with 37 operation classes passed as null into a 42-parameter constructor, so every new operation changes every test and no operation can run. EjecutaProcedimientosAsync_TipoOperacionDesconocida_RegistraFalloYNoLanza asserts Procesadas == 1 and one ActualizarFallo call but not Error or CalcularResultado(), so it passes while the uncounted per-folio exception of LEC-FR-7 is present. MapFromValoresFormato_MantieneContratoLegacy_CuentasCompartenMismoOrigen freezes that BeneficiaryAccount and CorrespondingBankAccount both read valoresFormato[25] (commented as a legacy FXE contract) and builds money as double (LEC-FR-10). Compilation needs MUFG_T24.dll (StoredProcedureResult, IControlServicio, IAlertas) from the absolute HintPath (LEC-FR-1), and no pipeline, coverage gate, or analyzer rule set is tracked.
+Recommendation: extract the pure logic (content parsers, amount and date converters, reconciliation comparers, signing-frame builders) behind small interfaces and write characterization tests first for SPID, FXD, TEF, TAX, TMD, and SAT; add the missing Error assertion; run the suite in a pipeline against a pinned package feed.
+Benefit: a change to amount parsing, reconciliation, signing, or a status transition is protected by an automated check.
+4.4 Lectura Windows Service Host (Tier 3)
+Rewrite Recommended
+LEC-FR-44 - Check service-state and port-state results and log the real shutdown outcome (Major)
+• Category / severity: rewrite_recommended - Major (GEN-9)
+• Evidence: ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L279), #L330-L336 (../../General/Lectura/Lectura/ServiceHost.cs#L330-L336), OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L185), #L552-L554 (../../General/Lectura/Aplicacion/OperacionServicio.cs#L552-L554)
+Code block (csharp)
+await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracion.NombreServicio, cleanupCt).ConfigureAwait(false);
+await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, cleanupCt).ConfigureAwait(false);
+...
+Logging.Write("INFO|OnStop|Terminación exitosa de bases de datos.");
+ParametrizacionesAsync awaits MarcarPuertoEnUsoAsync(pid, ...) without checking its Boolean result and without passing the cancellation token. The shutdown path ignores the results of both MarcarPuertoEnUsoAsync(null, ...) and ActualizaTerminacion and then logs success unconditionally; catch (OperationCanceledException) { } returns without running the cleanup, so a stop that exceeds the wait leaves the port marked in use. In OperacionServicio, ActualizaEJecucion (:185) and ActualizaTerminacion (:554, inside finally) also discard their results, and an exception thrown from that finally replaces the summary (including FallaCritica) that the catch just built. The port is marked in use before ObtenerPuertos and int.Parse(PuertoTCP) can fail, and nothing resets the marker on that path.
+Recommendation: make the shared API throw (or return a result type) on failure, check it at each call, always run cleanup in a bounded finally, and log the real outcome.
+Benefit: persisted run and port state matches reality, so monitoring and overlap control act on correct data.
+LEC-FR-45 - Claim folios before processing, keep lifecycle state per package, and confirm the TCP channel's access control (Major)
+• Category / severity: rewrite_recommended - Major (confirm configuration with the platform team)
+• Evidence: ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L282), #L92-L93 (../../General/Lectura/Lectura/ServiceHost.cs#L92-L93), #L304-L311 (../../General/Lectura/Lectura/ServiceHost.cs#L304-L311), app.config (../../General/Lectura/Lectura/App.config)
+ConfigurarTcpListener(int.Parse(PuertoTCP), LimiteConcurrencia ?? 5) allows up to five (by default) packages to run at once, each in its own scope, while OperacionServicio registers lifecycle state by service name (ActualizaEJecucion(StrNombreServicio) and ActualizaTerminacion(StrNombreServicio)), so the first package to finish marks the service terminated while another is still running. No per-folio claim exists in this repository before work starts (the guard is IniciaProceso, implemented in the external MUFG_T24.dll), so two packages that name the same folio could both process it; UtileriasSAT (LEC-FR-39) and the shared Alertas singleton are also used by concurrent packages. The repository does not show who may connect to the listener: the three app.config files are empty, the listener and its protocol live in WindowsTcpPaqueteServiceHostBase, and the request carries only Tipo and a folio list that drive money-moving operations.
+Recommendation: confirm LimiteConcurrencia (use 1 unless folio-level claiming exists), claim each folio atomically (UPDATE ... OUTPUT on the plan row) before processing, track lifecycle state per package, and confirm the bind address, ACL, and message authentication of the TCP channel.
+Benefit: no duplicate processing or false "idle" state at concurrency above one, and the command channel is not open to any host that can reach the port.
+Nice to Rewrite if Time Permits
+LEC-FR-46 - Simplify host wiring and packaging (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L92-L259), #L261 (../../General/Lectura/Lectura/ServiceHost.cs#L261), ServiceHost.Designer.cs (../../General/Lectura/Lectura/ServiceHost.Designer.cs), AssemblyInfo.cs (../../General/Lectura/Lectura/Properties/AssemblyInfo.cs), Program.cs (../../General/Lectura/Lectura/Program.cs)
+The host has 116 manual Register<...> calls that must stay in step with the OperacionServicio constructor and its switch (LEC-FR-33), so adding an operation needs edits in at least five places. Verify() runs but Analyze() does not, so disposable-transient diagnostics for the DAOs derived from the external RepositorioMaestro are unknown. ServiceHost.Designer.cs leaves ServiceName = "Service1", AssemblyInfo.cs has an empty company and description and a fixed 1.0.0.0 (a running binary cannot be matched to a commit), int.Parse(PuertoTCP) is unguarded, and Program.cs has no local fallback logging for a failure before the runner starts.
+Recommendation: register by convention (Register(typeof(IFooDao), assembly)), stamp version and commit at build time, validate the port before use, and add a local fallback log for start-up failures.
+Benefit: adding an operation touches fewer files, and a running binary can be traced to its source.
+4.5 SQL Scripts (database contract)
+MustChange / Rewrite
+LEC-FR-47 - Keep one definition per stored procedure and record which one is deployed (Major)
+• Category / severity: MustChange/rewrite - Major (source of truth)
+• Evidence: ENT_TEF.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_TEF.sql) (family copy), usp_LecturaENTTEF_InsertarEntradaSalida.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_TEF/usp_LecturaENTTEF_InsertarEntradaSalida.sql) (hardened copy), SAT.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/SAT.sql)
+Lectura/Srcripts/Operaciones holds 37 family scripts (417 definitions, 406 distinct names; lean, no transaction, write procedures end with SELECT @FilasAfectadas AS FilasAfectadas, CAST(... AS bit) AS Afecto) and 150 per-procedure scripts (hardened: TRY/CATCH, XACT_ABORT, an auditoria.errorlog insert, THROW). Of the 129 per-procedure scripts that duplicate a family procedure, none is byte-identical: 63 have the same logic plus the wrapper, 56 drop the Afecto result, 9 return select 0 as resultado instead (FXD_Local, FXI_GPH, FXI_Local), and usp_LecturaFXIGph_InsertarDetalleOperacionGph drops the accumulated row count (the family copy deletes and inserts with no transaction). Only 71 of the 129 family copies return Afecto, and 123 of the 129 hardened copies do not. The SAT procedures return no row count in either copy. SAT.sql defines 11 procedures twice (10 identical after normalization; usp_GET_SALIDAAPPLET_CLAVES_14704_UTILERIAS_SAT differs: the first copy converts clave to VARCHAR(20) before LIKE, the second compares it directly, and the later CREATE OR ALTER wins). The nested legacy tree and the workspace StoredProcedures/MWD_DB project hold further copies; 195 procedure names are defined in more than one tracked file. Nothing in the repository records which generation is deployed, and the C# validarAfectacion: false on 193 of 253 write calls (LEC-FR-37) matches the hardened copies.
+Recommendation: keep one definition per procedure (generated from the database and reviewed), keep the affected-row result in every write procedure, and deploy and test from a pipeline.
+Benefit: what a write procedure returns, and whether it is atomic, no longer depends on which script ran last.
+LEC-FR-48 - Remove the early RETURN before COMMIT in the incoming SPEI and TEF insert procedures (Major)
+• Category / severity: MustChange/rewrite - Major (latent; depends on which copy is deployed)
+• Evidence: usp_TOMBIN_INSERT_FORMATO_SPEI.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_SPEI/usp_TOMBIN_INSERT_FORMATO_SPEI.sql#L141), #L162-L165 (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_SPEI/usp_TOMBIN_INSERT_FORMATO_SPEI.sql#L162-L165), usp_LecturaENTTEF_InsertarFormatoEntradaTef.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_TEF/usp_LecturaENTTEF_InsertarFormatoEntradaTef.sql#L279-L282), usp_TOMBIN_INSERT_FORMATO_ENTRADA_TEF.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_TEF/usp_TOMBIN_INSERT_FORMATO_ENTRADA_TEF.sql#L146), EntSpeiDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_SPEI/EntSpeiDao.cs#L133), ENTCOASTomiDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_COAS/ENTCOASTomiDao.cs#L443)
+Code block (sql)
+INSERT INTO TB_TOMBIN_NF_ENTRADAS_SPEI ( ... ) VALUES ( ... );
+ 
+SET @Salida = 0;
+return;
+ 
+COMMIT TRANSACTION;
+The hardened usp_TOMBIN_INSERT_FORMATO_SPEI opens BEGIN TRANSACTION, runs the INSERT, then returns before the COMMIT; usp_LecturaENTTEF_InsertarFormatoEntradaTef (called by usp_TOMBIN_INSERT_FORMATO_ENTRADA_TEF, which its header calls an "Operación de consulta" with no DML) has the same SET @Salida = 0; RETURN; before COMMIT. A procedure that returns with an open transaction leaves @@TRANCOUNT = 1: the caller sees error 266, or the pooled connection is reset and the INSERT is rolled back. The MWD_DB copy of usp_TOMBIN_INSERT_FORMATO_SPEI has no explicit transaction, so the same return is harmless there. A scan of every tracked SQL file found no other RETURN between BEGIN TRAN and COMMIT. usp_LecturaENTSPID_InsertarEntradaSalida and usp_LecturaENTSPID_InsertarFormatoSpidEnTomi (unused by the C# code) wrap the INSERT in an inner TRY/CATCH that only does SET @Salida = 1 (no logging, no rethrow) and return the value as SELECT @Salida AS Salida instead of an output parameter; because XACT_ABORT dooms the transaction, the later COMMIT fails with error 3930 and the outer CATCH logs that secondary error instead of the original one.
+Recommendation: remove the early RETURN, stop swallowing the insert error, and assert @@TRANCOUNT in a procedure-level test.
+Benefit: deploying the hardened scripts cannot make incoming SPEI or TEF registrations fail or disappear.
+LEC-FR-49 - Bring the 18 undefined procedures that running code calls under source control (Major)
+• Category / severity: MustChange/rewrite - Major (source-control gap; confirm with the DBA)
+• Evidence: GeneralDao.cs (../../General/Lectura/Infraestructura/GeneralDao.cs#L25-L26), Renombrar_usp_LecturaENTSPID_MarcarPlanTrabajoConError.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/GENERAL/Renombrar_usp_LecturaENTSPID_MarcarPlanTrabajoConError.sql), VerificacionProcedimientosUsadosPorDAOs.sql (../../General/Lectura/Lectura/Srcripts/VerificacionProcedimientosUsadosPorDAOs.sql)
+The cross-reference scan found 33 procedures referenced by code with no CREATE or ALTER in the tracked SQL. Fifteen exist in the workspace StoredProcedures/MWD_DB project (usp_TOMBIN_INSERT_FORMATO_FXD, _FXI, _FXT, _FXE, the _FXD_NOMINA_*, _FXD_PAP_*, and _FXT_PAP_* variants, usp_InsertSpeiRegistrationForCover, and some sp_InterfaceTOMI_SPEI_*). Eighteen are in neither repository: usp_Lectura_MarcarPlanTrabajoConError (used by GeneralDao for every per-folio failure; the repository holds only a one-off rename script whose source procedure is not defined either), usp_tombin_insert_formato_cms_sat (SAT), usp_tombin_insert_formato_mfx, _ser_pay, _spd, _spid, _spid_pap_detalle, _spid_pap_maestro, _tax_pay, _tmd, and eight legacy sp_InterfaceTOMI_* (SPEI_cambia_estatus_recibidas, SPID_0, SPID_cambia_estatus_recibidas, SPID_estatus_recibidas, SPID_participantes, TEF_cambia_estatus_recibidas, TEF_participantes, TEF_recibidas). The ENT_SPEI, ENT_SPID, and ENT_TEF families therefore still call 13 legacy sp_InterfaceTOMI_* procedures while equivalent new procedures (MUFG_MX2_LecturaENT*, usp_LecturaENT*: 15 definitions) are tracked but never called, a half-finished migration. The nine undefined insert procedures decide @Salida (client and account validation, duplicates), which the discarded-result and affected-row findings (LEC-FR-5, LEC-FR-37) depend on.
+Recommendation: script every referenced procedure into the repository (or the database project) with one source of truth, finish or revert the ENT_* migration, and add a CI check that every procedure name referenced in code has a definition.
+Benefit: the behavior that decides whether a business record is created, and the single procedure that records every failure, can be reviewed, tested, and rebuilt from source control.
+LEC-FR-50 - Delete or regenerate the stale consolidated Infraestructura/Scripts (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: Lectura_StoredProcedures_TOMI.sql (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_TOMI.sql#L3065), #L3254 (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_TOMI.sql#L3254), #L856-L859 (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_TOMI.sql#L856-L859), #L5157 (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_TOMI.sql#L5157), #L5224 (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_TOMI.sql#L5224), #L5280 (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_TOMI.sql#L5280), Lectura_StoredProcedures_CMS.sql (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_CMS.sql), Lectura_StoredProcedures_VistasT24.sql (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_VistasT24.sql)
+Only usp_TOMBIN_INSERT_FORMATO_TEF and usp_TOMBIN_INSERT_SRV_ENTRADAS_SALIDAS of the 116 procedures (118 definition statements) in the three scripts are referenced by running code; the other 114 carry legacy names (usp_Upd_*_ENT_COAS, usp_GET_TOMBIN_NF_*, usp_Upd_Formato_*_FXI, *_SAT, *_PAP_FXD) that the DAOs replaced with usp_Lectura* and MUFG_MX2_Lectura*. The TOMI script (5,329 lines) also contains defects that stop it from running cleanly:
+• invalid syntax at :3065 (CREATE PROCEDURE OR ALTER) and :3254 (CREATE OR ALTER PROCEDURE dbo.usp_UPD_TOMBIN_NF_TEF; with a trailing comma before WHERE, a hard-coded 'OPER CMS', and an unused @NF_USUARIO_CONFIRMA);
+• undeclared @TipoOperacion and @RowsAffected in usp_Upd_PlanTrabajoMaestro_CambioEstatus_ENT_COAS (:856-859);
+• no GO after the END of six procedures (usp_Get_TombinCmsSat_Datos_SAT, usp_Get_TombinNfEntradas_SPID, usp_Get_TOMBIN_ES_ENT_SPID, usp_Get_TOMBIN_ES_NOM_FXD, usp_Get_TOMBIN_ES_FXD, usp_Get_TOMBIN_NF_ES_FXD), so the next DROP PROCEDURE IF EXISTS (:4208, :4283, :4355, :4489, :4639, :4657) is compiled into the body of the previous procedure and runs each time it executes;
+• COMMIT TRANSACTION without BEGIN TRANSACTION in three FXI procedures (defined at :5157, :5224, and :5280; error 3902 after the autocommitted UPDATE, so each always throws);
+• a stub-then-ALTER pattern (IF OBJECT_ID(...) IS NULL EXEC('CREATE PROCEDURE ... AS BEGIN SET NOCOUNT ON; END')) that leaves an empty no-op procedure when the ALTER fails;
+• the PaP procedures update two tables with no transaction or TRY/CATCH; usp_Get_BuscaCtaVostro_ENT_SPEI filters with OR and can return several rows; usp_Upd_Devoluciones_BmxOrdPagdia_E_ENT_COAS generates the key with max(op_clave) + 1; deprecated TEXT parameters, NUMERIC(5) versus NUMERIC(8,0) for fec_valor, SELECT *, and RazonRechazo VARCHAR(16) and err_descripcion VARCHAR(65) that truncate silently; usp_UPD_TOMBIN_FormatoAceptadoCMS_SAT is defined twice in the CMS script.
+Recommendation: delete the consolidated scripts (or regenerate them from the database), keep one definition per procedure, and add a deployment check that compiles every script.
+Benefit: nobody can deploy a file that fails or silently drops procedures, and the repository stops suggesting logic that is not in production.
+LEC-FR-51 - Retire the nested legacy script tree after moving four live insert procedures out of it (Major)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: Lectura.csproj (../../General/Lectura/Lectura/Lectura.csproj#L107-L111), nested PaP_FXI.sql (../../General/Lectura/Lectura/Lectura/Srcripts/Operaciones/PaP_FXI.sql#L333-L344), nested PaP_TEF.sql (../../General/Lectura/Lectura/Lectura/Srcripts/Operaciones/PaP_TEF.sql#L300-L311), nested PaP_SPID.sql (../../General/Lectura/Lectura/Lectura/Srcripts/Operaciones/PaP_SPID.sql#L790-L806)
+Code block (sql)
+CREATE PROCEDURE [dbo].[usp_List_CUSTOMER_EdoCta_T24]
+...
+      AND (131494 IS NULL OR CUSTOMER_CODE = 00131494);
+The five nested scripts (ENT_TEF, MD, PaP_FXI, PaP_SPID, PaP_TEF; Lectura.csproj lists them as Content) use plain CREATE PROCEDURE, so a second run fails with "already exists". They define 102 procedures: 71 also exist in the same-named family script with identical logic (the family copy only adds the Afecto result) and 31 exist only here. Twenty-six of those 31 are never referenced by the C# code (the usp_LecturaENTTEF_* wrappers created in a database named TEF while the verification scripts check the same legacy sp_InterfaceTOMI_TEF_* procedures in TEF_B108; the CMS-side usp_LecturaPaP*_*Cms procedures that the family scripts replaced with MUFG_MX2_LecturaPaP*; the usp_LecturaPaP*_InsertarEntradaSalida and InsertarFormato* wrappers; usp_List_CUSTOMER_EdoCta_T24). Four of the other five are live: usp_TOMBIN_INSERT_FORMATO_FXI_PAP_DETALLE/_MAESTRO and usp_TOMBIN_INSERT_FORMATO_TEF_PAP_DETALLE/_MAESTRO, called by the PaP FXI and PaP TEF services, are defined in this repository only in the nested PaP_FXI.sql and PaP_TEF.sql (and in StoredProcedures/MWD_DB). Each takes @NF_FOLIO int and @T24_DEBIT_AMOUNT float, locates the client and account with SELECT @variable = ... FROM TB_HD_CLIENTES / TB_HD_CUENTAS without TOP or ORDER BY (with duplicate rows the last one wins), returns @Salida = 1 when either lookup finds nothing (nothing is logged or inserted, so "client not found" and "account not found" cannot be told apart), and has no transaction and no duplicate guard.
+In the nested PaP_SPID.sql, usp_List_CUSTOMER_EdoCta_T24 (database T24_VW) ignores its @CustomerCode parameter and filters on the literal (131494 IS NULL OR CUSTOMER_CODE = 00131494), so it would return one fixed customer's address data on every call (the value is a customer CDL that also appears in a non-resident client list in an MWD_DB replica script); the live lookup is MUFG_MX2_ListCUSTOMEREdoCtaT24 in VistasT24.
+Recommendation: retire the nested tree; move the four insert procedures into the maintained scripts with CREATE OR ALTER, TRY/CATCH, decimal amounts, and a @Salida contract that names the failed lookup; delete usp_List_CUSTOMER_EdoCta_T24.
+Benefit: no live procedure depends on a file that cannot be re-run, and running the tree can no longer create 26 dead procedures or one that leaks a fixed customer's data.
+LEC-FR-52 - Define the GFD_* signing procedures once and check the row count (Major)
+• Category / severity: MustChange/rewrite - Major (confirm the deployed version)
+• Evidence: ComunFXD.sql (../../General/Lectura/Lectura/Srcripts/FirmaElectronica/ComunFXD.sql), FXD_H2H.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/FXD_H2H.sql#L65), #L99 (../../General/Lectura/Lectura/Srcripts/Operaciones/FXD_H2H.sql#L99), ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L42-L51), #L121-L130 (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L121-L130)
+dbo.GFD_CONSULTAR_DATOS_FIRMA and dbo.GFD_ACTUALIZAR_FIRMA_DIGITAL are created by FirmaElectronica/ComunFXD.sql (thin wrappers over usp_LecturaComunFXD_ObtenerDatosFirma and _ActualizarFirmaDigital; @Tabla SYSNAME, @Folio BIGINT; the update returns no result), by the family script FXD_H2H.sql (@Tabla VARCHAR(MAX) / VARCHAR(128), @Folio BIGINT / VARCHAR(50), PARSENAME schema handling, the update returns FilasAfectadas/Afecto), and by the per-procedure scripts FXD_H2H/GFD_*.sql (the family copy plus TRY/CATCH); StoredProcedures/MWD_DB repeats both scripts, so each name has five definitions in two repositories. ComunFXD.cs calls the update with validarAfectacion: false and accepts any Exito; the Afecto that the FXD_H2H copies return is never read, so a signature that matched no row (wrong table, wrong folio, removed row) is logged as "Se actualizó el campo para la firma exitosamente" and GeneraFirmaDigital returns true. The FXD_H2H copies of GFD_CONSULTAR_DATOS_FIRMA receive a BIGINT folio and pass it to sp_executesql declared @folio INT, which raises an arithmetic overflow for folios above 2,147,483,647 (the ComunFXD.sql copy declares BIGINT). All data-selection procedures filter ISNULL(nf_interfase_spei, 0) = 0, so a record already flagged as sent returns no row, and ComunFXD.cs:42-51 then logs a message that names only the value 2 of that flag and returns false.
+The SPID procedures take @Tabla VARCHAR(MAX) (usp_LecturaSPID_ObtenerDatosGeneracionFirma, usp_LecturaSPID_ObtenerDatosFirma) through QUOTENAME (a value above 128 characters yields NULL and a failed sp_executesql; a schema-qualified name becomes one bracketed identifier), whereas usp_LecturaSPID_ActualizarFirmaDigital takes VARCHAR(128) with PARSENAME and a VARCHAR(50) folio compared with NF_FOLIO; it also returns no row count, and the two data procedures differ only by the extra OP_FIRMA_DIG column. The ComunSPID/ per-procedure folder holds 1 of the 3 SPID procedures and ComunFXD/ holds none, although Lectura.csproj lists six more (LEC-FR-3).
+Recommendation: keep one definition per object (BIGINT folio, sp_executesql parameter types aligned, schema-aware table names), return and check the affected-row count (or read Afecto), and treat zero rows as a signing failure.
+Benefit: the signing step's result contract no longer depends on the script that ran last, a signature update that matched nothing is noticed, and the data query works for large folios.
+Rewrite Recommended
+LEC-FR-53 - Quote the Mercado de Dinero work table and bind Familia to a real column (Major)
+• Category / severity: rewrite_recommended - Major (confirm configuration-table access and the legacy Familia column)
+• Evidence: MD.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/MD.sql#L102-L150), #L12-L33 (../../General/Lectura/Lectura/Srcripts/Operaciones/MD.sql#L12-L33), #L288-L408 (../../General/Lectura/Lectura/Srcripts/Operaciones/MD.sql#L288-L408), MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L250-L251), #L519 (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L519)
+Code block (sql)
+SET @SQL = '
+    UPDATE ' + @TablaTrabajo + '
+    SET nf_tipo_pago_spei = @TipoPagoSpei, ...
+    WHERE nf_folio = @Folio; ...';
+EXEC sp_executesql @SQL, ...
+usp_LecturaMD_ActualizarDatosComplementariosEnTablaTrabajo builds the UPDATE from a VARCHAR(256) with no QUOTENAME or whitelist (the ComunSPID, FXD_H2H, and GFD_* procedures do quote their table names). The value is mwTipoOperacion.tabla_trabajo from the external ConexionT24Mw.ObtenerMWDatosOperacion (MercadoDinero.cs:250), so injection needs a poisoned configuration row, but the service account's rights apply to whatever string is stored, and the call's result is discarded (LEC-FR-5). usp_LecturaMD_ObtenerLiquidacionPorFolio returns CONVERT(NVARCHAR(MAX), datos_xml) AS Familia (the same value as DatosXml), and MercadoDinero.cs:519 decides whether an exit leg (S) must wait for its entry leg with familia.ToUpperInvariant().Contains("SWAP") || ...Contains("REPO"), a substring search over the entire XML (it also matches words such as "REPORTE"), so the leg-ordering control can be skipped or wrongly applied. usp_LecturaMD_InsertarSwiftOut inserts the MT-300 rows (TB_SRV_SWF_TRABAJO, TB_SRV_SWF_PLAN_TRABAJO_MAESTRO/_DETALLE) with no duplicate guard (re-execution queues a second SWIFT_OUT unless a unique key exists) and re-raises with RAISERROR (loses the original error number); ObtenerComplementoPagoPorTipoLiquidacionYCdl compares CAST(cdl AS INT) = CAST(@Cdl AS INT) (non-SARGable, and any non-numeric cdl makes the scan fail); ActualizarPlanTrabajoMaestroYFolioUnico guards CONVERT(INT, @NumCliente) with ISNUMERIC, which accepts values such as 1e5 or $.
+Recommendation: whitelist and quote the table name (PARSENAME plus QUOTENAME), bind Familia to the real family column, use TRY_CONVERT with an explicit check, and make the SWIFT insert idempotent with THROW.
+Benefit: a configuration error cannot become arbitrary DML, and the entry-before-exit control runs when it should.
+LEC-FR-54 - Guard status transitions, make multi-table writes atomic, and settle the SQL typing conventions (Minor)
+• Category / severity: rewrite_recommended - Minor (items a and c are Major candidates in context)
+• Evidence: ENT_COAS.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_COAS.sql#L274), usp_LecturaENTCOAS_InsertarDevolucionCoasDesdeOrdenRecibida.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_COAS/usp_LecturaENTCOAS_InsertarDevolucionCoasDesdeOrdenRecibida.sql#L55), TAX.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/TAX.sql#L7-L12), MFX.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/MFX.sql#L513), SPID.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/SPID.sql#L275)
+• (a) Unguarded transitions: a scan of the 37 family scripts found 162 UPDATE statements that set a status literal; 102 have no predicate on the current status (for example usp_LecturaENTCOAS_MarcarEntradaSpeiProcesada, MarcarOrdenRecibidaAceptada/Rechazada/DevueltaPorFolio, usp_LecturaENTSPID_MarcarEntradaSpidProcesada, usp_LecturaFXD_ActualizarTombinFxdConfirmadoHoy, usp_LecturaSAT_MarcarPlanTrabajoProcesadaYDetalleTerminado), so a retried or reordered call can move a record backwards or overwrite a terminal state; MFX is the exception, with almost every transition guarded.
+• (b) Atomicity: the multi-table writes of the family copies (PaP_*, NOM_FXD, SAT, InsertarDetalleOperacionGph) run without a transaction.
+• (c) Key generation: usp_LecturaENTCOAS_InsertarDevolucionCoasDesdeOrdenRecibida creates op_clave with (SELECT MAX(op_clave) + 1 FROM dbo.bmx_ord_pagdia_e), which can collide when two returns run together.
+• (d) Types: four folio conventions (typed NUMERIC/BIGINT; VARCHAR + TRY_CONVERT; VARCHAR + CONVERT that throws; VARCHAR compared directly) with folio parameters as VARCHAR(50) x199, BIGINT x125, VARCHAR(65) x40, and NUMERIC(18,0) x11; seven numeric types for amount and rate parameters across the 417 family definitions (MONEY 32, DECIMAL(18,2) 11, DECIMAL(20,4) 8, DECIMAL(18,6) 4, DECIMAL(18,4) 3, NUMERIC(18,2) 2, FLOAT 2, including usp_LecturaTAX_ActualizarDatosGeneralesMaestro and @EcRate) plus three amounts passed as text; and three confirmation-date forms (DATETIME, VARCHAR(16)/(20), and REPLACE(CONVERT(VARCHAR(16), GETDATE(), 120), '-', '/')).
+• (e) Silent data loss and drift: SELECT TOP (1) without ORDER BY (ObtenerCuentaVostro also filters with OR), TRY_CAST(... AS INT) that stores NULL for a non-numeric customer, parameters shorter than the data (@Address VARCHAR(120), @err_descripcion VARCHAR(65), @EstatusCsv VARCHAR(50) split through XML), WITH (NOLOCK) on address views, a non-SARGable RIGHT(REPLICATE('0', 8) + CUSTOMER_CODE, 8) = ... in MUFG_MX2_ListCUSTOMEREdoCtaT24 (called per SPID folio), 'OPER CMS' hard-coded as the confirming user in 35 places across 9 files, a stray use VistasT24 / sp_helptext at the end of SPID.sql, and USE names that differ in case (bot, Bot, [bot]).
+• (f) PaP detail status (confirm with the business owner): PaP_FXI sets detail and master rows to CONP (accepted today) and CONF (future date), whereas PaP_FXD, PaP_SPID, and PaP_TEF set the detail rows to SCNP/SCNF and only the master rows to CONP/CONF.
+Recommendation: add WHERE cve_estatus IN (...) guards for every transition, wrap multi-table writes in one transaction, use a sequence or IDENTITY for keys, and settle one type per concept (BIGINT folio, DECIMAL(19,4) amount, DATETIME2 date).
+Benefit: retries are safe, concurrent returns cannot collide, and money and folios keep their precision end to end.
+LEC-FR-55 - Replace the 38 name-only verification scripts with one deployment check (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: VerificacionProcedimientosUsadosPorDAOs.sql (../../General/Lectura/Lectura/Srcripts/VerificacionProcedimientosUsadosPorDAOs.sql), VerificacionProcedimientos_FXT.sql (../../General/Lectura/Lectura/Srcripts/VerificacionProcedimientos/VerificacionProcedimientos_FXT.sql), VerificacionProcedimientos_GENERAL.sql (../../General/Lectura/Lectura/Srcripts/VerificacionProcedimientos/VerificacionProcedimientos_GENERAL.sql)
+VerificacionProcedimientos_<GRUPO>.sql (38 files, 43-133 lines) and the index VerificacionProcedimientosUsadosPorDAOs.sql (38 SQLCMD :r includes; needs SQLCMD mode) repeat the same 15-line template for every database (INSERT INTO @Procedimientos ... VALUES ('name'), OUTER APPLY (SELECT TOP (1) ... FROM sys.procedures ...), result column Existe 1/0) with no THROW/RAISERROR, no exit status, and no check of parameters, result-set columns (Afecto), modify_date, or OBJECT_DEFINITION. A pipeline cannot use them as a gate, and they cannot detect the wrong version of a procedure (LEC-FR-47, LEC-FR-52); the header states that procedures used internally by the common library MUFG_T24 are excluded, so the library's own process-control procedures are never verified. The scripts list 467 names (446 distinct); every distinct name is also a C# string literal and every index count matches its file, but 33 listed names are defined in no tracked SQL file (12 sp_InterfaceTOMI_* in the Enlace, SPID, and TEF_B108 databases; 19 usp_TOMBIN_INSERT_FORMATO_*/usp_tombin_insert_formato_cms_sat; usp_InsertSpeiRegistrationForCover; and usp_Lectura_MarcarPlanTrabajoConError), 18 of them in neither repository (LEC-FR-49). Running the scripts against each environment is the only way to learn whether the procedures exist, and nothing records the result. Database names differ in case (USE [bot] versus USE [Bot] in the FXT script), which only works on case-insensitive servers, and the scripts are not project items.
+Recommendation: replace the 38 copies by one parameterized check that compares OBJECT_DEFINITION hashes (or sp_describe_first_result_set output) with the repository definitions, fails with THROW on any mismatch, and runs in the deployment pipeline.
+Benefit: a green result means the environment matches the repository, and missing or stale procedures are found at deployment instead of at run time.
+4.6 Cross-Project Configuration and Repository Assets
+MustChange / Rewrite
+LEC-FR-1 - Replace the absolute shared DLL references (Blocker)
+• Category / severity: MustChange/rewrite - Blocker (GEN-1)
+• Evidence: AplicacionLectura.csproj (../../General/Lectura/Aplicacion/AplicacionLectura.csproj#L56), InfraestructuraLectura.csproj (../../General/Lectura/Infraestructura/InfraestructuraLectura.csproj#L56), Lectura.csproj (../../General/Lectura/Lectura/Lectura.csproj#L59-L62), PruebasUnitariasLectura.csproj (../../General/Lectura/PruebasUnitarias/PruebasUnitariasLectura.csproj#L87)
+All four projects contain <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath> with <SpecificVersion>False</SpecificVersion>. The root .gitignore explicitly ignores **/MUFG_T24.dll, so no repository copy exists. A clean workstation or build agent cannot build any of the four projects without a hand-copied, unversioned binary, and a changed shared DLL silently changes the next build.
+Recommendation: publish MUFG_T24 as a versioned internal package, replace the four references with pinned package references, and prove restore and build on a clean agent.
+Benefit: builds become reproducible and shared-library upgrades become auditable.
+Rewrite Recommended
+LEC-FR-2 - Define one package and restore policy, and remove the unused vendored Newtonsoft.Json (Major)
+• Category / severity: rewrite_recommended - Major (confirm whether MUFG_T24.dll needs Newtonsoft.Json at run time)
+• Evidence: Lectura.csproj (../../General/Lectura/Lectura/Lectura.csproj#L63-L68), Lectura/packages.config (../../General/Lectura/Lectura/packages.config), PruebasUnitarias/packages.config (../../General/Lectura/PruebasUnitarias/packages.config), Lectura/.gitignore (../../General/Lectura/Lectura/.gitignore#L195-L199), vendored package (../../General/Lectura/Lectura/packages/Newtonsoft.Json.13.0.4)
+Lectura/packages.config (Newtonsoft.Json 13.0.4, SimpleInjector 5.5.0) and PruebasUnitarias/packages.config (MSTest 3.6.4, Moq 4.20.72, System.Threading.Tasks.Extensions 4.5.4) need restore, but no nuget.config is tracked and only Newtonsoft.Json is vendored, although both .gitignore files exclude packages/ and *.nupkg. The 21 files of the vendored package (eight DLLs for eight target frameworks, eight XML documentation files with 88,331 non-empty lines, the .nupkg, the signature, license, readme, and icon) are tracked, and only the net45 DLL is referenced. No C# file uses Newtonsoft, JsonConvert, JObject, JToken, or JsonSerializer, yet the reference has no <Private> element, so the DLL is copied to the output. The package is authentic (the .nupkg is byte-identical to the one on the public feed and its signature is valid) and is above the 13.0.1 release that fixed CVE-2024-21907, so the issue is weight and policy, not integrity: the vendor documentation is about half of the repository's text lines (88,422 of 180,746), and a reference without a user hides which component really depends on JSON handling (possibly the external MUFG_T24.dll).
+Recommendation: track a nuget.config for the approved feed, restore every package instead of vendoring one, confirm whether MUFG_T24.dll needs Newtonsoft.Json at run time (remove the reference and the packages.config entry if it does not), and validate restore on a clean agent.
+Benefit: one dependency policy, a repository that review tooling can read, and a dependency list that shows real usage.
+LEC-FR-3 - Remove tracked IDE caches and audit artifacts, and fix the stale project items (Minor)
+• Category / severity: rewrite_recommended - Minor
+• Evidence: Aplicacion .vs cache (../../General/Lectura/Aplicacion/.vs/AplicacionLectura.csproj.dtbcache.json), Infraestructura .vs cache (../../General/Lectura/Infraestructura/.vs/InfraestructuraLectura.csproj.dtbcache.json), proc_usage.json (../../General/Lectura/Lectura/proc_usage.json), audit_missing_hits.csv (../../General/Lectura/Lectura/audit_missing_hits.csv), Lectura.csproj (../../General/Lectura/Lectura/Lectura.csproj#L91-L93), #L112-L120 (../../General/Lectura/Lectura/Lectura.csproj#L112-L120), Lectura/.gitignore (../../General/Lectura/Lectura/.gitignore#L247)
+• Tracked files contradict the ignore rules: the two .vs design-time caches are tracked although both .gitignore files list .vs/; they embed another developer's workstation path (C:\Users\n368809\OneDrive - MUFG Ltd\NTT\...) and were modified again in the latest commit. Lectura/.gitignore marks /audit*.csv, /audit*.txt, /audit*.json, and /proc_usage.json as locally generated, yet Lectura/audit_*.csv, Lectura/audit_*.txt, and Lectura/proc_usage.json are tracked; proc_usage.json (452 entries, 432 distinct procedures, 66 source files) and audit_missing_hits.csv embed a differently named working copy (...\Lectura - Nueva\...), and the developer's user name occurs 459 times in four tracked files.
+• The snapshots are stale: of the 38 names in audit_missing_defs.csv, 28 are now defined in tracked SQL and 25 still appear in the C# code; of the 221 names in audit_unique_sps.txt, 177 are defined; ProcedimientosSinSqlIndividual.tmp.txt lists 244 procedures that had no individual script, and none is missing one now. proc_usage.json is the closest to the code (431 of its 432 names still appear in the C# text) and its DbKey values (TOMI 367, CMS 62, T24_VW 6, SPEI 4, SPEI1 5, SPID 5, TEF 3) are a written map of the database each DAO uses, which belongs in documentation, not in tracked scratch files.
+• The host project lists files that do not exist: Lectura.csproj references .github\copilot-instructions.md (:91; the .github folder is empty), docs\repo-structure-notes.md (:93; docs/ is absent), and six Srcripts\FirmaElectronica\ComunFXD|ComunSPID\*.sql Content items (:113-116, :118-119). Of the 70 SQL Content items, 64 exist; 170 of the 234 SQL files in the two Srcripts trees (the 38 verification scripts plus the index and 131 per-procedure scripts) are not project items, so the item list is incomplete as well as stale. The misspelled folder name Srcripts is baked into every path.
+• Orphan legacy proxy: General/Lectura/Service References/wsInfoCuentaT24 is not referenced by any project (LEC-FR-42).
+Recommendation: git rm --cached the IDE caches and the generated audit artifacts, decide the package policy (LEC-FR-2), keep .gitignore authoritative, remove or restore the stale project items, and correct the Srcripts folder name when scripts are next reorganized.
+Benefit: commits stop carrying machine-specific churn and a developer identity, and the project file describes the real layout.
+Nice to Rewrite if Time Permits
+LEC-FR-4 - Replace the GitLab template README with a service runbook (Minor)
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: README.md (../../General/Lectura/README.md#L1-L93)
+README.md contains only the unmodified GitLab onboarding template; it has no purpose, configuration, deployment, schedule, or stored-procedure ownership information.
+Recommendation: replace it with a service runbook (purpose, data flow, configuration source, build and restore steps, SQL deployment order, rollback, alerting, and the contract with the external MUFG_T24 library).
+Benefit: a new engineer can build, deploy, and operate the service without tribal knowledge.
+5. Architecture-Fit Note
+Lectura is a request-driven batch worker: the control service sends a TCP package that names an operation family and a list of folios, and the host runs each folio as a phase machine over CMS, TOMI, T24, and the SPEI, SPID, and TEF participant systems, with the state between phases held in database tables. Its main risks are not the Windows Service host or the .NET Framework runtime; they are unchecked results of state-changing calls (LEC-FR-5, 6, 7, 37, 44), money held in binary floating point (LEC-FR-10, 54), a SQL contract with no single source of truth (LEC-FR-47, 49, 50, 51, 52), folio claiming and per-folio state that live outside the repository or in shared instance fields (LEC-FR-22, 45), the order of signature control against the response (LEC-FR-8, 12, 13, 15), and unprotected transports and bypassable controls (LEC-FR-35, 36, 38, 45). Applying the standing architecture discussion in _ORCHESTRATION.md (./_ORCHESTRATION.md) section 6, the best near-term fit is to modernize in place: first make every DAO result explicit and counted per folio (LEC-FR-5, 7, 37), bring the SQL under one deployed source of truth (LEC-FR-47, 49, 50, 51), secure the T24 and TCP channels (LEC-FR-35, 45), correct money, date, and signature handling (LEC-FR-8, 10, 11, 13), claim each folio atomically before processing (LEC-FR-45), and cover the money-moving classes with characterization tests (LEC-FR-43); only then move to a supported .NET worker host with structured telemetry and health checks. A registry or strategy per operation (LEC-FR-30, 33) would remove the five-place edit that a new operation needs today. An explicit workflow or saga engine, or a queue-driven trigger in place of the control-service TCP package, could later improve resumability and auditability if volumes and recovery objectives justify it, but it would move the idempotency, ordering, and participant-response guarantees into new infrastructure. Nothing in this review justifies serverless hosting or a microservice split, and a full rewrite is not a by-product of this audit. These decisions require facts that are not visible here:
+• the semantics of the external MUFG_T24.dll (validarAfectacion, IniciaProceso, the folio generators, ConversionHelper rounding), which the findings treat as confirmation items;
+• which SQL generation is deployed in each environment, and the definitions of the 18 procedures that no repository holds (LEC-FR-47, 49);
+• the configured LimiteConcurrencia, the TCP bind address and access control, and which T24 web-service host is production (LEC-FR-35, 45);
+• the daily volumes by operation family, the response deadlines of the SPEI, SPID, and TEF systems, and the recovery-time expectation after a failed package;
+• the business rules listed in section 2 (TMD special rates, Mercado de Dinero exemptions and leg ordering, PaP detail statuses, the SAT stamp algorithm); and
+• whether the T24 account-status service and the SAT validator can be secured or replaced at the interface level.
+6. JIRA-Ready Backlog
+ID	Title	Category	Project	File(s)	Priority
+LEC-FR-1	Replace the absolute shared DLL references	MustChange/rewrite	All projects	AplicacionLectura.csproj (../../General/Lectura/Aplicacion/AplicacionLectura.csproj#L56)	Blocker
+LEC-FR-2	Define one package and restore policy, and remove the unused vendored Newtonsoft.Json	rewrite_recommended	Repository	Lectura.csproj (../../General/Lectura/Lectura/Lectura.csproj#L63-L68)	Major
+LEC-FR-3	Remove tracked IDE caches and audit artifacts, and fix the stale project items	rewrite_recommended	Repository	Aplicacion .vs cache (../../General/Lectura/Aplicacion/.vs/AplicacionLectura.csproj.dtbcache.json)	Minor
+LEC-FR-4	Replace the GitLab template README with a service runbook	NiceToRewrite_ifTimePermits	Repository	README.md (../../General/Lectura/README.md#L1-L93)	Minor
+LEC-FR-5	Check every DAO result before a reject, return, or status change is considered done	MustChange/rewrite	AplicacionLectura	ENT_COAS.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_COAS.cs#L373-L394)	Blocker
+LEC-FR-6	Honor the TEF accept/reject response	MustChange/rewrite	AplicacionLectura	ENT_TEF.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_TEF.cs#L240-L244)	Blocker
+LEC-FR-7	Count per-folio exceptions and keep the failure handler from aborting the batch	MustChange/rewrite	AplicacionLectura	OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L332-L333)	Major
+LEC-FR-8	Validate incoming payment signatures before any response or write	MustChange/rewrite	AplicacionLectura	ENTSPEI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L372)	Major
+LEC-FR-9	Define the outcome when the T24 account status is unrecognized	MustChange/rewrite	AplicacionLectura	ENTSPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPID.cs#L274-L333)	Major
+LEC-FR-10	Use decimal for money and string or long for identifiers	MustChange/rewrite	AplicacionLectura	ENT_COASDtos.cs (../../General/Lectura/Aplicacion/DTOs/ENT_COAS/ENT_COASDtos.cs#L240)	Major
+LEC-FR-11	Load the SAT cutoff HORA_SAT_FIN and fail visibly when it is missing	MustChange/rewrite	AplicacionLectura	Enum.cs (../../General/Lectura/Aplicacion/Enums/Enum.cs#L24)	Major
+LEC-FR-12	Resolve the SPID type-5 (forex-related) signing frame	MustChange/rewrite	AplicacionLectura	ComunSPID.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunSPID.cs#L114)	Major
+LEC-FR-13	Reject empty signatures before persisting them as success	MustChange/rewrite	AplicacionLectura	MetodosFirma.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L64-L113)	Major
+LEC-FR-14	Dispose imported certificates and load the signing certificate once	MustChange/rewrite	AplicacionLectura	MetodosFirma.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/MetodosFirma.cs#L238-L247)	Major
+LEC-FR-15	Sign in an explicit phase so a retry cannot skip the signature	MustChange/rewrite	AplicacionLectura	FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXD.cs#L282-L289)	Major
+LEC-FR-16	Stop logging account numbers, amounts, signatures, and frames at INFO	MustChange/rewrite	AplicacionLectura	ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L95)	Major
+LEC-FR-17	Act on the FXI SPEI-cover routing result	MustChange/rewrite	AplicacionLectura	FXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L228-L251)	Major
+LEC-FR-18	Let Mercado de Dinero DATOS_GRAL exceptions surface	MustChange/rewrite	AplicacionLectura	MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L316-L320)	Major
+LEC-FR-19	Query received payments by folio instead of re-reading the day's list	rewrite_recommended	AplicacionLectura	ENTSPEI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENTSPEI.cs#L121-L126)	Major
+LEC-FR-20	Resolve FAD and nostro accounts from T24 for every currency	rewrite_recommended	AplicacionLectura	FXI.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXI.cs#L1089-L1130)	Major
+LEC-FR-21	Replace the Mercado de Dinero forex message match with a typed result	rewrite_recommended	AplicacionLectura	MercadoDinero.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MercadoDinero.cs#L490-L506)	Major
+LEC-FR-22	Keep MFX per-folio state out of instance fields and parse CMS content safely	rewrite_recommended	AplicacionLectura	MFX.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/MFX.cs#L31)	Major
+LEC-FR-23	Reject TMD operations whose special-rate authorization is cancelled or missing	rewrite_recommended	AplicacionLectura	TMD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/TMD.cs#L78-L103)	Major
+LEC-FR-24	Handle every SAT validation outcome	rewrite_recommended	AplicacionLectura	SAT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SAT.cs#L174-L318)	Major
+LEC-FR-25	Surface unparsable amounts, accounts, and dates instead of falling back to zero or null	rewrite_recommended	AplicacionLectura	PaP_FXT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/PaP_FXT.cs#L831)	Minor
+LEC-FR-26	Replace hard-coded reference data and a hard-coded capturist value with configuration	rewrite_recommended	AplicacionLectura	ENT_COAS.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/ENT_COAS.cs#L58)	Minor
+LEC-FR-27	Tidy the signing helpers and the entrada services	rewrite_recommended	AplicacionLectura	ComunFXD.cs (../../General/Lectura/Aplicacion/Servicios/FirmaElectronica/ComunFXD.cs#L157)	Minor
+LEC-FR-28	Fix the smaller correctness defects in the FXD, FXI, FXT, and Mercado de Dinero flows	rewrite_recommended	AplicacionLectura	FXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXD.cs#L188)	Minor
+LEC-FR-29	Remove unreachable forex logic and align the payroll, PaP, and SPID variants	rewrite_recommended	AplicacionLectura	NOMFXD.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/NOMFXD.cs#L65-L140)	Minor
+LEC-FR-30	Collapse the copy-pasted single-phase classes and move repeated lookups into their phase	rewrite_recommended	AplicacionLectura	FXT.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/FXT.cs#L131-L139)	Minor
+LEC-FR-31	Fix mojibake, placeholder, and misleading XML documentation	rewrite_recommended	AplicacionLectura	SPID.cs (../../General/Lectura/Aplicacion/Servicios/Operaciones/SPID.cs#L324)	Minor
+LEC-FR-32	Normalize interface contracts, namespaces, and DTO families	rewrite_recommended	AplicacionLectura	IMFXCmsDao.cs (../../General/Lectura/Aplicacion/Interfaces/MFX/IMFXCmsDao.cs)	Minor
+LEC-FR-33	Slim the OperacionServicio orchestrator and fix its small hygiene defects	rewrite_recommended	AplicacionLectura	OperacionServicio.cs (../../General/Lectura/Aplicacion/OperacionServicio.cs#L51-L116)	Minor
+LEC-FR-34	Delete the dead legacy ProcedimientoAlmacenado constants	NiceToRewrite_ifTimePermits	AplicacionLectura	Enum.cs (../../General/Lectura/Aplicacion/Enums/Enum.cs#L72-L603)	Minor
+LEC-FR-35	Call the T24 account-status service over TLS and stop sending credentials in clear text	MustChange/rewrite	InfraestructuraLectura	T24CuentaWebService.cs (../../General/Lectura/Infraestructura/SOAP/T24CuentaWebService.cs#L33-L44)	Major
+LEC-FR-36	Never skip the SAT validator because a database check failed, and log the bypass flag	MustChange/rewrite	InfraestructuraLectura	UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L340-L349)	Major
+LEC-FR-37	Validate affected rows by default and keep one output-parameter convention	rewrite_recommended	InfraestructuraLectura	ENTCOASTomiDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_COAS/ENTCOASTomiDao.cs#L63-L399)	Major
+LEC-FR-38	Dispose the SAT validator socket and bound the exchange	rewrite_recommended	InfraestructuraLectura	UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L963-L1015)	Major
+LEC-FR-39	Split UtileriasSAT into services and key the applet output by folio	rewrite_recommended	InfraestructuraLectura	UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L30)	Major
+LEC-FR-40	Confirm and isolate the SAT stamp algorithm and encoding	rewrite_recommended	InfraestructuraLectura	UtileriasSAT.cs (../../General/Lectura/Infraestructura/Repositorio/SAT/UtileriasSAT.cs#L716-L717)	Minor
+LEC-FR-41	Make the DAO layer consistent	rewrite_recommended	InfraestructuraLectura	EntSpeiDao.cs (../../General/Lectura/Infraestructura/Repositorio/ENT_SPEI/EntSpeiDao.cs#L426)	Minor
+LEC-FR-42	Harden T24CuentaWebService and delete the stale proxy artifacts	rewrite_recommended	InfraestructuraLectura	T24CuentaWebService.cs (../../General/Lectura/Infraestructura/SOAP/T24CuentaWebService.cs#L33-L36)	Minor
+LEC-FR-43	Cover the money-moving code with automated tests	rewrite_recommended	PruebasUnitariasLectura	OperacionServicioTests.cs (../../General/Lectura/PruebasUnitarias/OperacionServicioTests.cs#L94-L136)	Major
+LEC-FR-44	Check service-state and port-state results and log the real shutdown outcome	rewrite_recommended	Lectura (host)	ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L279)	Major
+LEC-FR-45	Claim folios before processing, keep lifecycle state per package, and confirm the TCP channel's access control	rewrite_recommended	Lectura (host)	ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L282)	Major
+LEC-FR-46	Simplify host wiring and packaging	NiceToRewrite_ifTimePermits	Lectura (host)	ServiceHost.cs (../../General/Lectura/Lectura/ServiceHost.cs#L92-L259)	Minor
+LEC-FR-47	Keep one definition per stored procedure and record which one is deployed	MustChange/rewrite	SQL scripts	ENT_TEF.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_TEF.sql)	Major
+LEC-FR-48	Remove the early RETURN before COMMIT in the incoming SPEI and TEF insert procedures	MustChange/rewrite	SQL scripts	usp_TOMBIN_INSERT_FORMATO_SPEI.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_SPEI/usp_TOMBIN_INSERT_FORMATO_SPEI.sql#L141)	Major
+LEC-FR-49	Bring the 18 undefined procedures that running code calls under source control	MustChange/rewrite	SQL scripts	GeneralDao.cs (../../General/Lectura/Infraestructura/GeneralDao.cs#L25-L26)	Major
+LEC-FR-50	Delete or regenerate the stale consolidated Infraestructura/Scripts	MustChange/rewrite	SQL scripts	Lectura_StoredProcedures_TOMI.sql (../../General/Lectura/Infraestructura/Scripts/Lectura_StoredProcedures_TOMI.sql#L3065)	Major
+LEC-FR-51	Retire the nested legacy script tree after moving four live insert procedures out of it	MustChange/rewrite	SQL scripts	Lectura.csproj (../../General/Lectura/Lectura/Lectura.csproj#L107-L111)	Major
+LEC-FR-52	Define the GFD_* signing procedures once and check the row count	MustChange/rewrite	SQL scripts	ComunFXD.sql (../../General/Lectura/Lectura/Srcripts/FirmaElectronica/ComunFXD.sql)	Major
+LEC-FR-53	Quote the Mercado de Dinero work table and bind Familia to a real column	rewrite_recommended	SQL scripts	MD.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/MD.sql#L102-L150)	Major
+LEC-FR-54	Guard status transitions, make multi-table writes atomic, and settle the SQL typing conventions	rewrite_recommended	SQL scripts	ENT_COAS.sql (../../General/Lectura/Lectura/Srcripts/Operaciones/ENT_COAS.sql#L274)	Minor
+LEC-FR-55	Replace the 38 name-only verification scripts with one deployment check	rewrite_recommended	SQL scripts	VerificacionProcedimientosUsadosPorDAOs.sql (../../General/Lectura/Lectura/Srcripts/VerificacionProcedimientosUsadosPorDAOs.sql)	Minor
+
+Backlog priorities follow the portfolio severity checklist referenced above.
