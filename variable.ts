@@ -1,536 +1,1650 @@
-Zeus Files Recommendations
-Zeus_Files - Architecture & Code Quality Recommendations
-Solution: ZEUS/ZeusFiles/Zeus_Files.sln (../../ZEUS/ZeusFiles/Zeus_Files.sln) Reviewed source: branch CodeReview, commit ef69f1c7d2867cbf928f04401054aaf1bf2bf6b2 (2026-09-04, clean working tree) Compared against: LoansApp architecture and coding baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md) See also: _ORCHESTRATION.md (_ORCHESTRATION.md) for the portfolio methodology, template, and standing findings.
-1. Solution Overview (low/no-dependency -> high dependency)
-Tier	Project	Kind	Path
-0	AplicacionZeus_Files	.NET Framework 4.8 class library (classic csproj, AnyCPU and x86 configurations)	AplicacionZeus_Files.csproj (../../ZEUS/ZeusFiles/AplicacionZeus_Files/AplicacionZeus_Files.csproj)
-1	InfraestructuraZeus_Files	.NET Framework 4.8 class library (classic csproj, AnyCPU and x86 configurations)	InfraestructuraZeus_Files.csproj (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/InfraestructuraZeus_Files.csproj)
-2	Zeus_Files	.NET Framework 4.8 Windows Service host (Exe, classic csproj, App.config with only the runtime declaration)	Zeus_Files.csproj (../../ZEUS/ZeusFiles/Zeus_Files/Zeus_Files.csproj)
+using AplicacionZeus_Files.Enums;
+using AplicacionZeus_Files.Interfaces;
+using AplicacionZeus_Files.Modelos;
+using AplicacionZeus_Files.Operaciones;
+using MUFG_T24.Comunes;
+using MUFG_T24.Interfaces_utilidades;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
-The solution lists three projects and no test project.
-What this solution actually does: Zeus_Files is the file-generation stage of the ZEUS reporting pipeline. It is a timer-driven Windows Service (the interval comes from the shared host configuration file, which is outside the repository) that talks to the DWH database through stored procedures only. The pipeline state lives in the control table ctl_procesos_d (the procedures identify a row by id_trabajo, product, type, and system; the table definition is not in the repository), whose status literals in the procedures run 0-CREA, 1-DWH, 2-ZEUS, 3-FILE, 4-FIN, 5-FTP, 6-ENV; this service owns the step 3-FILE -> 4-FIN. On every tick it opens a SimpleInjector scope, reloads four parameters (RUTA_ZEUS_ENVIO, RUTA_ZEUS_RESP, MAIL_ZEUS_TO, MAIL_ZEUS_CC) from cat_parametros_generales, and asks Productos.BuscaProductos whether to work. It works only when no job anywhere is still in 0-CREA/1-DWH/2-ZEUS (and no unprocessed 1-DWH/2-ZEUS adjustment rule exists) and at least one job is in 3-FILE or a 3-FILE rule is pending. Archivos.ProcesaArchivos then (1) loads the 3-FILE jobs joined to map_DWHTables for project ZEUS and keeps the first row per (table, file) pair; (2) loads the pending data-adjustment rules (cat_zeus_reglas_datos.des_query, SQL text that the code comments describe as requested by New York) and stamps the INI ones; (3) for each job marks the products that have no file plan as finished, marks the start, builds the file name by replacing $fecha_presentacion$ with the MMddyyyy date, creates <RUTA_ZEUS_ENVIO><yyyyMMdd>\ and <RUTA_ZEUS_RESP><yyyyMMdd>\, deletes earlier copies when the primary file already exists, checks that the table has a layout in cat_config_files_zeus, calls MUFG_MX2_ZeusFiles_ProcesoDatosArchivoModelo to obtain the data lines (the C# writes them verbatim), writes every line twice (ASCII; local folder and network backup), marks the job 4-FIN with record count and size, reads a trailer record from the control table, and appends it to both files; (4) when no job of that id_trabajo remains outside 4-FIN/5-FTP/6-ENV, tries to send an HTML e-mail that lists the date folder; and (5) after the loop, when no job anywhere remains in 0-CREA..3-FILE, calls procedure 021 for each rule of the list loaded at the start, whose body runs the rule's SQL through EXEC(@sqlquery) (the call's parameter name does not match the declaration, ZF-FR-18), and reports rules that are still pending. The sibling solution Zeus_SFTP ships the files (its procedures read 5-FTP rows and set 6-ENV); the component that moves 4-FIN rows to 5-FTP is not in the reviewed repositories.
-2. Scope & Methodology Note
-This is a new review after the authoritative reset dated 2026-10-07. The tracker row was Not started and no earlier Zeus_Files_Recommendations.md was present in docs/recommendation/ when this review began; findings or severities from older audit runs were not used as evidence.
-• Read 31/31 Git-tracked files, 2,574/2,574 lines, in full and line by line: 23 C# files / 1,695 lines (Aplicacion 17 / 921, Infraestructura 2 / 489, host 4 / 285), three project files, Zeus_Files.sln, App.config, the HTML e-mail template, README.md, and .gitignore. git status is clean and the working tree holds no ignored or untracked files (no bin/ or obj/ folders, so there is no build output on this machine). The solution is below the 150-file / 5,000-line threshold, so no on-disk progress tracker was required.
-• Directly relevant SQL was also read in full: the 23 solution-owned procedure scripts under StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures (23/23 files, 420/420 lines, UTF-8; develop @ f64ecf2, with two unrelated untracked folders in that checkout) and the Zeus_Files entries of DBMDW.sqlproj (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj). Three sibling procedures were read for contrast: the INI gate in ZeusCarga SQL 007 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/ZeusCarga/DWH/007%20SP%20%5Bdbo%5D.%5BMUFG_MX2_Carga_ObtieneConteoReglasPendientesZeusIni%5D.sql), the rule fetch and success mark in ZeusExtractor SQL 004 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/ZeusExtractor/DWH/Procedures/004%20SP%20MUFG_MX2_GetReglasAjuste.sql) and ZeusExtractor SQL 012 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/ZeusExtractor/DWH/Procedures/012%20SP%20MUFG_MX2_UpdReglaAjusteExitosa.sql), and the waiting count in Zeus_SFTP SQL 002 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_SFTP/DWH/Procedures/002%20SP%20MUFG_MX2_ObtenerFaltantesYRegistrosZeus_SFTP.sql). A decode-aware search of all 1,297 text files in StoredProcedures/MWD_DB found no definition of MUFG_MX2_ZeusFiles_ProcesoDatosArchivoModelo and no CREATE TABLE for any of the seven control and catalogue tables the procedures use (ctl_procesos_d, ctl_prc_zeus_reglas_dat_d, cat_zeus_reglas_datos, map_DWHTables, cat_proyectos_plan, cat_config_files_zeus, cat_parametros_generales), so column nullability, constraints, and types are unknown.
-• Traced only the shared MUFG_T24 contracts (workspace copy under General/MUFGT24_BTMUM_64, clean at d1e49a0) that control effective behavior here: the host base class and program runner, the stored-procedure adapters and column-to-property mapper, ControlServicio, Parametrizacion, the encrypted configuration reader, Logging, the legacy Config shim, CorreoHelper, and the SQL connection factory. These reads verify behavior and are not counted as solution-owned files.
-• Supplemented the full read with quantified scans over the 23 C# files: zero matches for .Result, .Wait(, GetAwaiter().GetResult, async void, Task.Run, throw ex;, weak cryptography, DateTime.Now, bare catch, TODO/HACK/FIXME, and test attributes; 47 CrearParametro( calls plus one raw IDbDataParameter and no SQL statement composed from values in C# (the only SQL text touched there is the adjustment-rule text, in which the numeric job id is substituted, ZF-FR-20); 17 EjecutarStoredProcedureQuery< calls of which 15 test Exito; three EjecutarStoredProceduredNonQuery calls whose result is never read; 45 Config.EscribirLog calls and two ConfiguracionEncriptadaHelper calls (both obsolete shared APIs); 15 catch (Exception; five ConfigureAwait(false) calls, all in the host; and four absolute D:\ServiceCMS references in three project files.
-• One throwaway experiment supports ZF-FR-9: running the two steps of EnviarAviso (the manual <, >, space, and newline replacements, then WebUtility.HtmlEncode) on a two-file sample in PowerShell produced file&amp;nbsp;one.TXT&lt;br&gt;, that is, literal &nbsp; and <br> text.
-• Provenance: CodeReview is three commits ahead of origin/develop (6b69f21, 2026-07-31) and origin/Feature_ZeusFiles (4b814a5): 381a130, e95e381, and ef69f1c, all 2026-09-04 (31 files, +1,197/-684 against develop). Compared with develop, they raised the Exito references in the repository from 4 to 15, added the e-mail HtmlEncode, added exact date parsing (TryParseExact), and moved the host onto WindowsServiceHostBase; those improvements are credited in Section 3. They also introduced the double encoding in ZF-FR-9 (develop escaped the file list manually and had no HtmlEncode) and the missing procedure in ZF-FR-19 (develop built the data query in C# and sent it to the generic executor DatosArchivoConsulta; the review commits switched to MUFG_MX2_ZeusFiles_ProcesoDatosArchivoModelo, which was not added to the SQL repository, and made the table-structure lookup vestigial). Already present on develop: the product-code arguments (ZF-FR-3), the trailer written after the status change and its overwrite loop (ZF-FR-5), the unread write results (ZF-FR-14; there the repository returned a Boolean that no caller read, and the review commits dropped it), and the @idtrabajo calls to the procedures that declare @idttrabajo (ZF-FR-18).
-• No JIRA/ADO work item or acceptance criteria was supplied. Business expectations are limited to behavior expressed by code, SQL, and the portfolio baseline.
-• Production source was not modified. Build and test execution were unavailable: dotnet, modern MSBuild, vstest.console, nuget, vswhere, and csc are not installed, the D: drive and D:\ServiceCMS\MUFG_T24.dll are absent, and the .NET Framework 4.8 reference pack is missing. There is no test project to run. Validation is therefore static plus document and tooling checks; every statement about SQL Server or SMTP behavior is expected behavior from reading the scripts, not an observed run.
-Finding Summary
-Category	Blocker	Major	Minor	Total
-MustChange/rewrite	1	14	1	16
-rewrite_recommended	0	1	5	6
-NiceToRewrite_ifTimePermits	0	0	2	2
-Total	1	15	8	24
-
-Fresh Cross-Cutting Checks
-Candidate	Result	Current evidence
-GEN-1 absolute DLL references	Yes	MUFG_T24.dll is referenced from D:\ServiceCMS in all three projects and the host also references D:\ServiceCMS\SimpleInjector.dll (four references in AplicacionZeus_Files.csproj:52-54 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/AplicacionZeus_Files.csproj#L52-L54), InfraestructuraZeus_Files.csproj:52-54 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/InfraestructuraZeus_Files.csproj#L52-L54), and Zeus_Files.csproj:74-79 (../../ZEUS/ZeusFiles/Zeus_Files/Zeus_Files.csproj#L74-L79)); the repository holds no nuget.config or packages.config and the path is absent here (ZF-FR-22).
-GEN-2 zero automated tests	Yes	The solution has three projects and no test project, no test framework reference, and no test attribute; the orchestrator logic is also hard to test because it calls File, Directory, CorreoHelper, and the static Config logger directly (ZF-FR-21).
-GEN-3 duplicate project files	No	Three distinct project files, each compiling its own folder (every tracked .cs file is a Compile item). The duplicate SQL build item (004/005) is tracked locally in ZF-FR-23.
-GEN-4 near-identical solutions	Not applicable	The orchestration lists no candidate pair that includes this solution.
-GEN-5 sensitive logging	No (not confirmed)	The solution's own code logs no credential, account number, amount, or data line, and the repository holds no secret (App.config holds only the runtime declaration; connection strings come from the shared host configuration, where their values are encrypted). The adjustment SQL text and the e-mail recipients are logged verbatim at INFO (ZF-FR-12), and the shared helper logs the whole e-mail body when a send fails; the content of the rules is not visible in this repository, so sensitive literals in them cannot be ruled out.
-GEN-6 undisposed signing helper	No	No signing helper or certificate object is constructed; all four StreamWriter instances are in using blocks.
-GEN-7 finalization only on success	No	The service never records per-tick execution state: it calls neither ActualizaEJecucion nor ActualizaTerminacion during a tick (only at shutdown, ServiceHost.cs:184 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L184)), so there is no running flag to leave stuck. The missing per-tick record is noted in ZF-FR-17.
-GEN-8 nullable PID dereference	No	ObtenerProcesoActualAsync assigns the PID from the current process (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L59-L63)) before ServiceHost.cs:119 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L119) reads Pid.Value, and the base host validates PID, process name, and display name before the timer starts (WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L282-L307)).
-GEN-9 discarded service-state results	Yes	Startup and shutdown ignore the Boolean from MarcarPuertoEnUsoAsync, shutdown ignores the ActualizaTerminacion result, and shutdown logs success whatever the results are (ZF-FR-16).
-GEN-10 out-of-hours alert per tick	No	The tick has no operating-window or business-day gate and never calls InsertarAlerta; the only notification is the completion e-mail (ZF-FR-9). The related monitoring gap is ZF-FR-17.
-GEN-11 repository failure looks like empty/success	Yes (partial)	15 of the 17 query wrappers test Exito and throw, which is the better pattern; ParametrosSistema() does not, so a SQL failure becomes an empty configuration, and the four state-marking writes ignore the adapter result, so any failure that the adapter reports as Exito = false (every SQL failure) is silent (ZF-FR-14).
-GEN-12 culture-dependent money/date conversion	No (latent)	Dates are parsed exactly with the invariant culture; the file-name date uses ToString("MMddyyyy") and ToUpper() with the current culture (ZF-FR-13), and no money is parsed or formatted in C# (whether the untracked procedure of ZF-FR-19 formats amounts cannot be inspected).
-
-Items Requiring Business/Integration Confirmation
-These are not classified as defects without the missing contract evidence:
-• Deployed procedure definitions. The findings that rest on the tracked scripts (ZF-FR-3, ZF-FR-4, ZF-FR-18, ZF-FR-19, ZF-FR-20) describe the scripts in develop @ f64ecf2. Compare them with the procedures deployed in the DWH database, in particular the parameter names of MUFG_MX2_ZeusFiles_MarcarInicioControl and MUFG_MX2_ZeusFiles_MarcarAjusteConError, the arguments of BuscarTrabajosCompuestos and MarcarProcesosInicio, and the body of ProcesoDatosArchivoModelo.
-• Meaning of `INI` and `FIN` rules in the `3-FILE` phase. Confirm that INI rules must adjust data before extraction (the contract the sibling ZeusCarga and ZeusExtractor procedures describe) and that executing their SQL at the end of the run, or never, is not intended (ZF-FR-2).
-• Hand-off to `Zeus_SFTP`. Identify what moves 4-FIN rows to 5-FTP and whether it can see a file before its trailer is appended (ZF-FR-5); no tracked procedure sets 5-FTP.
-• Error alerting. Three ZEUS procedures set flg_error_alertado = 0 (Zeus_Files 019 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/019%20SP%20MUFG_MX2_ZeusFiles_MarcarProcesoConError.sql#L14) is one) but no tracked procedure reads it, and this service's own code raises no alert (the shared ControlServicio can insert one when a service-state update throws). Confirm who alerts operators about failed or blocked jobs (ZF-FR-8, ZF-FR-17).
-• File contract. Confirm the required encoding (the code writes ASCII, which replaces any non-ASCII character), line ending (Environment.NewLine, CRLF on Windows), trailer layout, whether an empty file (zero data rows) is valid, and the expected size of the largest file (ZF-FR-5, ZF-FR-11).
-• Configuration conventions. Confirm that RUTA_ZEUS_ENVIO and RUTA_ZEUS_RESP always end with a backslash (the writer concatenates, the listing uses Path.Combine), which account runs the service, and the permissions on both folders, since the files hold financial data at rest (ZF-FR-6).
-• Actual timer interval and log-size unit. TimerInterval and TamanoMaximoArchivoLogKB come from the shared host configuration file, which is outside the repository (ZF-FR-17); per-tick figures below are illustrative.
-• Single-instance assumption. The program runner prevents a second instance on one machine only; nothing here guards two servers running the service against the same database.
-External Dependency Notes (belong to the MUFG_Library review, not counted here)
-• RepositorioMaestro.EjecutarStoredProcedureQuery converts a SqlException into Exito = false without logging (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L390)), rethrows a cancellation or a ResultadoStoredProcedureException unchanged, and logs and rethrows any other exception (lines 391-404 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L391-L404)), while EjecutarStoredProceduredNonQuery converts any exception raised while it opens the connection and runs the procedure, other than a cancellation or a ResultadoStoredProcedureException (not only SqlException), into Exito = false and never logs (lines 909-920 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L909-L920)); this is the root of GEN-11 (LIB-FR-56).
-• The column-to-property mapper matches prop.Name against the reader's column names case-insensitively and silently skips properties without a column (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L296-L316), line 515 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L515)), so a result column with a different name leaves the property at its default without any message (ZF-FR-4).
-• The query adapter writes an El SP no afectó filas ni devolvió resultados WARN line for a procedure that returns no row (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L641-L654)), which MarcarErrorProcesoControl triggers on every call because its procedure only updates.
-• SqlCommand instances are created without a command timeout (ConexionSqlServer.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/ConexionSqlServer.cs#L30-L33)), so the 30-second ADO.NET default applies unless a caller passes commandTimeout, which this solution never does (ZF-FR-11).
-• Logging.Init(..., int maxMb) multiplies its argument by 1,024 to obtain kilobytes (Logging.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L32-L41)), while every service host in the workspace passes a setting named TamanoMaximoArchivoLogKB (ZF-FR-17).
-• The whole static Config class and every member of ConfiguracionEncriptadaHelper are [Obsolete] compatibility shims (Config.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/Config.cs#L11-L12), ConfiguracionEncriptadaHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConfiguracionEncriptadaHelper.cs#L11-L21)), so each use compiles with a CS0618 warning and needs migration when the shared library retires them (ZF-FR-12, ZF-FR-17).
-• CorreoHelper.EnviarCorreo returns false after logging the whole message (recipients, subject, and body) at ERROR when sending fails (CorreoHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Correo/CorreoHelper.cs#L47-L91), lines 148-163 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Correo/CorreoHelper.cs#L148-L163)).
-3. What's Already Good
-• Constructor injection and a verified composition root. OperacionServicio.cs:35-44 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L35-L44), Archivos.cs:36-40 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L36-L40), and Productos.cs:27-30 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Productos.cs#L27-L30) receive every collaborator through their constructors, and ServiceHost.cs:60-102 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L60-L102) registers them in SimpleInjector and calls Verify(). ConfiguracionModelo is a scoped clone (line 93 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L93)) and each tick opens its own scope (ServiceHost.cs:146-150 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L146-L150)), so parameter values loaded in one tick never leak into the next. The repository sits behind an interface (IOperacionesDWH.cs:10-31 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Interfaces/IOperacionesDWH.cs#L10-L31)), which keeps it mockable.
-• Database access is parameterized end to end. All 47 CrearParametro calls and the one raw IDbDataParameter (DWHRepository.cs:42-45 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L42-L45)) bind values to fixed stored-procedure names, and no SQL statement is composed from values in C#; the only SQL text touched there is the adjustment-rule text, in which the numeric job id is substituted before the text is passed as a parameter to procedure 021 (ZF-FR-20). The only concatenated SQL in the call path is inside procedure 001, and its input (DWHRepository.cs:39 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L39)) is built from the names of a four-member enum, so no external value reaches it from this client.
-• Fifteen of the 17 query wrappers test `Exito` and throw with the procedure's message. The pattern in DWHRepository.cs:74-77 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L74-L77) and DWHRepository.cs:92-95 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L92-L95) turns a swallowed SqlException of the shared adapter into an exception that names the cause; the 2026-09-04 commits raised the Exito references from 4 on develop to 15 here.
-• One failing job or rule does not stop the others. Each job runs in its own try/catch that logs the full exception and flags the job (Archivos.cs:288-302 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L288-L302), with a nested try/catch so a failing flag write is itself logged), and each initial and final rule has its own try/catch (Archivos.cs:86-101 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L86-L101), Archivos.cs:316-329 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L316-L329)). The weakness is that nothing aggregates these failures (ZF-FR-1).
-• Resources and dates are handled carefully. Both StreamWriter pairs are in using blocks (Archivos.cs:200-213 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L200-L213), Archivos.cs:247-253 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L247-L253)), and Archivos.cs:434-448 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L434-L448) parses the process date exactly (TryParseExact, invariant culture) and throws a specific ArgumentException for a malformed value, so a bad fecha_proceso fails the job, which the per-job handler then tries to flag (the result of the flag write is not checked, ZF-FR-14), instead of producing a wrong file name.
-• E-mail values are encoded and the template is checked. Archivos.cs:367-372 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L367-L372) verifies the template exists and Archivos.cs:381-393 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L381-L393) encodes every substituted value, which prevents HTML injection through paths or file names (the encoding defect of the file list is ZF-FR-9).
-• No secret in the repository, and no sensitive payload in the logs. App.config:1-6 (../../ZEUS/ZeusFiles/Zeus_Files/App.config#L1-L6) holds only the runtime declaration; connection strings come from the shared host configuration file (their values are encrypted), and the shared reader throws on a missing service node instead of returning null (ObtencionConfguracionGeneral.cs:90-93 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Configuracion/ObtencionConfguracionGeneral.cs#L90-L93), used at ServiceHost.cs:74 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L74)). The data lines of the files are never logged and no credential is read by this solution.
-• The host inherits solid protections. The program runner enforces one instance per machine with a global mutex and registers global exception handlers (WindowsServiceProgramRunner.cs:30-52 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceProgramRunner.cs#L30-L52), WindowsServiceProgramRunner.cs:104-124 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceProgramRunner.cs#L104-L124)); the host base skips a tick while the previous one runs (WindowsServiceHostBase.cs:372-373 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L372-L373)), validates PID, process name, and display name before the timer starts (WindowsServiceHostBase.cs:282-307 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L282-L307)), and bounds stop with a 60-second wait budget and a 30-second cleanup budget (90 seconds in total, WindowsServiceHostBase.cs:27-28 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L27-L28)). TerminacionAsync uses its own cleanup token and disposes the container in a finally (ServiceHost.cs:197-200 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L197-L200)).
-• A single service identity. NombreServicio.Zeus_Files is used by Program.cs:16-18 (../../ZEUS/ZeusFiles/Zeus_Files/Program.cs#L16-L18), the log name (ServiceHost.cs:34 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L34)), and the configuration lookup (ServiceHost.cs:74 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L74)); the enum member exists in the shared library (NombreServicio.cs:18 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Constantes/NombreServicio.cs#L18)), and no other host in the portfolio uses it.
-• **The fec_* stamps are guarded against double stamping and the first error is kept.** The procedures guard their stamps with fec_inicio IS NULL (SQL 008 MarcarInicioFinProcesoControl:15 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/008%20SP%20MUFG_MX2_ZeuzFiles_MarcarInicioFinProcesoControl.sql#L15)) and fec_ini_Zeus_files IS NULL (SQL 013 MarcarProcesosInicio:22 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/013%20SP%20MUFG_MX2_ZeusFiles_MarcarProcesosInicio.sql#L22)), and MarcarProcesoConError keeps the first error through flg_con_error = 0 (SQL 019 MarcarProcesoConError:20 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/019%20SP%20MUFG_MX2_ZeusFiles_MarcarProcesoConError.sql#L20)); ORDER BY Ctl.num_orden (SQL 006 ListarprocesosEjecutar:21 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/006%20SP%20MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar.sql#L21)) orders the job list, so the first row per group at Archivos.cs:74 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L74) is stable except for ties on num_orden. (The status updates in procedures 008 and 021 are not guarded, ZF-FR-23.) 21 of the 23 scripts use CREATE OR ALTER.
-• None of the usual defect shapes appears in the C#. The scans found no sync-over-async, no async void, no Task.Run, no throw ex;, no weak cryptography, no DateTime.Now, and no bare catch; the only rethrow (ServiceHost.cs:132 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L132)) is a correct throw;.
-• Repository hygiene is good. The working tree is clean with no committed build output, and .gitignore is the standard Visual Studio template (it ignores bin/, obj/, and logs at .gitignore:30-34 (../../ZEUS/ZeusFiles/.gitignore#L30-L34) and certificates at .gitignore:239 (../../ZEUS/ZeusFiles/.gitignore#L239)). Pinned package versions do not apply (the solution has no packages).
-• Ruled out as defects (recorded to avoid re-investigation):
-• _configuracionBase.Pid.Value (ServiceHost.cs:119 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L119)) is safe: the PID is assigned from the current process before it (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L59-L63)) and the base host validates it before the timer starts.
-• Resolving IParametrizacion and IControlServicio outside a scope in ServiceHost.cs:113-117 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L113-L117) is valid: Parametrizacion has a parameterless constructor (Parametrizacion.cs:34 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L34)) and ControlServicio depends only on the singleton IAlertas (ControlServicio.cs:29-32 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L29-L32)).
-• The unguarded registros.num_regs and regs.num_regs dereferences (Archivos.cs:95 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L95), Archivos.cs:106 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L106), Archivos.cs:140 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L140), Archivos.cs:233 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L233)) and the registros != null fallback at Archivos.cs:260-263 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L260-L263) cannot meet null with the tracked scripts, because procedures 002, 003, 004, 008, 010, 012, 013, 016, 018, and 020 always return exactly one row (an aggregate or SELECT @var). They are hardening items only; the realistic null dereferences are in ZF-FR-7.
-• Procedure 001 concatenates @strParametros into an IN (...) list (SQL 001 ObtenerParametrosSistema:10-15 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/001%20SP%20MUFG_MX2_Comun_ObtenerParametrosSistema.sql#L10-L15)), but this client passes only the four enum names, so it is a latent weakness of a shared procedure (ZF-FR-20), not an exploitable path from here.
-• File.Delete on a missing file does not throw, so the unconditional second delete at Archivos.cs:178 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L178) would be safe on its own; the defect is that it runs only when the first file exists (ZF-FR-5).
-• Encoding.ASCII is not classified as a defect without the file specification (see the confirmation list).
-4. Findings by Project (low/no-dependency -> high dependency)
-4.1 AplicacionZeus_Files (Tier 0)
-MustChange / Rewrite
-ZF-FR-1 - A failed run is reported as a successful one: ProcesaArchivos returns true after a swallowed exception, BuscaProductos turns failures into "nothing to do", and the tick outcome is discarded (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Archivos.cs:346-351 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L346-L351) (outer catch and return true), the only two false returns at Archivos.cs:108-112 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L108-L112) and Archivos.cs:340-344 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L340-L344), OperacionServicio.cs:95-106 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L95-L106) (result discarded and catch-all), Productos.cs:76-80 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Productos.cs#L76-L80) (return 0), and the host tick at ServiceHost.cs:141-156 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L141-L156).
-Code block (csharp)
-// Archivos.cs:346-351
-catch (Exception ex)
+namespace AplicacionZeus_Files
 {
-    Config.EscribirLog($"ERROR|ProcesaArchivos|Se presenta exception:{ex.Message}");   // no type, no stack
-}
- 
-return true;                                                                            // reached after the catch
- 
-// OperacionServicio.cs:95-106 (abridged)
-int numeroProductos = await _productos.BuscaProductos();
-if (numeroProductos > 0)
-{
-    await _archivos.ProcesaArchivos();            // Task<bool>: the result is discarded
-}
-...
-catch (Exception ex) { Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Se presenta exception: {ex}"); }
- 
-// Productos.cs:76-80
-catch (Exception ex) { Config.EscribirLog($"ERROR|BuscaProductos|Se presentó una excepción {ex}"); return 0; }
-Issue / impact: ProcesaArchivos is declared Task<bool>, but false is returned only by the two pending-rule gates. Any exception outside the per-job try (the list loads, the rule loops, ValidarFinCarga, the final count) is caught at L346, logged with ex.Message only (no exception type or stack trace; apart from the nested flag-failure handler at L298-300, which logs only ex2.Message, and the silent cancellation handler of the shutdown, every other catch block logs the full exception), and the method then returns true. The caller ignores the value anyway. BuscaProductos converts every failure into 0, which the caller reads as "no products to generate", so a database failure is indistinguishable from an idle system. EjecutarProcedimientosAsync swallows everything, including the OperationCanceledException that it throws itself at OperacionServicio.cs:60 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L60), so a cancellation seen at the start of a tick is logged as an ERROR instead of ending the tick quietly. The host therefore receives no failure signal from any of these paths. Failures inside a job are isolated well (L288-302) but never counted, so a tick in which every job failed is also a successful tick, and the pending-rule gates and the notification result (ZF-FR-9) are only logged.
-Recommended change: Return an explicit tick outcome and let the host act on it. Make BuscaProductos return a small result that distinguishes Blocked, NothingPending, and Work(n), rethrow cancellation, log the complete exception, and have the host log one summary line per tick (counts of jobs listed, generated, and failed; rules executed and failed) and raise one alert per failure transition.
-Code block (csharp)
-public enum TickStatus { Skipped, Succeeded, PartiallyFailed, Failed, Cancelled }
- 
-public sealed class TickResult
-{
-    public TickStatus Status { get; set; }
-    public int JobsListed { get; set; }
-    public int JobsGenerated { get; set; }
-    public int JobsFailed { get; set; }
-    public int RulesFailed { get; set; }
-}
- 
-// in ProcesaArchivos
-catch (OperationCanceledException) { throw; }
-catch (Exception ex)
-{
-    _logger.Error("ProcesaArchivos", ex);        // complete exception
-    result.Status = TickStatus.Failed;
-}
-return result;
-Benefit: Operators and monitoring can tell a successful, a blocked, and a failed run apart, a cancellation no longer produces a spurious ERROR, and the false-success paths of the other findings have one place to report to.
-Suggested JIRA: ZF-FR-1 (Major, MustChange/rewrite).
-ZF-FR-2 - Adjustment rules: INI rules are stamped processed without running their SQL, and the end-of-run loop executes a stale, unfiltered snapshot only when the whole load is finished (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Archivos.cs:77-83 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L77-L83) (list and moment filter), Archivos.cs:84-102 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L84-L102) (INI loop), Archivos.cs:105-112 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L105-L112) (gate), Archivos.cs:305-331 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L305-L331) (end-of-run loop); SQL 007 ListarTareasAjusteDatos:5-18 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/007%20SP%20MUFG_MX2_ZeuzFiles_ListarTareasAjusteDatos.sql#L5-L18) (only PEND rules are returned), SQL 008 MarcarInicioFinProcesoControl:11-27 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/008%20SP%20MUFG_MX2_ZeuzFiles_MarcarInicioFinProcesoControl.sql#L11-L27) (the "start and end" procedure only stamps), SQL 010 ObtenerPreQuerisPendientesProc:5-9 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/010%20SP%20MUFG_MX2_ZeuzFiles_ObtenerPreQuerisPendientesProc.sql#L5-L9) (the gate counts INI rules in PEND), SQL 020 ValidarFinalCarga:5-7 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/020%20SP%20MUFG_MX2_ZeusFiles_ValidarFinalCarga.sql#L5-L7) (end condition), SQL 021 MarcarInicioControl:13-29 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/021%20SP%20MUFG_MX2_ZeusFiles_MarcarInicioControl.sql#L13-L29) (the only place in the tracked scripts that executes a rule's SQL); contract of the sibling services at ZeusExtractor SQL 004:20-21 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/ZeusExtractor/DWH/Procedures/004%20SP%20MUFG_MX2_GetReglasAjuste.sql#L20-L21) and ZeusCarga SQL 007:34-35 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/ZeusCarga/DWH/007%20SP%20%5Bdbo%5D.%5BMUFG_MX2_Carga_ObtieneConteoReglasPendientesZeusIni%5D.sql#L34-L35).
-Code block (csharp)
-// Archivos.cs:83-95 - INI rules: the SQL is only printed
-var lstTareasInicio = listTareasAjuste.Where(x => x.cve_momento.ToUpper().Equals(Constantes.INI)).ToList();
-foreach (var queryAjuste in lstTareasInicio)
-{
-    registros = await _operacionesDWH.MarcarInicioFinProcesoControl(queryAjuste.id_trabajo, queryAjuste.num_orden);
-    Config.EscribirLog($"INFO|ProcesaArchivos|queryAjuste_INI|Procesando: ... SQL: *{queryAjuste.des_query}*.");
- 
-// Archivos.cs:305-319 - end of run: every rule of the snapshot loaded at L77, both moments
-registros = await _operacionesDWH.ValidarFinCarga();
-...
-if (iRegs == 0)
-{
-    foreach (var ajuste in listTareasAjuste)
+    /// <summary>
+    /// Servicio que maneja la operacion principal
+    /// </summary>
+    public class OperacionServicio
     {
-        await _operacionesDWH.MarcarInicioControl(ajuste.id_trabajo, ajuste.num_orden, ajuste.des_query);
-Code block (sql)
--- 008 MarcarInicioFinProcesoControl: no query parameter, nothing is executed
-UPDATE ctl_prc_zeus_reglas_dat_d SET cve_estatus='PROC', fec_final=getDate(), num_regs=@iRegs, flg_con_error=0 ...
--- 021 MarcarInicioControl: the only EXEC
-EXEC(@sqlquery);
-Issue / impact: For an INI rule the C# calls a procedure that never receives the query: it stamps fec_inicio and sets the rule to PROC with num_regs equal to the number of rows it stamped (1 or 0). The INFO lines nevertheless print SQL: *...* and a record count, which reads as if the SQL had run, and the gate after the loop (ObtenerPreQueriesPendientes) counts INI rules in PEND, so it passes whenever the stamps succeeded. The only code that executes a rule's SQL is the end-of-run loop. It iterates the whole list loaded at L77 (both moments; there is no cve_momento filter although the log label says queryAjuste_FIN), and it runs only when ValidarFinCarga returns 0, that is, when no job anywhere remains in 0-CREA..3-FILE. By static reading this means: (a) INI adjustments never run before the files are generated; (b) when the end condition holds at the end of the same tick they run after generation; (c) when it does not (any other job is still in 3-FILE or upstream), the INI rules are already PROC, ListarTareasAjusteDatos no longer returns them, and their SQL never runs; (d) the loop works on a snapshot taken before the files were produced and never re-checks that a rule is still PEND. The sibling ZeusCarga and ZeusExtractor procedures describe INI rules as running before, and gating, the main processing. If the intent here is different (the INI rules are only markers), the INI loop and its gate are dead code and the logs mislead.
-Recommended change: Confirm the contract with the owner, then implement it explicitly. One EjecutarReglaAsync should run a rule through a single procedure (transaction, TRY/CATCH, THROW, affected rows returned, ZF-FR-20) and mark PROC or the error flag from its result. Run the INI rules before generation and stop the tick if one fails; after ValidarFinCarga returns 0, query the pending FIN rules again (not the stale list), filter by cve_momento, log the real affected rows, and never run a rule that is no longer PEND.
-Code block (csharp)
-// before generation
-foreach (var rule in await _operacionesDWH.ListarReglasPendientes(Constantes.INI))
-    await EjecutarReglaAsync(rule, ct);            // runs the SQL; marks PROC or the error flag from the result
- 
-// end of run
-if (await _operacionesDWH.ContarTrabajosEnCurso() == 0)
-    foreach (var rule in await _operacionesDWH.ListarReglasPendientes(Constantes.FIN))
-        await EjecutarReglaAsync(rule, ct);
-Benefit: Data adjustments run exactly when the business expects them, a rule cannot be marked done without having run, and the log states what happened.
-Suggested JIRA: ZF-FR-2 (Major, MustChange/rewrite).
-ZF-FR-3 - The composite-job check and the start marker receive the product code where the procedures expect the project code (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Archivos.cs:124-125 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L124-L125) and Archivos.cs:145 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L145) (product code passed), Archivos.cs:139 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L139) and Archivos.cs:231 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L231) (project constant passed), Archivos.cs:71 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L71) (the list is loaded for CLAVE_PROYECTO); repository parameters at DWHRepository.cs:154-161 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L154-L161) and DWHRepository.cs:200-207 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L200-L207); the comparisons in SQL 011 BuscarTrabajosCompuestos:10-19 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/011%20SP%20MUFG_MX2_ZeusFiles_BuscarTrabajosCompuestos.sql#L10-L19), SQL 013 MarcarProcesosInicio:12-22 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/013%20SP%20MUFG_MX2_ZeusFiles_MarcarProcesosInicio.sql#L12-L22), and SQL 006 ListarprocesosEjecutar:15-20 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/006%20SP%20MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar.sql#L15-L20).
-Code block (csharp)
-// Archivos.cs:124-125 and :145 - cve_producto goes into the @cve_proyecto parameter
-await _operacionesDWH.BuscarTrabajosCompuestos(tarea.id_trabajo, tarea.cve_producto, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
-regs = await _operacionesDWH.MarcarProcesosInicio(tarea.id_trabajo, tarea.cve_producto, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
-// Archivos.cs:139 and :231 - the project constant, as intended
-await _operacionesDWH.MarcarTerminadosSinProyecto(tarea.id_trabajo, Constantes.CLAVE_PROYECTO);
-Code block (sql)
--- 011 BuscarTrabajosCompuestos and 013 MarcarProcesosInicio
-AND Tab.cve_proyecto = @cve_proyecto          -- map_DWHTables.cve_proyecto, 'ZEUS' for the rows 006 returns
-Issue / impact: ListarProcesosEjecutar selects the jobs with Tbl.cve_proyecto = 'ZEUS', so map_DWHTables.cve_proyecto holds the project code. The two calls above pass a product code (for example a deposits product) as @cve_proyecto, so unless a product code equals a project code, (a) BuscarTrabajosCompuestos returns no rows and the branch that waits for the sibling products of a composite file (L127-134) is not entered unless a product code happens to equal a project code; today only the global barrier of BuscaProductos (no job upstream anywhere) keeps a composite file from being produced before its parts are ready; and (b) MarcarProcesosInicio updates no row, so fec_ini_Zeus_files stays NULL for every file whose product code differs from the project code (only the other two markers set the remaining timestamps), and its result is ignored (L145). The same arguments exist on develop, so this is long-standing rather than a review regression. The tracked scripts are the evidence; the deployed procedures must be compared (see the confirmation list).
-Recommended change: Pass Constantes.CLAVE_PROYECTO in both calls and rename the repository and interface parameters to claveProyecto everywhere so the mix-up cannot recur. Fix ZF-FR-10 and ZF-FR-4 first or together: the composite branch becomes live as soon as this is corrected. Add a test with a fake repository that records the arguments.
-Benefit: Composite files wait for all their parts by design instead of by accident, and the start timestamp used for monitoring is recorded.
-Suggested JIRA: ZF-FR-3 (Major, MustChange/rewrite).
-ZF-FR-4 - State-marking results are ignored or never mapped: MarcarTerminadosSinProyecto always reports 0, and a zero-row MarcarTerminados leaves the job in 3-FILE (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Archivos.cs:139-147 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L139-L147), Archivos.cs:231-233 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L231-L233); the DTO at RegistrosModelo.cs:6-10 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Modelos/RegistrosModelo.cs#L6-L10); the column name returned by SQL 012 MarcarTerminadosSinProyecto:29 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/012%20SP%20MUFG_MX2_ZeusFiles_MarcarTerminadosSinProyecto.sql#L29); the mapper at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L296-L316); the update conditions in SQL 016 MarcarTerminados:15-34 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/016%20SP%20MUFG_MX2_ZeusFiles_MarcarTerminados.sql#L15-L34) and SQL 013 MarcarProcesosInicio:12-26 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/013%20SP%20MUFG_MX2_ZeusFiles_MarcarProcesosInicio.sql#L12-L26).
-Code block (csharp)
-// Archivos.cs:139-147
-RegistrosModelo regs = await _operacionesDWH.MarcarTerminadosSinProyecto(tarea.id_trabajo, Constantes.CLAVE_PROYECTO);
-intRegsProcPorTerminar = regs.num_regs;                                  // always 0 (see below)
-Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {intRegsProcPorTerminar} registros como termino de proceso ...");
-regs = await _operacionesDWH.MarcarProcesosInicio(...);                  // result never read
-Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {intRegsProcPorTerminar} registros como inicio de proceso.");
- 
-// Archivos.cs:231-233
-regs = await _operacionesDWH.MarcarTerminados(...);
-Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {regs.num_regs} registros como termino de proceso.");   // only printed
-Code block (sql)
--- 012: the count is returned as No_Regs; RegistrosModelo has num_regs and Faltantes
-SELECT @No_Regs AS No_Regs;
-Issue / impact: The shared mapper copies a column into a property only when the names match (case-insensitive) and silently skips the rest, so RegistrosModelo.num_regs is never filled from procedure 012: regs.num_regs is 0 whatever the procedure did, the INFO line at L142 always reports 0, and intRegsProcPorTerminar is reset to 0 (together with the empty composite list of ZF-FR-3 this keeps the wait branch from being entered today, ZF-FR-10). The other markers return correctly named columns, but nobody validates them. MarcarProcesosInicio is discarded, and the log line after it prints the other variable. MarcarTerminados is only printed, although it updates rows by project, table, original file name, id_trabajo, and status 3-FILE, and its text parameters are VARCHAR(30)/VARCHAR(50) (SQL Server is expected to truncate an over-long procedure argument without an error). A truncated or mismatching value therefore updates 0 rows without an error: the file has been written, the job stays in 3-FILE, ListarProcesosEjecutar returns it on the next tick, and the whole file is regenerated every tick (ZF-FR-8) while the log says "0 registros".
-Recommended change: Return the count under the expected column name (SELECT @No_Regs AS num_regs) or map it explicitly, and make the repository return an int for these markers. Treat MarcarTerminados returning 0 rows as a failure (throw, so the job is flagged and the cause is visible), log the real count of MarcarProcesosInicio, and add a contract test that pairs every procedure with the DTO columns it must fill.
-Benefit: A job cannot silently stay in 3-FILE after its file was written, and the counts in the logs are real.
-Suggested JIRA: ZF-FR-4 (Major, MustChange/rewrite).
-ZF-FR-5 - The output file is written in place and its trailer is appended after the job is already 4-FIN; the trailer loop keeps one row, and the backup copy is deleted only when the primary exists (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Archivos.cs:172-179 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L172-L179) (paths and conditional delete), Archivos.cs:199-213 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L199-L213) (in-place append writers), Archivos.cs:231 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L231) (status change), Archivos.cs:237-254 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L237-L254) (trailer read and append); SQL 016 MarcarTerminados:15-30 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/016%20SP%20MUFG_MX2_ZeusFiles_MarcarTerminados.sql#L15-L30) (sets 4-FIN and the finish time), SQL 017 ObtenerDatosTrailerRecord:9-17 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/017%20SP%20MUFG_MX2_ZeusFiles_ObtenerDatosTrailerRecord.sql#L9-L17) (the trailer is built from the row that 016 updates), and the downstream waiting count in Zeus_SFTP SQL 002:31-38 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_SFTP/DWH/Procedures/002%20SP%20MUFG_MX2_ObtenerFaltantesYRegistrosZeus_SFTP.sql#L31-L38).
-Code block (csharp)
-// Archivos.cs:175-179 - the backup is deleted only if the primary exists
-if (File.Exists(strZeus_file)) { File.Delete(strZeus_file); File.Delete(strZeus_fileResp); }
-// Archivos.cs:200-201 - both files are created at their final name, in append mode
-using (StreamWriter writterPrincipal = new StreamWriter(strZeus_file, true, Encoding.ASCII))
-using (StreamWriter writterRespaldo = new StreamWriter(strZeus_fileResp, true, Encoding.ASCII))
-...
-regs = await _operacionesDWH.MarcarTerminados(...);                      // job leaves 3-FILE here
-...
-string strTrailerRecordFinal = string.Empty;
-foreach (var _record in oTrailerRecordFinal)
-{
-    strTrailerRecordFinal = _record.Datos.Replace(":", "");              // overwritten on every pass
-}
-// ... trailer appended to both files only now (L247-253)
-Issue / impact: (1) Procedure 017 builds the trailer from the columns that MarcarTerminados writes (file name, record count, finish time), so the trailer can be read only after the call that also sets 4-FIN; the status becomes 4-FIN (S016 L16) before the trailer is appended. During that window, and permanently if the read or append fails (the per-job handler then flags a job that is already 4-FIN and out of the retry list), a consumer that treats 4-FIN as ready can read a file without its trailer. What promotes 4-FIN to 5-FTP is not in the reviewed repositories (the sibling Zeus_SFTP counts 4-FIN rows as still waiting), so the exposure needs owner confirmation. (2) The data file is created at its final name and filled in place, so a stop or crash mid-write can leave a partial file at the final path; it is repaired only because the job is still 3-FILE and the next tick deletes and regenerates it. (3) The trailer loop assigns instead of accumulating, so if procedure 017 returns more than one row (it groups by name, date, finish time, count, and reprocess flag, so a mix of original and reprocessed rows yields two) all but the last are dropped, in no defined order. (4) If the primary file was removed after an earlier run (for example moved by the next stage) but the backup stayed, the regeneration appends to the old backup (append: true), which then holds duplicated records.
-Recommended change: Make 4-FIN mean "complete file in place". Preferred: let the trailer be computed before the status changes (pass the record count and a timestamp to a procedure that returns the trailer, or compute it in C#), write the data and the trailer to <name>.tmp, move the file to its final name, and only then call MarcarTerminados. Minimum: write the data to <name>.tmp, call MarcarTerminados, read the trailer, append it to the temporary file, and only then rename it to the final name, so a reader that sees 4-FIN finds either no file or a complete one. Delete both targets unconditionally before the replace, require exactly one trailer row (Single() with a clear error), and treat a trailer failure as a job failure that resets the status.
-Code block (csharp)
-string tmp = target + ".tmp";
-using (var w = new StreamWriter(tmp, false, Encoding.ASCII)) { /* data lines, then the single trailer line */ }
-File.Delete(target);
-File.Move(tmp, target);                               // readers never see a partial file
-await _operacionesDWH.MarcarTerminados(...);          // status changes last
-Benefit: Downstream stages never receive a truncated or trailer-less file, a re-run cannot duplicate records in the backup, and a stop mid-write leaves no partial file at the final name.
-Suggested JIRA: ZF-FR-5 (Major, MustChange/rewrite).
-ZF-FR-6 - Output paths: required parameters are not validated, paths are concatenated, and the file name comes from the database unchecked (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: OperacionServicio.cs:63-91 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L63-L91) (only the keys that exist are copied), Archivos.cs:154-157 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L154-L157) and Archivos.cs:159-173 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L159-L173) (name and paths), Archivos.cs:167-170 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L167-L170) (swallowed directory failure), Archivos.cs:272 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L272) and Archivos.cs:456-476 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L456-L476) (listing built with Path.Combine), DWHRepository.cs:37-63 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L37-L63) (an empty dictionary on failure, ZF-FR-14), and the source of the file name in SQL 006 ListarprocesosEjecutar:8-14 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/006%20SP%20MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar.sql#L8-L14).
-Code block (csharp)
-// Archivos.cs:154-173 (abridged)
-strZeus_file_name = tarea.des_proyecto_files.Replace("$fecha_presentacion$", strFechaArchivo);   // database value
-...
-if (!Directory.Exists($"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\"))
-    Directory.CreateDirectory($"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\");
-...
-catch (Exception ex) { Config.EscribirLog($"ERROR|ProcesaArchivos|Error: {ex}"); }                // processing continues
-strZeus_file = $"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\{strZeus_file_name}";
-Issue / impact: OperacionServicio copies a parameter only when its key is present and never checks that the values it needs exist. If a key is missing, or the parameter query failed and returned an empty dictionary (ZF-FR-14), the property stays null, and $"{null}{fechaProceso}\\" becomes the relative path 20260930\, resolved against the service's current directory (typically C:\Windows\System32 for a Windows service). The directories are created there if the account may, the file is written there when that succeeds, MarcarTerminados marks the job finished, and the next stage looks somewhere else. A directory-creation failure is caught and logged at L167-170 and the code proceeds to open the file. The writer builds the path by concatenation (the configured root must end with a backslash) while ConstruirListadoArchivos uses Path.Combine: with a root that has no trailing backslash the files go to <root><date>\ while the e-mail lists <root>\<date> and reports the folder missing. The file name is des_proyecto_files with the date substituted; nothing checks that it has no directory part or ... The values are administrator data, so the traversal risk is small on its own, but the output location is not controlled by the service.
-Recommended change: Validate the required parameters once per tick and fail the tick before any database work, naming the missing keys; build every path with Path.Combine and Path.GetFullPath; reject a file name that is not a bare name; check that the resolved path stays under the configured root; create the directories once and do not continue when creation fails.
-Code block (csharp)
-private static void RequireParameters(ConfiguracionModelo c)
-{
-    var missing = new[] { ("RUTA_ZEUS_ENVIO", c.StrRutaZeusEnvio), ("RUTA_ZEUS_RESP", c.StrRutaZeusResp),
-                          ("MAIL_ZEUS_TO", c.StrMailZeusTo) }
-        .Where(p => string.IsNullOrWhiteSpace(p.Item2)).Select(p => p.Item1).ToList();
-    if (missing.Count > 0) throw new InvalidOperationException("Missing Zeus parameters: " + string.Join(", ", missing));
-}
- 
-string root = Path.GetFullPath(_configuracion.StrRutaZeusEnvio).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-if (!string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal)) throw new InvalidOperationException("Invalid file name.");
-string path = Path.GetFullPath(Path.Combine(root, fechaProceso, fileName));
-if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Path escapes the root.");
-Benefit: A configuration or database fault stops the run with a clear message instead of writing financial files into the wrong place, and the e-mail and the files always refer to the same folder.
-Suggested JIRA: ZF-FR-6 (Major, MustChange/rewrite).
-ZF-FR-7 - One rule row with a null query or moment aborts every tick before any file is generated (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: Archivos.cs:79-83 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L79-L83) (outside any per-rule try/catch), the DTO at TareasAjusteDtosModelo.cs:6-17 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Modelos/TareasAjusteDtosModelo.cs#L6-L17), the source rows in SQL 007 ListarTareasAjusteDatos:5-18 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/007%20SP%20MUFG_MX2_ZeuzFiles_ListarTareasAjusteDatos.sql#L5-L18), and the swallow at Archivos.cs:346-351 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L346-L351).
-Code block (csharp)
-// Archivos.cs:79-83
-foreach (var item in listTareasAjuste)
-    item.des_query = item.des_query.Replace("$id_trabajo$", item.id_trabajo.ToString());   // NullReferenceException if des_query is NULL
-List<TareasAjusteDtosModelo> lstTareasInicio = listTareasAjuste.Where(x => x.cve_momento.ToUpper().Equals(Constantes.INI)).ToList();   // same for cve_momento
-Issue / impact: Both statements run before the per-rule try/catch and before any job is processed. A catalogue row with NULL des_query, or a control row with NULL cve_momento, throws a NullReferenceException that reaches the outer catch (L346, ZF-FR-1). Nothing marks that rule, so it stays PEND and every following tick that reaches `ProcesaArchivos` fails the same way and no Zeus file is generated until someone repairs the row. Nullability is not visible (the table DDL is not in the repository). The remaining dereferences (Archivos.cs:156 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L156) des_proyecto_files.Replace, Archivos.cs:244 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L244) _record.Datos.Replace) are per job and caught; the second one runs after the job is already finished (ZF-FR-5).
-Recommended change: Treat a rule without a query or moment as a configuration error of that rule only: flag it through MarcarErrorProcesoControl and continue. Compare moments with string.Equals(..., StringComparison.OrdinalIgnoreCase) and keep the whole rule preparation inside the per-rule try/catch.
-Code block (csharp)
-foreach (var rule in listTareasAjuste)
-{
-    try
-    {
-        if (string.IsNullOrWhiteSpace(rule.des_query)) throw new InvalidOperationException("Rule without query.");
-        if (string.IsNullOrWhiteSpace(rule.cve_momento)) throw new InvalidOperationException("Rule without moment.");
-        rule.des_query = rule.des_query.Replace("$id_trabajo$", rule.id_trabajo.ToString(CultureInfo.InvariantCulture));
+        #region Propiedades
+
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IOperacionesDWH _operacionDWH;
+        private readonly Productos _productos;
+        private readonly Archivos _archivos;
+
+        #endregion
+
+        #region Constructor
+
+        /// <summary>
+        /// Constructor de clase para ejecutar las operaciones
+        /// </summary>
+        /// <param name="configuracion">Inyección de la configuración</param>
+        /// <param name="operacionesDWH">Inyección para la base de datos DWH</param>
+        public OperacionServicio(ConfiguracionModelo configuracion,
+                                IOperacionesDWH operacionesDWH,
+                                Productos productos,
+                                Archivos archivos)
+        {
+            _configuracion = configuracion;
+            _operacionDWH = operacionesDWH;
+            _productos = productos;
+            _archivos = archivos;
+        }
+
+        #endregion
+
+        #region Métodos
+
+        /// <summary>
+        /// Función Principal para ejecutar las operaciones del Servicio.
+        /// </summary>
+        /// <returns></returns>
+        public async Task EjecutarProcedimientosAsync(CancellationToken ct)
+        {
+            try
+            {
+                #region Validaciones Parámetros
+
+                ct.ThrowIfCancellationRequested();
+
+                // Carga los parametros de configuración para el inicio de las operaciones
+                Dictionary<string, string> dicParametrosSistema = await _operacionDWH.ParametrosSistema();
+
+                foreach (var paramSistema in dicParametrosSistema)
+                {
+                    if (!Enum.TryParse(paramSistema.Key, out ParametrosSistema parametro)) continue;
+
+                    switch (parametro)
+                    {
+                        case ParametrosSistema.RUTA_ZEUS_ENVIO:
+                            _configuracion.StrRutaZeusEnvio = paramSistema.Value;
+                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Ruta de envio de archivo local '{paramSistema.Value}'");
+                            break;
+
+                        case ParametrosSistema.RUTA_ZEUS_RESP:
+                            _configuracion.StrRutaZeusResp = paramSistema.Value;
+                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Ruta de respaldo de archivo en red '{paramSistema.Value}'");
+                            break;
+
+                        case ParametrosSistema.MAIL_ZEUS_TO:
+                            _configuracion.StrMailZeusTo = paramSistema.Value;
+                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Mails zeus to '{paramSistema.Value}'");
+                            break;
+
+                        case ParametrosSistema.MAIL_ZEUS_CC:
+                            _configuracion.StrMailZeusCc = paramSistema.Value;
+                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Mails zeus to '{paramSistema.Value}'");
+                            break;
+                    }
+                }
+
+                #endregion
+
+                int numeroProductos = await _productos.BuscaProductos(ct);
+
+                if (numeroProductos > 0)
+                {
+                    Config.EscribirLog($"INFO|Ejecuta_Procedimientos|Se encontraron {numeroProductos} productos a generar (Zeus->Files).");
+                    await _archivos.ProcesaArchivos(ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|Se presenta exception: {ex}");
+                throw;
+            }
+        }
+        #endregion
     }
-    catch (Exception ex) { await _operacionesDWH.MarcarErrorProcesoControl(rule.id_trabajo, rule.num_orden, ex.Message); }
 }
-Benefit: One bad catalogue row no longer stops all file generation, and the faulty rule is flagged with a reason.
-Suggested JIRA: ZF-FR-7 (Major, MustChange/rewrite).
-ZF-FR-8 - A job that fails before its completion update is retried on every tick with no terminal state, and generation is held back silently by global counters (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: SQL 006 ListarprocesosEjecutar:15-21 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/006%20SP%20MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar.sql#L15-L21) (no error filter), SQL 019 MarcarProcesoConError:12-20 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/019%20SP%20MUFG_MX2_ZeusFiles_MarcarProcesoConError.sql#L12-L20) (flags only), SQL 004 ConsultarRegsCtlProcesos_d_Pendientes:5-7 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/004%20SP%20MUFG_MX2_ZeusFiles_ConsultarRegsCtlProcesos_d_Pendientes.sql#L5-L7) (pending count by status only), Productos.cs:47-74 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Productos.cs#L47-L74) (the gate), SQL 002 ConsultarRegsCtlProcesos_d:5-7 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/002%20SP%20MUFG_MX2_ZeusFiles_ConsultarRegsCtlProcesos_d.sql#L5-L7), SQL 003 ConsultarRegsZeusReglasDat_d:5-8 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/003%20SP%20MUFG_MX2_ZeusFiles_ConsultarRegsZeusReglasDat_d.sql#L5-L8), SQL 020 ValidarFinalCarga:5-7 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/020%20SP%20MUFG_MX2_ZeusFiles_ValidarFinalCarga.sql#L5-L7), SQL 018 ComprobarArchivosFaltantes:8-11 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/018%20SP%20MUFG_MX2_ZeusFiles_ComprobarArchivosFaltantes.sql#L8-L11), Archivos.cs:288-302 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L288-L302), Archivos.cs:333-344 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L333-L344).
-Code block (sql)
--- 006: selected by status only
-WHERE Ctl.cve_estatus='3-FILE' AND Tbl.cve_producto=Ctl.cve_producto ...
--- 019: only flags; never changes the status
-UPDATE ctl_procesos_d SET flg_con_error=1, flg_error_alertado=0, des_error_descripcion=@mensajeerror ... AND flg_con_error=0
-Issue / impact: (1) *Retry until someone intervenes.* MarcarProcesoConError never changes the status, and both the job list (006) and the pending count (004) select by status 3-FILE only, so a job that fails before MarcarTerminados stays selected: each tick regenerates its file, repeats the data query, and writes the same ERROR with a full stack trace (a failure after MarcarTerminados leaves the job in 4-FIN, outside the list, ZF-FR-5). The flag update has AND flg_con_error = 0, so the first message is kept even if later attempts fail for another reason. At an interval of 5 seconds (illustration only; the configured value is not visible) that is up to 17,280 attempts a day for every failing job. (2) *Silent global barrier.* BuscaProductos returns 0, without a log line, whenever any job anywhere is in 0-CREA/1-DWH/2-ZEUS or any 1-DWH/2-ZEUS rule is unprocessed (002, 003), so an upstream job that never finishes stops all file generation without a trace. A flagged 3-FILE job does not stop the other jobs of the loop, but it keeps the end-of-run rules waiting (020 requires that no job anywhere is in 0-CREA..3-FILE), and through 018 the completion e-mail of its own id_trabajo waits for it as well. (3) The final pending-rule check (L333-344) logs an ERROR on every tick while any 3-FILE rule stays pending (see also ZF-FR-18).
-Recommended change: Give failures a terminal or back-off state: select only flg_con_error = 0 rows (or add an attempt counter and a next-attempt time) in procedures 004 and 006, record the latest message and an attempt count in MarcarProcesoConError, and provide an explicit re-queue action for operators. Log the blocked state once per transition with the blocking counts, and alert when it lasts longer than a threshold.
-Benefit: A poison job stops consuming database and log capacity, the failure is visible once and stays visible, and operators can see why generation is waiting.
-Suggested JIRA: ZF-FR-8 (Major, MustChange/rewrite).
-ZF-FR-9 - The completion e-mail lists the files with double-encoded HTML, and a failed send is only logged (Minor)
-Category: MustChange/rewrite Priority: Minor
-Evidence: Archivos.cs:374-386 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L374-L386) (the two encoding steps), AvisoEmail.html:71-73 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Plantillas/AvisoEmail.html#L71-L73) (the placeholder sits in a <span>), Archivos.cs:268-283 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L268-L283) (trigger and result), Archivos.cs:363-414 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L363-L414) (EnviarAviso), and the helper's failure behavior in CorreoHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Correo/CorreoHelper.cs#L86-L90).
-Code block (csharp)
-// Archivos.cs:374-386
-listaArchivos = listaArchivos.Replace("<", "&lt;").Replace(">", "&gt;").Replace(" ", "&nbsp;").Replace("\n", "<br>" + "\n");
-...
-string listaArchivos_ = WebUtility.HtmlEncode(listaArchivos);          // encodes the &nbsp; and <br> that were just added
-Issue / impact: The first step turns the listing into HTML and the second step encodes the & and < it just created, so the recipient reads file&nbsp;one.TXT<br> as visible text. The template puts the value in a <span>, not a <pre>, so the newlines also collapse and the files appear on one wrapped line. The double encoding arrived with the 2026-09-04 commits (develop only had the manual step). Separately, this message is the only operator-facing completion signal the service produces (the other is the 4-FIN status that the next stage reads), yet EnviarAviso returns 1 or 0 and its only use is the INFO line at L282: a failed send is not retried, alerted, or recorded (a missing template or any other exception inside EnviarAviso is only logged as an ERROR and gives 0, and a send failure inside the shared helper makes it return false), and the trigger is evaluated only after a job is processed, so a finished id_trabajo is not reconsidered. The template is loaded from the assembly folder (L367-369), so it must be deployed with the DLLs; if it is missing, EnviarAviso logs an ERROR and returns 0.
-Recommended change: Encode once and add the markup afterwards (or render a <pre> block or a table), log a failed send at WARN or ERROR and raise an alert, and keep a "notified" marker (or retry on the next tick) so a failed send is not lost. Ship the template as an embedded resource.
-Code block (csharp)
-string listaHtml = WebUtility.HtmlEncode(listaArchivos)
-    .Replace("\r\n", "\n").Replace("\n", "<br>");            // encode once, then add markup
-Benefit: The operators see a readable list of the generated files and notice when the completion message was not delivered.
-Suggested JIRA: ZF-FR-9 (Minor, MustChange/rewrite).
-Rewrite Recommended
-ZF-FR-10 - ProcesaArchivos is a 300-line method whose method-scoped state leaks between jobs (Major)
-Category: rewrite_recommended Priority: Major
-Evidence: Archivos.cs:50-66 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L50-L66) (method start and the locals shared by every job), Archivos.cs:127-134 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L127-L134) and Archivos.cs:139-147 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L139-L147) (the counters), Archivos.cs:154 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L154) and Archivos.cs:272 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L272) (the date), Archivos.cs:129-131 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L129-L131) (the wait list), and the method as a whole (L50-352).
-Code block (csharp)
-// Archivos.cs:63-64 and 127-134 - declared once per method, read in later iterations
-string listaProcPorTerminar = string.Empty;
-int intRegsProcPorTerminar = 0;
-...
-if (lstProcTerminar != null && lstProcTerminar.Count > 0) { intRegsProcPorTerminar = lstProcTerminar.Count; listaProcPorTerminar = string.Join(...); }
-if (intRegsProcPorTerminar > 0)            // stale value from a previous job takes this branch
-    Config.EscribirLog($"INFO|... esperar la terminación de los siguientes procesos ...: {listaProcPorTerminar}");
-else { ... }
-Issue / impact: Thirteen locals are declared at the top of the method (L54-66), outside the foreach, and are assigned only in some branches. (a) intRegsProcPorTerminar is set when the composite list is non-empty (L129) or from regs.num_regs (L140) and is never reset, so once either assignment stores a non-zero count every later job of the same tick sees it, takes the wait branch, is skipped until the next tick, and the previous job's list is printed. (b) The completion e-mail lists the folder with the method-scoped fechaProceso (L272), which is assigned only when a job is processed, so after a skipped job it holds the previous job's date, or the empty string, which lists the root folder, while the subject uses tarea.fecha_proceso. (c) The log lines at L142 and L147 print the same variable for two different counts. Today (a) is dormant because ZF-FR-3 keeps the composite list empty and ZF-FR-4 keeps the count at 0; fixing those two without this finding turns it on. The method also mixes rule handling, file production, the trailer, the notification, and the final rule pass, which is why little of it can be tested in isolation (ZF-FR-21).
-Recommended change: Extract ProcessJobAsync(tarea, ct) with its own locals and a result, plus RunInitialRulesAsync, WriteFileAsync (temporary file, trailer, move; ZF-FR-5), NotifyIfCompleteAsync, and RunFinalRulesAsync. Declare variables where they are used and pass values (date, file name) explicitly between steps.
-Code block (csharp)
-foreach (var tarea in listaProcesar)
+
+using AplicacionZeus_Files.Enums;
+using AplicacionZeus_Files.Interfaces;
+using AplicacionZeus_Files.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace AplicacionZeus_Files.Operaciones
 {
-    var jobResult = await ProcessJobAsync(tarea, ct);       // locals live and die inside this call
-    tick.Add(jobResult);
+    /// <summary>
+    /// Clase donde implementan métodos archivos
+    /// </summary>
+    public class Archivos
+    {
+        #region Propiedades
+
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IOperacionesDWH _operacionesDWH;
+
+        #endregion
+
+        #region Constructor
+
+        /// <summary>
+        /// Contructor de la case archivos
+        /// </summary>
+        /// <param name="configuracion">Inyección de la configuracíon</param>
+        /// <param name="operacionesDwh">Inyección del acceso a base de datos</param>
+        public Archivos(ConfiguracionModelo configuracion, IOperacionesDWH operacionesDwh)
+        {
+            _configuracion = configuracion;
+            _operacionesDWH = operacionesDwh;
+        }
+
+        #endregion
+
+        #region Métodos
+
+        /// <summary>
+        /// Función para Procesar los archivos de Zeus
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ProcesaArchivos(CancellationToken ct)
+        {
+            try
+            {
+                RegistrosModelo registros;
+                FileInfo oFile = null;
+                string strBuffer = string.Empty;
+                string strFechaArchivo = string.Empty;
+                string strZeus_file_name = string.Empty;
+                string strZeus_file = string.Empty;
+                string strZeus_fileResp = string.Empty;
+                string strZeus_file_noExt = string.Empty;
+                string fechaProceso = string.Empty;
+                long iFileSize = 0;
+                int iRegs = 0;
+
+                Config.EscribirLog("INFO|ProcesaArchivos|Inicio de procesa_Archivos.");
+
+                //Lista de Procesos a Realizar
+                List<ProcesosEjecutarModelo> listaProcesos = await _operacionesDWH.ListarProcesosEjecutar(Constantes.CLAVE_PROYECTO);
+
+                //Bsucams que no tenga repetido la misma tabla Zeus y el mismo archivo
+                List<ProcesosEjecutarModelo> listaProcesar = listaProcesos
+                                                            .GroupBy(x => new { x.des_proyecto_tabla, x.des_proyecto_files })
+                                                            .Select(g => g.First())
+                                                            .ToList();
+
+                //Lista de tareas de Queries de ajuste de datos solicitados por NY
+                List<TareasAjusteDtosModelo> listaTareasAjuste = await _operacionesDWH.ListarTareasAjusteDatos();
+
+
+                foreach (var item in listaTareasAjuste)
+                    item.des_query = item.des_query.Replace("$id_trabajo$", item.id_trabajo.ToString());
+
+                //Hay queries a realizar al INICIO antes de la realización de los procesos?
+                List<TareasAjusteDtosModelo> lstTareasInicio = listaTareasAjuste.Where(x => string.Equals(x.cve_momento,
+                                                                                                         Constantes.INI,
+                                                                                                         StringComparison.OrdinalIgnoreCase)).ToList();
+
+                if (string.IsNullOrWhiteSpace(_configuracion.StrRutaZeusEnvio))
+                    throw new InvalidOperationException("ERROR|ProcesaArchivos|No se encontro la ruta de StrRutaZeusEnvio.");
+
+                if (string.IsNullOrWhiteSpace(_configuracion.StrRutaZeusResp))
+                    throw new InvalidOperationException("ERROR|ProcesaArchivos|No se encontro la ruta de StrRutaZeusResp.");
+
+                if (string.IsNullOrWhiteSpace(_configuracion.StrMailZeusTo))
+                    throw new InvalidOperationException("ERROR|ProcesaArchivos|No se encontro la ruta de StrMailZeusTo.");
+
+                foreach (var queryAjuste in lstTareasInicio)
+                {
+                    try
+                    {
+                        //Marco el inicio del proceso de control
+                        registros = await _operacionesDWH.MarcarInicioFinProcesoControl(queryAjuste.id_trabajo, queryAjuste.num_orden);
+
+                        Config.EscribirLog($"INFO|ProcesaArchivos|QueryAjuste|Procesando: IdTrabajo: {queryAjuste.id_trabajo}, " +
+                            $"NumeroOrden: {queryAjuste.num_orden}, Producto: '{queryAjuste.cve_producto}', Tipo: '{queryAjuste.cve_tipo}', " +
+                            $"Tabla: '{queryAjuste.des_tabla}', Descripcion: '{queryAjuste.des_tabla}', SQL: *{queryAjuste.des_query}*.");
+
+                        Config.EscribirLog($"INFO|ProcesaArchivos|QueryAjuste|Número de registros procesados:  {registros.num_regs}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Config.EscribirLog($"ERROR|ProcesaArchivos|QueryAjuste|Se presenta exception: Procedimiento: '{ProcedimientoAlmacenado.sp_MarcarInicioFinProcesoControl}', Error:{ex}");
+                        await _operacionesDWH.MarcarErrorProcesoControl(queryAjuste.id_trabajo, queryAjuste.num_orden, ex.Message);
+                    }
+                }
+
+                //Valida si hay PreQueries pendientes de procesar
+                registros = await _operacionesDWH.ObtenerPreQueriesPendientes();
+                if (registros.num_regs > 0)
+                {
+                    Config.EscribirLog($"ERROR|ProcesaArchivos|QueryAjuste|Hay {registros.num_regs} reglas de ajustes de datos iniciales pendientes de realizar.");
+                    return false;
+                }
+
+                //Barrido de los Procesos a realizar
+                foreach (var tarea in listaProcesar)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    try
+                    {
+                        int registrosPorTerminar = 0;
+                        string listaProcPorTerminar = string.Empty;
+
+                        Config.EscribirLog($"INFO|ProcesaArchivos|Procesando: IdTrabajo: {tarea.id_trabajo}, Producto: '{tarea.cve_producto}', Tipo: '{tarea.cve_tipo}', " +
+                                            $"TipoLayout: '{(tarea.cve_producto == Constantes.GENERAL ? Constantes.GENERAL : Constantes.SALDO)}', Sistema: '{tarea.cve_sistema}'," +
+                                            $" FechaProceso: '{tarea.fecha_proceso}', TablaProyecto: '{tarea.des_proyecto_tabla}', Archivo:'{tarea.des_proyecto_files}'");
+
+                        //Busca por trabajos compuestos (ejemplo DEPOSITS y DEPOSITS_CH son un solo archivo y se debe esperar a que terminen ambos para escribir el archivo)
+                        var listaProcesosTerminar = await _operacionesDWH
+                                                            .BuscarTrabajosCompuestos(tarea.id_trabajo, tarea.cve_producto, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
+
+                        if (listaProcesosTerminar.Count > 0)
+                        {
+                            registrosPorTerminar = listaProcesosTerminar.Count;
+                            listaProcPorTerminar = string.Join(Environment.NewLine, listaProcesosTerminar.Select(x => $" - Producto: {x.cve_producto}, Tipo: {x.cve_tipo}, Sistema: {x.cve_sistema}"));
+                        }
+
+                        if (registrosPorTerminar > 0)
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Es necesario esperar la terminación de los siguientes procesos para escribir en archivo: {listaProcPorTerminar}");
+                        else
+                        {
+                            // Marca proceso(s) como terminado para aquellos que no tienen proyecto y se no escriben archivo pero complementarios la información de productos
+                            // (ej. FX_TRADE + FX_POSTING + FX_PRICER = FX, pero solo FX escribe archivo, con esto todos los productos terminaron la fase FILE)
+                            RegistrosModelo registrosModelo = await _operacionesDWH.MarcarTerminadosSinProyecto(tarea.id_trabajo, Constantes.CLAVE_PROYECTO);
+                            registrosPorTerminar = registrosModelo.num_regs;
+
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {registrosPorTerminar} registros como termino de proceso para trabajos generadores de productos.");
+
+                            // Marca proceso(s) como iniciado
+                            registrosModelo = await _operacionesDWH.MarcarProcesosInicio(tarea.id_trabajo, tarea.cve_producto, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
+
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {registrosPorTerminar} registros como inicio de proceso.");
+
+                            //Validaciones Especiales o Complementarias
+                            //Proceso Estandard
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Obteniendo la estructura en Zeus la tabla '{tarea.des_proyecto_tabla}'.");
+
+                            //Proceso creacion archivo
+                            fechaProceso = tarea.fecha_proceso.ToString();
+                            strFechaArchivo = ObtenerFechaFormato(fechaProceso, "MMddyyyy");
+                            strZeus_file_name = tarea.des_proyecto_files.Replace("$fecha_presentacion$", strFechaArchivo);
+                            strZeus_file_noExt = strZeus_file_name.Replace(".TXT", "");
+
+                            try
+                            {
+                                if (!Directory.Exists($"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\"))
+                                    Directory.CreateDirectory($"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\");
+
+                                if (!Directory.Exists($"{_configuracion.StrRutaZeusResp}{fechaProceso}\\"))
+                                    Directory.CreateDirectory($"{_configuracion.StrRutaZeusResp}{fechaProceso}\\");
+                            }
+                            catch (Exception ex)
+                            {
+                                Config.EscribirLog($"ERROR|ProcesaArchivos|Error: {ex}");
+                            }
+
+                            strZeus_fileResp = $"{_configuracion.StrRutaZeusResp}{fechaProceso}\\{strZeus_file_name}";
+                            strZeus_file = $"{_configuracion.StrRutaZeusEnvio}{fechaProceso}\\{strZeus_file_name}";
+
+                            string strZeus_fileTmp = $"{strZeus_file}.tmp";
+                            string strZeus_fileRespTmp = $"{strZeus_fileResp}.tmp";
+
+                            if (File.Exists(strZeus_fileTmp))
+                                File.Delete(strZeus_fileTmp);
+
+                            if (File.Exists(strZeus_fileRespTmp))
+                                File.Delete(strZeus_fileRespTmp);
+
+                            //Se obtiene la estructura de una tabla zeus
+                            List<EstructuraTablaZeusModel> tabla = await _operacionesDWH.ObtenerEstructuraTablaZeus(
+                                tarea.cve_producto,
+                                tarea.cve_tipo,
+                                tarea.cve_sistema,
+                                tarea.des_proyecto_tabla);
+
+                            if (tabla.Count == 0)
+                                throw new Exception($"No fue posible obtener la estructura en Zeus de la tabla '{tarea.des_proyecto_tabla}" +
+                                    $"', posiblemente la tabla no existe o no hay los permisos necesarios para obtener la información.");
+
+                            List<DatosArchivoModelo> datosZeus = await _operacionesDWH.ProcesoDatosArchivoModelo(
+                                tarea.cve_producto,
+                                tarea.cve_tipo,
+                                tarea.cve_sistema,
+                                tarea.des_proyecto_tabla,
+                                tarea.id_trabajo);
+
+                            iRegs = 0;
+                            using (StreamWriter writterPrincipal = new StreamWriter(strZeus_fileTmp, true, Encoding.ASCII))
+                            using (StreamWriter writterRespaldo = new StreamWriter(strZeus_fileRespTmp, true, Encoding.ASCII))
+                            {
+                                foreach (var datosZ in datosZeus)
+                                {
+                                    strBuffer = "";
+                                    strBuffer = datosZ.datos_archivo;
+
+                                    await EscribeArchivo(writterPrincipal, strBuffer);
+                                    await EscribeArchivo(writterRespaldo, strBuffer);
+
+                                    iRegs++;
+                                }
+                            }
+
+                            if (File.Exists(strZeus_file))
+                                File.Replace(
+                                    strZeus_fileTmp,
+                                    strZeus_file,
+                                    null);
+                            else
+                                File.Move(strZeus_fileTmp, strZeus_file);
+
+                            if (File.Exists(strZeus_fileResp))
+                                File.Replace(
+                                    strZeus_fileRespTmp,
+                                    strZeus_fileResp,
+                                    null);
+                            else
+                                File.Move(strZeus_fileRespTmp, strZeus_fileResp);
+
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Número de registros procesados: {iRegs}");
+                            iFileSize = 0;
+                            if (iRegs > 0)
+                            {
+                                try
+                                {
+                                    oFile = new FileInfo(strZeus_file);
+                                    iFileSize = oFile.Length;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Config.EscribirLog($"AVISO|ProcesaArchivos|No se pudo obtener información del tamaño del archivo {strZeus_file}, error: {ex}");
+                                }
+                            }
+
+                            //Marco Procesos como Terminados
+                            registrosModelo = await _operacionesDWH.MarcarTerminados(tarea.id_trabajo, Constantes.CLAVE_PROYECTO, iRegs, strZeus_file_noExt, iFileSize, tarea.des_proyecto_tabla, tarea.des_proyecto_files);
+
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Se marcaron {registrosModelo.num_regs} registros como termino de proceso.");
+                            //parte agregada para el TrailerRecord 
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Escribiendo Detalle a el Archivo {strZeus_file_name} con: {iRegs} al final del Archivo");
+
+                            List<TrailerRecordModelo> oTrailerRecordFinal = await _operacionesDWH.ObtenerDatosTrailerRecord(tarea.id_trabajo, strZeus_file_noExt);
+
+                            if (oTrailerRecordFinal != null && oTrailerRecordFinal.Count > 0)
+                            {
+                                string strTrailerRecordFinal = string.Empty;
+                                foreach (var _record in oTrailerRecordFinal)
+                                {
+                                    strTrailerRecordFinal = _record.Datos.Replace(":", "");
+                                }
+
+                                using (StreamWriter writterPrincipal = new StreamWriter(strZeus_file, true, Encoding.ASCII))
+                                using (StreamWriter writterRespaldo = new StreamWriter(strZeus_fileResp, true, Encoding.ASCII))
+                                {
+
+                                    await EscribeArchivo(writterPrincipal, strTrailerRecordFinal);
+                                    await EscribeArchivo(writterRespaldo, strTrailerRecordFinal);
+                                }
+                            }
+                        }
+
+                        Config.EscribirLog("INFO|ProcesaArchivos|Verificando si ya se Pueden emitir Archivos por SFTP");
+
+                        int iArchivosFaltantes = 0;
+                        registros = await _operacionesDWH.ComprobarArchivosFaltantes(tarea.id_trabajo);
+
+                        if (registros != null)
+                            iArchivosFaltantes = registros.Faltantes;
+
+
+                        if (iArchivosFaltantes == 0)
+                        {
+                            Config.EscribirLog("INFO|ProcesaArchivos|* * * * * * CREACION DE ARCHIVOS COMPLETA !!!!!!");
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Generando una lista de archivos de la ruta '{_configuracion.StrRutaZeusEnvio}'.");
+
+                            // Realizo la extracción de una visualización del mail
+                            string listadoArchivos = ConstruirListadoArchivos(_configuracion.StrRutaZeusEnvio, fechaProceso);
+
+                            Config.EscribirLog($"INFO|envia_Archivos|Proceso Ejecutado 'dir' {_configuracion.StrRutaZeusEnvio}, salida: \n {listadoArchivos}");
+                            int iResultado = 0;
+
+                            iResultado = await EnviarAviso(
+                                            tarea.id_trabajo,
+                                            tarea.fecha_proceso,
+                                            listadoArchivos);
+
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Envío email de archivos creados: {iResultado}");
+                        }
+                        else
+                            Config.EscribirLog($"INFO|ProcesaArchivos|Faltan: {iArchivosFaltantes} Registros de la Tabla de Control para Enviarse los Archivos");
+
+                    }
+                    catch (Exception ex)
+                    {
+                        Config.EscribirLog($"ERROR|ProcesaArchivos|Procesando idTrabajo: {tarea.id_trabajo}, claveProducto: {tarea.cve_producto}, claveTipo: {tarea.cve_tipo}," +
+                            $" ClaveSistema: {tarea.cve_sistema}. Se presenta exception: {ex} ");
+
+                        // Marco el Proceso como con error
+                        try
+                        {
+                            await _operacionesDWH.MarcarProcesoConError(tarea.id_trabajo, ex.Message, tarea.cve_producto, tarea.cve_tipo, tarea.cve_sistema);
+                        }
+                        catch (Exception ex2)
+                        {
+                            Config.EscribirLog($"ERROR|ProcesaArchivos|***** NO SE PUDO MARCAR ERROR EN id_trabajo={tarea.id_trabajo}, exception: {ex2.Message}");
+                        }
+                    }
+                }
+
+                // Verificar Si termino la Carga
+                iRegs = 0;
+                registros = await _operacionesDWH.ValidarFinCarga();
+
+                if (registros != null)
+                    iRegs = registros.num_regs;
+
+                if (iRegs == 0)
+                {
+                    foreach (var ajuste in listaTareasAjuste)
+                    {
+                        try
+                        {
+                            //Marco el inicio del proceso de control
+                            await _operacionesDWH.MarcarInicioControl(ajuste.id_trabajo, ajuste.num_orden, ajuste.des_query);
+
+                            Config.EscribirLog($"INFO|ProcesaArchivos|queryAjuste_FIN|" + $"IdTrabajo={ajuste.id_trabajo}, " + $"NumOrden={ajuste.num_orden}");
+                            Config.EscribirLog($"INFO|ProcesaArchivos|queryAjuste_FIN|Número de registros procesados:{iRegs}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Config.EscribirLog($"ERROR|ProcesaArchivos|queryAjuste_FIN|" + $"IdTrabajo={ajuste.id_trabajo}, " + $"NumOrden={ajuste.num_orden}, Error={ex.Message}");
+                            await _operacionesDWH.MarcarAjusteConError(ajuste.id_trabajo, ajuste.num_orden, ex.Message);
+                        }
+                    }
+                }
+
+                // Verificar si hay Pre-queries pendientes de procesar
+                iRegs = 0;
+                registros = await _operacionesDWH.ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlPrcZeusReglasDatD_Pendientes);
+
+                if (registros != null)
+                    iRegs = registros.num_regs;
+
+                if (iRegs > 0)
+                {
+                    Config.EscribirLog($"ERROR|ProcesaArchivos|queryAjuste|Hay {iRegs} reglas de ajustes de datos pendientes de realizar al final del proceso.");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ProcesaArchivos|Se presenta exception:{ex.Message}");
+                throw;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Función para Envíar el aviso de archivos por correo
+        /// </summary>
+        /// <param name="strMailZeusTo">Dirección de Correo a donde se va a enviar</param>
+        /// <param name="strMailZeusCc">Dirección de correo con copia</param>
+        /// <param name="id_trabajo">Id del trabajo</param>
+        /// <param name="fecha_proceso">Fecha del Proceso</param>
+        /// <param name="listaArchivos">Listado de los archivos generados</param>
+        /// <returns></returns>
+        private async Task<int> EnviarAviso(long id_trabajo, int fecha_proceso, string listaArchivos)
+        {
+            try
+            {
+                string rutaPlantilla = Path.Combine(
+                     Path.GetDirectoryName(typeof(Archivos).Assembly.Location),
+                    "Plantillas", "AvisoEmail.html");
+
+                if (!File.Exists(rutaPlantilla))
+                    throw new FileNotFoundException($"No se encontró la plantilla de correo {rutaPlantilla}");
+
+                string html = File.ReadAllText(rutaPlantilla, Encoding.UTF8);
+                string fechaProceso = WebUtility.HtmlEncode(fecha_proceso.ToString());
+                string asunto = $"{Constantes.SUBJECT} {fecha_proceso}";
+                string idTrabajo = WebUtility.HtmlEncode(id_trabajo.ToString());
+                string rutaZeusResp = WebUtility.HtmlEncode(_configuracion.StrRutaZeusResp);
+                string rutaZeusEnv = WebUtility.HtmlEncode(_configuracion.StrRutaZeusEnvio);
+
+                string listaArchivos_ = WebUtility.HtmlEncode(listaArchivos)
+                .Replace(" ", "&nbsp;")
+                .Replace(Environment.NewLine, "<br>");
+
+                html = html
+                    .Replace("{{FECHA_PROCESO}}", fechaProceso)
+                    .Replace("{{ID_TRABAJO}}", idTrabajo)
+                    .Replace("{{RUTA_ZEUS_RESP}}", rutaZeusResp)
+                    .Replace("{{RUTA_ZEUS_ENVIO}}", rutaZeusEnv)
+                    .Replace("{{LISTA_ARCHIVOS}}", listaArchivos_);
+
+                bool respuestaCorreo = await CorreoHelper.EnviarCorreo(
+                    new string[] { Constantes.MAIL_FROM },
+                    _configuracion.StrMailZeusTo,
+                    _configuracion.StrMailZeusCc,
+                    string.Empty,
+                    asunto,
+                    html);
+
+                if (respuestaCorreo)
+                    return 1;
+                else
+                    return 0;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|EnviaAviso|Ocurre exception: {ex}");
+            }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// Función para escribir el archivo en la carpeta de Zeus
+        /// </summary>
+        /// <param name="archivoNombre">Nombre del archivo</param>
+        /// <param name="texto">Contenido del archivo</param>
+        /// <returns></returns>
+        private Task EscribeArchivo(StreamWriter writter, string texto) =>  writter.WriteLineAsync(texto);
+
+        /// <summary>
+        /// Hace un parse a una fecha en un formato especifico
+        /// </summary>
+        /// <param name="fechaProceso"></param>
+        /// <param name="formato"></param>
+        /// <returns></returns>
+        /// <exception cref="ArgumentException"></exception>
+        private string ObtenerFechaFormato(string fechaProceso, string formato)
+        {
+            if (DateTime.TryParseExact(
+                fechaProceso, "yyyyMMdd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var fecha))
+            {
+                return fecha.ToString(formato);
+            }
+            else
+            {
+                throw new ArgumentException("La fecha no posee un formato válido");
+            }
+        }
+
+        /// <summary>
+        /// Construye el listado de archivos que se incorpora en el cuerpo del correo
+        /// </summary>
+        /// <param name="rutaBase"></param>
+        /// <param name="fechaProceso"></param>
+        /// <returns></returns>
+        private string ConstruirListadoArchivos(string rutaBase, string fechaProceso)
+        {
+            string rutaDirectorio = Path.Combine(rutaBase, fechaProceso);
+
+            if (!Directory.Exists(rutaDirectorio))
+                return $"No se encontró el directorio {rutaDirectorio}";
+
+            var archivos = Directory
+                .EnumerateFiles(rutaDirectorio, "*", SearchOption.TopDirectoryOnly)
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
+
+            var salida = new StringBuilder();
+            foreach (string archivo in archivos)
+            {
+                salida.AppendLine(Path.GetFileName(archivo));
+            }
+
+            return salida.Length > 0
+                ? salida.ToString()
+                : "No se encontraron archivos";
+        }
+
+        #endregion
+    }
 }
-Benefit: No state can cross from one job to the next, each step is testable, and the fixes for ZF-FR-3 and ZF-FR-4 can be delivered safely.
-Suggested JIRA: ZF-FR-10 (Major, rewrite_recommended).
-ZF-FR-11 - Cancellation tokens, command timeouts, and large result sets are not handled (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: IOperacionesDWH.cs:12-30 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Interfaces/IOperacionesDWH.cs#L12-L30) (no token on any method), Archivos.cs:50 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L50) and OperacionServicio.cs:54-60 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L54-L60) (one check at the start), OperacionServicio.cs:100 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L100) (ProcesaArchivos() without a token), the stop sequence at WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L129-L143), the default command at ConexionSqlServer.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/ConexionSqlServer.cs#L30-L33), DWHRepository.cs:438-453 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L438-L453) (the data query), and Archivos.cs:192-213 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L192-L213) (the full list is written line by line).
-Issue / impact: No repository method, Productos, or ProcesaArchivos accepts a CancellationToken; the orchestrator checks the token once, at the start (and then swallows the exception, ZF-FR-1). The shared adapters have token overloads that this solution never uses. On stop the host waits at most 60 seconds, then finalizes and disposes the container while a long generation may still be writing a file, so the process can end mid-write; the job is still 3-FILE and is regenerated after the restart. ProcesoDatosArchivoModelo returns every line of the file as a List<DatosArchivoModelo> (the whole file in memory), each line is awaited twice (two files, one of them on a network share according to the log text "Ruta de respaldo de archivo en red" at OperacionServicio.cs:78 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L78)), and no commandTimeout is passed, so the 30-second ADO.NET default applies to the largest query in the service; if a file's query takes longer the call fails, the job is flagged, and it is retried on every tick (ZF-FR-8). Volumes are unknown.
-Recommended change: Add a CancellationToken to IOperacionesDWH, Productos, and Archivos and call the adapters' token overloads; pass an explicit, configurable commandTimeout for the data query; stream the result (a reader or paging) instead of materializing it, and write the second copy by copying the finished file instead of interleaving two network-bound writers.
-Benefit: A stop is orderly, long extractions are not cut at 30 seconds, and memory use no longer grows with the file size.
-Suggested JIRA: ZF-FR-11 (Minor, rewrite_recommended).
-ZF-FR-12 - Replace the static obsolete logger and make the log lines accurate (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: 45 Config.EscribirLog calls (for example Archivos.cs:68 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L68), OperacionServicio.cs:73 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L73), Productos.cs:78 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Productos.cs#L78), DWHRepository.cs:55 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L55), ServiceHost.cs:131 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L131)) and one Logging.Write at ServiceHost.cs:88 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L88); the shim is [Obsolete] at Config.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/Config.cs#L11-L12). Inaccurate or noisy lines: OperacionServicio.cs:83 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L83) and OperacionServicio.cs:88 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L88) (the CC value is logged as "Mails zeus to"), Archivos.cs:93 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L93) (Descripcion prints des_tabla), Archivos.cs:119-121 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L119-L121) (the logged TipoLayout is derived from cve_producto, while procedure 006 derives the layout type from cve_tipo), Archivos.cs:142 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L142) and Archivos.cs:147 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L147) (one variable, two meanings), Archivos.cs:323 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L323) (iRegs is 0 inside if (iRegs == 0)), Archivos.cs:348 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L348) (ex.Message only), OperacionServicio.cs:72-88 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L72-L88) (up to four INFO lines per tick), and Archivos.cs:91-93 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L91-L93) and Archivos.cs:321-322 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L321-L322) (rule SQL).
-Issue / impact: The classes write through a static, obsolete shim with hand-typed level prefixes, so output is hard to assert in tests and the solution mixes two logging APIs. Several messages say something other than what happened (the list above). Up to four INFO lines per tick (one per parameter row returned) re-log the paths and the recipients' addresses before the product check, so also when there is nothing to do, which at a short interval is tens of thousands of identical lines a day. Rule SQL is logged verbatim at INFO and its content is not visible in this repository.
-Recommended change: Inject the shared Logging facade (or an ILogger wrapper) into OperacionServicio, Productos, Archivos, and DWHRepository; log the parameters once at startup or when they change; log exceptions in full; correct the labels and print real counts; log a rule's order and id (SQL only at DEBUG).
-Benefit: Logs can be trusted and tested, the per-tick noise disappears, and rule text is no longer copied into INFO logs.
-Suggested JIRA: ZF-FR-12 (Minor, rewrite_recommended).
-Nice to Rewrite if Time Permits
-ZF-FR-13 - Small naming, documentation, and hygiene items (Minor)
-Category: NiceToRewrite_ifTimePermits Priority: Minor
-Evidence: Constantes.cs:9 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Enums/Constantes.cs#L9) (hard-coded sender), Archivos.cs:157 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L157) (.TXT removal), Archivos.cs:83 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L83) and Archivos.cs:442 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L442) (current-culture calls), Archivos.cs:182-190 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L182-L190) (the structure is fetched only for its Count), Archivos.cs:205-206 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L205-L206) (redundant assignment), stale XML documentation at Archivos.cs:357-358 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L357-L358), Archivos.cs:419 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L419), DWHRepository.cs:24 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L24), and ServiceHost.cs:44 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L44), typos at Archivos.cs:32 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L32) and Archivos.cs:73 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L73), and naming at IOperacionesDWH.cs:12 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Interfaces/IOperacionesDWH.cs#L12), Constantes.cs:6 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Enums/Constantes.cs#L6), and ProcedimientoAlmacenado.cs:6 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Enums/ProcedimientoAlmacenado.cs#L6).
-Issue / impact: None of these is a defect today. The sender address avisos_zeus@mx.mufg.jp is a constant, although the recipients are database parameters. strZeus_file_name.Replace(".TXT", "") is case-sensitive and removes every occurrence. ToUpper() and fecha.ToString(formato) use the current culture (invariant would remove any doubt). The table structure fetched at L182 is used only to check that it is not empty, because the lines now come from the procedure (ZF-FR-19). EnviarAviso documents two parameters it does not have, EscribeArchivo documents archivoNombre instead of the writer, the repository constructor documents alertaT, and one summary ends with a stray |. The comments contain "Bsucams" and "Contructor". IOperacionesDWH.ParametrosSistema() has the name of the ParametrosSistema enum, Constantes and ProcedimientoAlmacenado are non-static classes that hold only constants, most model properties are snake_case, and parameter casing alternates between id_trabajo, IdTrabajo, and claveProducto.
-Recommended change: Move the sender to a parameter, use Path.GetFileNameWithoutExtension, StringComparison.OrdinalIgnoreCase, and CultureInfo.InvariantCulture, replace the unused structure call by a lighter existence check or remove it, make the constant classes static, and correct the documentation and names in the same pass as the other work on these files.
-Benefit: Less friction when reading and reviewing, and no hidden culture dependency.
-Suggested JIRA: ZF-FR-13 (Minor, NiceToRewrite_ifTimePermits).
-4.2 InfraestructuraZeus_Files (Tier 1)
-MustChange / Rewrite
-ZF-FR-14 - The parameter load and the four state-marking writes ignore Exito, so a failure looks like an empty configuration or a successful write (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: DWHRepository.cs:37-63 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L37-L63) (the load, with the check at L48), DWHRepository.cs:335-345 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L335-L345), DWHRepository.cs:368-376 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L368-L376), DWHRepository.cs:385-401 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L385-L401), and DWHRepository.cs:410-425 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L410-L425) (the writes); the Data default at StoredProcedureResult.cs:29-32 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Modelos/DBs/StoredProcedureResult.cs#L29-L32); the adapters at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L390) and lines 909-920 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L909-L920); the caller's own handler at Archivos.cs:294-301 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L294-L301).
-Code block (csharp)
-// DWHRepository.cs:40-48
-var result = await EjecutarStoredProcedureQuery<ParametrosModelo>(ProcedimientoAlmacenado.sp_Parametros_Sistema, cmd => { ... });
-if (result.Data == null) return new Dictionary<string, string>();       // Data is an empty list by default; a SqlException leaves Exito=false and that empty list
- 
-// DWHRepository.cs:335-345 (same shape in MarcarInicioControl and MarcarAjusteConError)
-await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarProcesoConError, cmd => { ... });   // result dropped
-Issue / impact: StoredProcedureResult<T> initializes Data to an empty list and the query adapter's SQL-error path leaves it intact, so the Data == null guard cannot fire for this adapter. A SqlException while reading the parameters leaves Exito = false (the query adapter does not log it), the method returns an empty dictionary, and OperacionServicio carries on with null paths (ZF-FR-6). The other 15 readers throw, which is the right pattern. The three non-query writes (MarcarProcesoConError, MarcarInicioControl, MarcarAjusteConError) call the adapter that turns any exception raised while it opens the connection and runs the procedure, other than a cancellation or a ResultadoStoredProcedureException, into Exito = false without a log, and the repository never reads the result. MarcarErrorProcesoControl uses the query adapter and drops its result too. The try/catch in MarcarErrorProcesoControl cannot see a SqlException, the one in MarcarAjusteConError cannot see an exception raised while the adapter runs the procedure, except a cancellation or a ResultadoStoredProcedureException, and the caller's nested handler ("NO SE PUDO MARCAR ERROR", Archivos.cs:294-301 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L294-L301)) therefore never reports these failures. A SQL failure while flagging a failed job, running a final rule (ZF-FR-18), or flagging a failed rule is therefore invisible: no log, no exception, no alert. On develop the repository at least returned a Boolean that no caller read; the review commits removed it.
-Recommended change: Route every adapter call through one private helper that throws a typed exception carrying the procedure name, the SQL number, and the inner exception, and use it for the parameter load and for all writes; for flag writes, log at ERROR when the flag itself could not be written, so operators can see it.
-Code block (csharp)
-private static void EnsureSuccess(StoredProcedureResult result, string procedure)
+
+using AplicacionZeus_Files.Enums;
+using AplicacionZeus_Files.Interfaces;
+using AplicacionZeus_Files.Modelos;
+using MUFG_T24.Comunes;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace AplicacionZeus_Files.Operaciones
 {
-    if (!result.Exito)
-        throw new DwhException(procedure, result.MensajeError, result.Exception);   // keeps the SqlException
+    /// <summary>
+    /// Clase que implementa los métodos de productos
+    /// </summary>
+    public class Productos
+    {
+        #region Propiedades
+
+        private readonly IOperacionesDWH _OperacionesDWH;
+
+        #endregion
+
+        #region Constructor
+
+        /// <summary>
+        /// Constructor de la clase
+        /// </summary>
+        /// <param name="operacionesDwh"></param>
+        public Productos(IOperacionesDWH operacionesDwh)
+        {
+            _OperacionesDWH = operacionesDwh;
+        }
+
+        #endregion
+
+        #region Métodos
+
+        /// <summary>
+        /// Método que implementa la busqueda de productos
+        /// </summary>
+        /// <returns></returns>
+        public async Task<int> BuscaProductos(CancellationToken ct)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                int pendientes = 0;
+                int iRegs = 0;
+
+                RegistrosModelo regsCtlProceso = await _OperacionesDWH
+                    .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlProcesoD);
+
+                RegistrosModelo regsZeusreglas = await _OperacionesDWH
+                    .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlPrcZeusReglasDatD);
+
+                if (regsCtlProceso != null)
+                    pendientes = regsCtlProceso.num_regs;
+
+                if (regsZeusreglas != null)
+                    pendientes += regsZeusreglas.num_regs;
+
+                if (pendientes == 0)
+                {
+                    RegistrosModelo regsCtlProcesoPend = await _OperacionesDWH
+                        .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlProcesoD_Pendientes);
+
+                    RegistrosModelo regsZeusreglasPend = await _OperacionesDWH
+                        .ConsultarRegistrosSP(ProcedimientoAlmacenado.sp_ConsultarRegistrosCtlPrcZeusReglasDatD_Pendientes);
+
+                    if (regsCtlProcesoPend != null)
+                        iRegs = regsCtlProcesoPend.num_regs;
+
+                    if (regsZeusreglasPend != null)
+                        iRegs += regsZeusreglasPend.num_regs;
+                }
+
+                return iRegs;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|BuscaProductos|Se presentó una excepción {ex}");
+                throw;
+            }
+        }
+
+        #endregion
+    }
 }
- 
-var write = await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarProcesoConError, cmd => { ... });
-EnsureSuccess(write, ProcedimientoAlmacenado.sp_MarcarProcesoConError);
-Benefit: A database fault is reported where it happens instead of turning into a wrong configuration or a state change that never took place.
-Suggested JIRA: ZF-FR-14 (Major, MustChange/rewrite).
-Rewrite Recommended
-ZF-FR-15 - Make the repository contract explicit: named operations, typed exceptions, no dead executor (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: IOperacionesDWH.cs:13 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Interfaces/IOperacionesDWH.cs#L13) and DWHRepository.cs:70-78 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L70-L78) (ConsultarRegistrosSP(string)), the five call sites at Productos.cs:47-65 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Productos.cs#L47-L65) and Archivos.cs:335 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L335), DWHRepository.cs:245-256 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L245-L256) (EjecutarDatosArchivo, absent from the interface), the 15 ArgumentException throws in the repository (for example DWHRepository.cs:77 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L77), DWHRepository.cs:95 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L95), DWHRepository.cs:129 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L129)), and DWHRepository.cs:385-401 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L385-L401) (a query adapter used for an update-only procedure).
-Issue / impact: The interface lets callers pass any procedure name; today every call site passes a constant, so it is a leaky abstraction rather than a vulnerability. EjecutarDatosArchivo and the constant sp_ConsultaDatosArchivo have no caller since the review commits (the method is not on IOperacionesDWH), but the generic executor procedure behind them still exists in the SQL project (ZF-FR-20). Database failures are thrown as ArgumentException, which describes a caller error, and the inner SqlException that result.Exception holds is dropped, so callers can tell a timeout or a deadlock from a missing procedure only by parsing the message text. MarcarErrorProcesoControl goes through the query adapter although its procedure only updates, so the shared adapter writes a WARN line ("El SP no afectó filas ni devolvió resultados") on every call. Counts travel as RegistrosModelo, a DTO with two unrelated fields (num_regs, Faltantes), and eight methods return FirstOrDefault(), which is null for an empty result and forces every caller to remember a check. Several lines end with a double semicolon (for example DWHRepository.cs:77 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L77)).
-Recommended change: Replace ConsultarRegistrosSP(string) with named methods (ContarTrabajosEnCurso, ContarTrabajosPendientes, ContarReglasEnCurso, ContarReglasPendientes), return int for counts, introduce one DwhException, delete EjecutarDatosArchivo and the dead constant, and use the non-query adapter for procedure 009.
-Benefit: The data-access layer says what it does, failures keep their cause, and the dead executor is gone from both layers.
-Suggested JIRA: ZF-FR-15 (Minor, rewrite_recommended).
-4.3 Zeus_Files - Windows Service host (Tier 2)
-MustChange / Rewrite
-ZF-FR-16 - Startup and shutdown discard the service-state results and log success regardless (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ServiceHost.cs:118-121 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L118-L121) (startup), ServiceHost.cs:181 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L181) and ServiceHost.cs:184 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L184) (shutdown), ServiceHost.cs:186 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L186) (success line); the contracts at ControlServicio.cs:50-65 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L50-L65) (MarcarPuertoEnUsoAsync returns false for a failed update or a cancellation) and IControlServicio.cs:17 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Parametrizacion/IControlServicio.cs#L17) and IControlServicio.cs:24-25 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Parametrizacion/IControlServicio.cs#L24-L25) (ActualizaTerminacion returns a StoredProcedureResult).
-Code block (csharp)
-// ServiceHost.cs:118-121 and 181-186
-await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, ...);        // bool dropped
-...
-await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
-await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);   // result dropped
-Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");                // logged whatever happened
-Issue / impact: The three calls report failure through their return values, and the host awaits all three and drops them. A startup that could not register the PID and port continues and runs ticks while the monitoring row stays stale or points to a previous process. A shutdown that could not clear the port or record the termination logs "Terminación exitosa". Any monitoring or overlap logic that reads these rows works on wrong data, with nothing in the log to explain it.
-Recommended change: Fail fast at startup when the registration returns false, and on shutdown log WARN or ERROR with the actual results and write the success line only when everything succeeded. Alternatively, the typed MarcarPuertoEnUsoConResultadoAsync throws the captured exception, or an OperacionNoExitosaException that carries the message and state, when the update fails, instead of the Boolean wrapper that hides them.
-Code block (csharp)
-if (!await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso,
-        _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, cancellationToken))
-    throw new InvalidOperationException("The service state could not be registered.");
- 
-bool puerto = await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, nombre, cleanupCt);
-var fin = await _controlServicio.ActualizaTerminacion(nombre, cleanupCt);
-if (puerto && fin.Exito) Logging.Info("OnStop|Termination recorded."); else Logging.Warn("OnStop|Termination not fully recorded.");
-Benefit: The service state recorded in the database can be trusted, and a startup problem is reported instead of hidden.
-Suggested JIRA: ZF-FR-16 (Major, MustChange/rewrite).
-Rewrite Recommended
-ZF-FR-17 - Host hygiene: obsolete configuration API, log-size unit, unused registrations, no per-tick record or alert, cancellation logged as ERROR (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: ServiceHost.cs:73-74 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L73-L74) (two ConfiguracionEncriptadaHelper calls, obsolete at ConfiguracionEncriptadaHelper.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/ConfiguracionEncriptadaHelper.cs#L11-L21)), ServiceHost.cs:87 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L87) (Logging.Init with a value named ...KB, whose parameter is maxMb at Logging.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L32-L41)), ServiceHost.cs:92 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L92) and ServiceHost.cs:94 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L94) (registrations), ServiceHost.cs:141-156 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L141-L156) (the tick), ServiceHost.cs:152-155 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L152-L155) (catch-all), ServiceHost.cs:36 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L36) (interval fallback), and the IAlertas registration at ServiceHost.cs:62-63 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L62-L63).
-Issue / impact: (1) Both configuration calls are [Obsolete] shims and compile with warnings. (2) Logging.Init multiplies its argument by 1,024, so if TamanoMaximoArchivoLogKB really holds kilobytes the cap is 1,024 times larger than intended (the configuration unit is not visible; confirm). (3) Configuracion (scoped) and EstadoHorarioOperacion (singleton) are registered but nothing resolves them. (4) The service's own code never inserts an alert (its only notification is the completion e-mail; the shared ControlServicio can insert one when a service-state update throws): IAlertas is registered only because the shared ControlServicio needs it, OnTimerAsync never calls ActualizaEJecucion, ActualizaTerminacion, or InsertarAlerta, and errors are only logged, so failed or blocked jobs depend on the unknown consumer of flg_error_alertado (see the confirmation list). (5) The catch-all at L152-155 logs every exception that reaches it as an ERROR, cancellation included, and the orchestrator's own catch-all does the same for a cancellation seen at the start of a tick (ZF-FR-1), so a stop that races with a tick start is logged as a failure. (6) The ?? 5000 fallback applies only to a null interval, which Inicializacion never leaves (it assigns an int).
-Recommended change: Use ObtencionConfguracionGeneral (the non-obsolete class named in the obsolete messages), pass the size in the unit the parameter expects, remove the unused registrations, record each tick's outcome through the shared lifecycle calls, raise one alert per failure transition (ZF-FR-1, ZF-FR-8), and let a cancellation propagate from the orchestrator and filter it in OnTimerAsync.
-Benefit: Fewer warnings and surprises at the next shared-library migration, bounded log files, and failures that reach a person.
-Suggested JIRA: ZF-FR-17 (Minor, rewrite_recommended).
-4.4 Solution-wide: SQL contract, tests, and build
-MustChange / Rewrite
-ZF-FR-18 - MarcarInicioControl and MarcarAjusteConError are called with @idtrabajo, but both procedures declare @idttrabajo (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: DWHRepository.cs:368-376 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L368-L376) (the argument at L372) and DWHRepository.cs:410-425 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L410-L425) (at L416); the declarations at SQL 021 MarcarInicioControl:1-7 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/021%20SP%20MUFG_MX2_ZeusFiles_MarcarInicioControl.sql#L1-L7) and SQL 022 MarcarAjusteConError:1-7 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/022%20SP%20MUFG_MX2_ZeusFiles_MarcarAjusteConError.sql#L1-L7), and their bodies at SQL 021 MarcarInicioControl:13-29 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/021%20SP%20MUFG_MX2_ZeusFiles_MarcarInicioControl.sql#L13-L29) and SQL 022 MarcarAjusteConError:11-15 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/022%20SP%20MUFG_MX2_ZeusFiles_MarcarAjusteConError.sql#L11-L15); both are Build items at DBMDW.sqlproj:1471-1472 (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1471-L1472); the silent adapter at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L909-L920); the caller's log lines at Archivos.cs:321-323 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L321-L323).
-Code block (csharp)
-// DWHRepository.cs:372 and :416
-cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
-Code block (sql)
--- 021 and 022
-CREATE OR ALTER PROCEDURE dbo.MUFG_MX2_ZeusFiles_MarcarInicioControl ( @idttrabajo BIGINT, @numorden INT, @sqlquery VARCHAR(MAX) )
-Issue / impact: ADO.NET sends parameters by name, and SQL Server rejects a name the procedure does not declare ("@idtrabajo is not a parameter for procedure ...", error 8145; the declared @idttrabajo is also not supplied). By reading the tracked scripts, the execution of the final rules (021) and the flagging of a failed rule (022) are expected to fail every time. The shared non-query adapter turns the error into Exito = false without a log (ZF-FR-14) and the C# loop then logs "queryAjuste_FIN|Procesando ..." (L321-323), so the log suggests that the rule ran. The rules stay PEND, so (a) no final adjustment SQL runs, and (b) every later tick finds pending rules: BuscaProductos keeps returning a positive count and ProcesaArchivos runs again, logs the ERROR at Archivos.cs:342 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L342), and returns false each time (ZF-FR-8). The other nine procedures that take the job id declare @idtrabajo or @id_trabajo exactly as the C# sends it, and develop already sent the same @idtrabajo, so the C# side of the mismatch is not a regression of the review commits. If the deployed procedures were corrected by hand, the scripts are wrong; if not, the final rules do not run in that environment.
-Recommended change: Rename the parameter in both scripts to @idtrabajo, redeploy, and add a contract test that compares the parameter names the C# sends with sys.parameters of the deployed procedure; check Exito for these calls (ZF-FR-14).
-Benefit: The final adjustment rules and their error flags work, and the repeated pending-rule ERROR disappears.
-Suggested JIRA: ZF-FR-18 (Major, MustChange/rewrite).
-ZF-FR-19 - The procedure that builds every output line has no tracked definition (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ProcedimientoAlmacenado.cs:30 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Enums/ProcedimientoAlmacenado.cs#L30) (the constant), DWHRepository.cs:438-453 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L438-L453) (the call and its five parameters), Archivos.cs:192-197 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L192-L197) (the call site), the Build items at DBMDW.sqlproj:1450-1472 (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1450-L1472) (23 scripts, none with this name), SQL 015 DatosArchivoConsulta:8-9 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/015%20SP%20MUFG_MX2_ZeusFiles_DatosArchivoConsulta.sql#L8-L9) (the old executor that develop fed with SQL built in C#), and Archivos.cs:182-190 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L182-L190) (the structure lookup that is now only an existence check).
-Issue / impact: MUFG_MX2_ZeusFiles_ProcesoDatosArchivoModelo is called for every file with @pClaveProducto, @pCLaveTipo, @pClaveSistema, @pTablaZeus, and @pIdTrabajo, and it returns the datos_archivo rows that the C# writes verbatim as the data lines of the file. It is defined nowhere in the SQL repository (a decode-aware search of 1,297 text files found no occurrence of the name). The repository holds only DatosArchivoConsulta, the generic executor that develop used. A database rebuilt from the SQL project is therefore expected to fail every job at this call ("Could not find stored procedure"), the job is flagged and retried on every tick (ZF-FR-8), and nobody can review or test the layout logic: whatever pads, aligns, and formats the columns must be in that procedure because the C# writes the returned text as it is, which is where GEN-12 risks live. After the review commits the C# no longer formats anything itself, so the one component that decides the content of the files is outside source control.
-Recommended change: Script the deployed definition from the DWH database into the Zeus_Files procedure folder (023 SP ...), add it to DBMDW.sqlproj, and review it (set-based, SET NOCOUNT ON, TRY/CATCH with THROW, no dynamic SQL built from table data, explicit formatting culture, decimal handling). Add a CI check that fails when a procedure constant in ProcedimientoAlmacenado has no script, and golden-file tests on a small table.
-Benefit: The system can be rebuilt and reviewed from source, and the file layout logic is tested like any other code.
-Suggested JIRA: ZF-FR-19 (Major, MustChange/rewrite).
-ZF-FR-20 - SQL text from data tables is executed with EXEC without validation, a transaction, or an audit trail, and a generic executor procedure remains in the SQL project (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: SQL 021 MarcarInicioControl:13-29 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/021%20SP%20MUFG_MX2_ZeusFiles_MarcarInicioControl.sql#L13-L29) (the EXEC at L21), SQL 015 DatosArchivoConsulta:8-9 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/015%20SP%20MUFG_MX2_ZeusFiles_DatosArchivoConsulta.sql#L8-L9) (generic executor), SQL 001 ObtenerParametrosSistema:9-15 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/001%20SP%20MUFG_MX2_Comun_ObtenerParametrosSistema.sql#L9-L15) (concatenated IN list), Archivos.cs:77-80 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L77-L80) (the only transformation of the text), DWHRepository.cs:245-256 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L245-L256) (the unused caller), and the verbatim logging at Archivos.cs:91-93 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L91-L93) and Archivos.cs:321-322 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L321-L322).
-Code block (sql)
--- 021
-EXEC(@sqlquery);                                          -- cat_zeus_reglas_datos.des_query, no validation
-UPDATE ctl_prc_zeus_reglas_dat_d SET cve_estatus='PROC' ...   -- separate statement, no TRY/CATCH, no transaction
--- 015
-IF(@sqlQuery <> '') EXEC(@sqlQuery);
--- 001
-SET @sql = N' SELECT Id_parametro, des_valor FROM cat_parametros_generales WHERE id_parametro IN (' + @strParametros + N') ';
-Issue / impact: Procedure 021 runs the text of cat_zeus_reglas_datos.des_query (the C# only replaces $id_trabajo$ with a number) and then marks the rule PROC. There is no TRY/CATCH, no XACT_ABORT, no transaction around the rule and its status update, no allow-list or approval step, and no audit of the executed text or the affected rows beyond the INFO log. (1) Anyone who can write the catalogue and control tables can run arbitrary T-SQL as the service's database identity, a second-order injection path by design; the real exposure depends on who holds write permission, which is not visible. (2) If a multi-statement rule fails midway the rule stays PEND after partial effects, and the next tick executes it again, so a non-idempotent adjustment (for example one that adds to an amount) can be applied twice; the 30-second command timeout (ZF-FR-11) can also cut a long rule after part of its work. (3) The rule text is logged verbatim. Procedure 015 is a generic EXEC(@sqlQuery) with only an empty check; the review commits left it without any C# caller (EjecutarDatosArchivo has no call site and is not on the interface), so it is an unused remote-SQL endpoint that still builds in the SQL project. Procedure 001 concatenates its argument into the IN list and runs it with sp_executesql; it is safe for this client only because the client passes enum names, but it is a shared Comun procedure that accepts any text.
-Recommended change: Restrict write permission on the rule tables to a controlled role and document the approval process. Execute each rule in a procedure with SET XACT_ABORT ON, BEGIN TRY and a transaction, return @@ROWCOUNT, mark PROC only on commit, and in CATCH roll back, record the message, and THROW. Prefer named procedures or parameterized templates over free SQL, log the rule's order and a hash rather than its text, drop procedure 015 and the C# method, and replace procedure 001 with STRING_SPLIT or a table-valued parameter.
-Benefit: A rule is applied exactly once or not at all, the executed adjustments are auditable, and the free-SQL attack surface shrinks to what the business actually needs.
-Suggested JIRA: ZF-FR-20 (Major, MustChange/rewrite).
-ZF-FR-21 - There are no automated tests, and the orchestrator has no seams to add them (Major)
-Category: MustChange/rewrite Priority: Major
-Evidence: ZEUS/ZeusFiles/Zeus_Files.sln:6-10 (../../ZEUS/ZeusFiles/Zeus_Files.sln#L6-L10) (three projects, no test project), the scan results (no test framework reference, no test attribute), OperacionServicio.cs:21-24 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L21-L24) (the concrete Productos and Archivos are injected), and the direct static calls in Archivos.cs:161-165 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L161-L165), Archivos.cs:200-201 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L200-L201), Archivos.cs:395-401 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L395-L401), and the 45 Config.EscribirLog calls (ZF-FR-12).
-Issue / impact: None of the logic that decides what is written, marked, and sent is under test: composite handling, rule order, date and file-name handling, the trailer, completion detection, the e-mail, and the failure flags. It is also hard to test: Archivos calls File, Directory, StreamWriter, CorreoHelper, and Config directly, and OperacionServicio depends on the concrete Productos and Archivos (develop had IOperacionServicio and IOperacionesTomi; the review commits deleted them). The defects of ZF-FR-3 and ZF-FR-4 are the kind a fake repository would have exposed immediately.
-Recommended change: Add an MSTest and Moq project as in the sibling solutions, introduce IFileSystem, IMailNotifier, ILogger, and interfaces for Productos and Archivos, and start with tests that pin the behavior this review found:
-1. BuscaProductos returns 0 while an upstream job exists and the pending count when none does (and, after ZF-FR-1, a distinct blocked state).
-2. The composite and start calls receive Constantes.CLAVE_PROYECTO (ZF-FR-3).
-3. Two jobs in one tick are both processed (ZF-FR-10).
-4. A missing RUTA_ZEUS_ENVIO fails the tick before any file is created (ZF-FR-6).
-5. The trailer is appended before the status change, and zero, one, and several trailer rows are handled as the confirmed file contract requires (ZF-FR-5 proposes exactly one).
-6. MarcarTerminados returning 0 rows is a failure (ZF-FR-4).
-7. A rule with a NULL query is flagged and the other rules still run (ZF-FR-7).
-8. INI rules run first and FIN rules run only after the load finished (ZF-FR-2).
-9. The e-mail body is encoded exactly once (ZF-FR-9).
-10. Cancellation propagates and is reported as cancelled (ZF-FR-1, ZF-FR-11).
-Benefit: The behavior that moves files to New York is protected against regressions, and the refactoring of ZF-FR-10 can be done safely.
-Suggested JIRA: ZF-FR-21 (Major, MustChange/rewrite).
-ZF-FR-22 - Absolute D:\ServiceCMS references make the solution unbuildable unless those files exist at those paths (Blocker)
-Category: MustChange/rewrite Priority: Blocker
-Evidence: AplicacionZeus_Files.csproj:52-54 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/AplicacionZeus_Files.csproj#L52-L54), InfraestructuraZeus_Files.csproj:52-54 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/InfraestructuraZeus_Files.csproj#L52-L54), Zeus_Files.csproj:74-79 (../../ZEUS/ZeusFiles/Zeus_Files/Zeus_Files.csproj#L74-L79); no nuget.config or packages.config exists in the repository, and D:\ServiceCMS\MUFG_T24.dll is absent on the audit machine.
-Code block (xml)
-<Reference Include="MUFG_T24">
-  <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
-</Reference>
-<Reference Include="SimpleInjector">
-  <HintPath>D:\ServiceCMS\SimpleInjector.dll</HintPath>
-</Reference>
-Issue / impact: All three projects reference MUFG_T24.dll by an absolute path and the host also references SimpleInjector.dll that way (four references). A clean checkout cannot compile unless the referenced files exist at those paths. A successful build also depends on that folder holding the intended binaries, and nothing records which build of MUFG_T24.dll the solution was built against; if (as the folder name and GEN-1 suggest) that folder is also where the shared services are deployed, a rebuild silently picks up whatever is deployed there. This is the portfolio-wide pattern of GEN-1; on the audit machine the path does not exist, so the references cannot resolve.
-Recommended change: Publish MUFG_T24 as a versioned package on an internal feed and take SimpleInjector from NuGet, replace the HintPath entries with PackageReference (or packages.config) entries, pin the versions, and document the feed in the README. Until the feed exists, define one $(ServiceCmsDir) property in a Directory.Build.props so the path lives in one place.
-Benefit: Reproducible builds on any machine, traceable dependency versions, and a CI build becomes possible.
-Suggested JIRA: ZF-FR-22 (Blocker, MustChange/rewrite).
-Rewrite Recommended
-ZF-FR-23 - SQL project hygiene: duplicate build item, non-idempotent scripts, misspelled names, no error handling, narrow parameter types (Minor)
-Category: rewrite_recommended Priority: Minor
-Evidence: DBMDW.sqlproj:1453-1455 (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1453-L1455) (three Build items for two procedure names), SQL 004 ConsultarRegsCtlProcesos_d_Pendientes:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/004%20SP%20MUFG_MX2_ZeusFiles_ConsultarRegsCtlProcesos_d_Pendientes.sql#L1) and SQL 005 ConsultarRegsZeusReglasDat_d_Pendientes:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/005%20SP%20MUFG_MX2_ZeusFiles_ConsultarRegsZeusReglasDat_d_Pendientes.sql#L1) (the plain CREATE scripts) and SQL 004 ConsultarRegsZeusReglasDat_d_Pendientes:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/004%20SP%20MUFG_MX2_ZeusFiles_ConsultarRegsZeusReglasDat_d_Pendientes.sql#L1) (the CREATE OR ALTER script that 005 duplicates), SQL 006 ListarprocesosEjecutar:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/006%20SP%20MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar.sql#L1), SQL 007 ListarTareasAjusteDatos:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/007%20SP%20MUFG_MX2_ZeuzFiles_ListarTareasAjusteDatos.sql#L1), SQL 008 MarcarInicioFinProcesoControl:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/008%20SP%20MUFG_MX2_ZeuzFiles_MarcarInicioFinProcesoControl.sql#L1), SQL 009 MarcarErrorProcesoControl:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/009%20SP%20MUFG_MX2_ZeuzFiles_MarcarErrorProcesoControl.sql#L1), and SQL 010 ObtenerPreQuerisPendientesProc:1 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/010%20SP%20MUFG_MX2_ZeuzFiles_ObtenerPreQuerisPendientesProc.sql#L1) (the Zeuz spelling), SQL 008 MarcarInicioFinProcesoControl:11-27 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/008%20SP%20MUFG_MX2_ZeuzFiles_MarcarInicioFinProcesoControl.sql#L11-L27) (two updates without a transaction), SQL 016 MarcarTerminados:3-10 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/016%20SP%20MUFG_MX2_ZeusFiles_MarcarTerminados.sql#L3-L10) (parameter types), and the sibling template at ZeusExtractor SQL 012:41-89 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/ZeusExtractor/DWH/Procedures/012%20SP%20MUFG_MX2_UpdReglaAjusteExitosa.sql#L41-L89).
-Issue / impact: (1) Scripts 004 (ZeusReglasDat_d_Pendientes, CREATE OR ALTER) and 005 (plain CREATE) define the same procedure, and both are Build items; SSDT is expected to reject the duplicate element (SQL71508; not run here). The 004 script for CtlProcesos_d_Pendientes and script 005 use a plain CREATE, so they cannot be re-run. (2) Five procedure names (and their C# constants) spell Zeuz instead of Zeus, with Queris and Listarprocesos casing in two of them. (3) None of the 23 scripts has a header block or a TRY/CATCH, THROW, or XACT_ABORT, and only procedure 001 sets SET NOCOUNT ON, while all 25 ZeusCarga procedures and 6 of the 15 ZeusExtractor procedures carry all of them (and an Auditoria.ErrorLog insert); the other nine ZeusExtractor procedures have NOCOUNT, TRY/CATCH, and THROW but no XACT_ABORT or log insert. (4) Several parameters can be narrower than the values sent: @filesize INT against a long, and VARCHAR(30) and VARCHAR(50) text arguments that SQL Server truncates silently if a value is longer (ZF-FR-4; the real value lengths are unknown). (5) Joins are written as comma joins (SQL 006 ListarprocesosEjecutar:15 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/006%20SP%20MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar.sql#L15), SQL 011 BuscarTrabajosCompuestos:11 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/011%20SP%20MUFG_MX2_ZeusFiles_BuscarTrabajosCompuestos.sql#L11)), where a dropped predicate silently becomes a cross join. (6) The status updates in SQL 008 MarcarInicioFinProcesoControl:19-25 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/008%20SP%20MUFG_MX2_ZeuzFiles_MarcarInicioFinProcesoControl.sql#L19-L25) and SQL 021 MarcarInicioControl:23-29 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/021%20SP%20MUFG_MX2_ZeusFiles_MarcarInicioControl.sql#L23-L29) set PROC, fec_final, num_regs, and flg_con_error = 0 without checking the current status, so a repeated call rewrites them (the fec_inicio stamp above them is guarded).
-Recommended change: Keep one CREATE OR ALTER script per procedure, correct the spelling in one coordinated change (scripts, constants, and deployment), adopt the sibling template, widen the parameter types, use explicit INNER JOIN, and build the SQL project in CI.
-Benefit: Repeatable deployments, fewer silent failures, and consistent, documented procedures.
-Suggested JIRA: ZF-FR-23 (Minor, rewrite_recommended).
-Nice to Rewrite if Time Permits
-ZF-FR-24 - Repository and build hygiene: README template, no CI, static versions, ClickOnce properties (Minor)
-Category: NiceToRewrite_ifTimePermits Priority: Minor
-Evidence: README.md:1-93 (../../ZEUS/ZeusFiles/README.md#L1-L93) (the unedited GitLab template, whose git remote add origin URL at README.md:18 (../../ZEUS/ZeusFiles/README.md#L18) names a host other than the repository's remote), no CI definition among the 31 tracked files, AplicacionZeus_Files/Properties/AssemblyInfo.cs:8-10 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Properties/AssemblyInfo.cs#L8-L10) and AplicacionZeus_Files/Properties/AssemblyInfo.cs:31-32 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Properties/AssemblyInfo.cs#L31-L32) (empty description and company, version 1.0.0.0, repeated in the other two assembly files), Zeus_Files.csproj:15-29 (../../ZEUS/ZeusFiles/Zeus_Files/Zeus_Files.csproj#L15-L29) (ClickOnce publish properties on a service host), Zeus_Files.csproj:56-58 (../../ZEUS/ZeusFiles/Zeus_Files/Zeus_Files.csproj#L56-L58) (LangVersion and Prefer32Bit only in the x86 configurations), and ZEUS/ZeusFiles/Zeus_Files.sln:13-17 (../../ZEUS/ZeusFiles/Zeus_Files.sln#L13-L17) (four platform configurations).
-Issue / impact: Nothing documents the pipeline states, the four parameters, the deployment, or what to do with a failed job (ZF-FR-8). All three assemblies are version 1.0.0.0, so deployed binaries cannot be told apart by version. The host project carries ClickOnce settings (PublishUrl, Install, UpdateMode) that do not apply to a Windows service. The language version and Prefer32Bit are set only for the x86 configurations while AnyCPU is the default, and it is unclear which platform is deployed.
-Recommended change: Write the README (purpose, state diagram, parameters, configuration, deployment, runbook), add a CI build that stamps the version, remove the ClickOnce properties, and keep one platform.
-Benefit: A new team member can operate and build the service, and a deployed build can be identified.
-Suggested JIRA: ZF-FR-24 (Minor, NiceToRewrite_ifTimePermits).
-5. Architecture-Fit Note
-The workload is a database-state-driven batch stage in a seven-state pipeline (0-CREA to 6-ENV) that spans several ZEUS solutions: the service polls the control table on every tick, but the real work starts when the upstream stages have finished (probably once per business day, which the sources do not state) and consists of producing the day's files (the layout metadata and the padded trailer suggest fixed-width records), notifying, and handing the files to the next stage. Against the trade-off table in _ORCHESTRATION.md (_ORCHESTRATION.md) (section 6) it sits at the "scheduled or triggered batch" end of the spectrum (the table names Zeus_Files as an example), but the sequencing rule applies: first fix the real defects (ZF-FR-2, 3, 4, 5, 8, 18, and 19 decide whether the right files are produced and whether the final rules run), add tests (ZF-FR-21), and give the pipeline an honest outcome and alerting (ZF-FR-1, ZF-FR-17); only then decide whether polling should be replaced by a trigger from the upstream stage (a status-change event or a job at the cut-off time) or whether the seven-state flow across the ZEUS solutions deserves an explicit workflow engine. A re-platforming is not a byproduct of this review. The facts needed for that decision are not visible here: the real timer interval, the delivery deadline to New York, the largest file size (ZF-FR-11), the location of the backup share, the SMTP and SFTP dependencies, the permissions model on the DWH control tables (ZF-FR-20), and who else writes to them.
-6. JIRA-Ready Backlog
-Use the finding ID as the JIRA key suffix (ZF-FR-#); priority equals the finding severity.
-ID	Title	Category	Project	File(s)	Priority
-ZF-FR-1	Return an explicit tick outcome; stop reporting swallowed failures as success	MustChange/rewrite	AplicacionZeus_Files	Archivos.cs:346-351 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L346-L351)	Major
-ZF-FR-2	Run INI rules before generation and re-query FIN rules after the load; stop stamping rules as processed without running them	MustChange/rewrite	AplicacionZeus_Files / SQL	Archivos.cs:77-102 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L77-L102)	Major
-ZF-FR-3	Pass the project code, not the product code, to the composite-job and start procedures	MustChange/rewrite	AplicacionZeus_Files	Archivos.cs:124-125 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L124-L125)	Major
-ZF-FR-4	Map and validate the row counts of the state-marking procedures; zero rows must fail the job	MustChange/rewrite	AplicacionZeus_Files / SQL	Archivos.cs:139-147 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L139-L147)	Major
-ZF-FR-5	Write files to a temporary name, append the trailer before the status change, and clean the backup unconditionally	MustChange/rewrite	AplicacionZeus_Files	Archivos.cs:172-254 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L172-L254)	Major
-ZF-FR-6	Validate the required parameters and build and check the output paths	MustChange/rewrite	AplicacionZeus_Files	Archivos.cs:154-173 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L154-L173)	Major
-ZF-FR-7	Isolate rules with a null query or moment instead of aborting every tick	MustChange/rewrite	AplicacionZeus_Files	Archivos.cs:79-83 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L79-L83)	Major
-ZF-FR-8	Add a terminal or back-off state for failed jobs and surface the blocked state	MustChange/rewrite	AplicacionZeus_Files / SQL	SQL 006 ListarprocesosEjecutar:15-21 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/006%20SP%20MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar.sql#L15-L21)	Major
-ZF-FR-9	Encode the e-mail file list once and handle a failed send	MustChange/rewrite	AplicacionZeus_Files	Archivos.cs:374-386 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L374-L386)	Minor
-ZF-FR-10	Split ProcesaArchivos and remove the method-scoped state shared between jobs	rewrite_recommended	AplicacionZeus_Files	Archivos.cs:50-66 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Operaciones/Archivos.cs#L50-L66)	Major
-ZF-FR-11	Propagate cancellation, set command timeouts, and stream large results	rewrite_recommended	AplicacionZeus_Files / InfraestructuraZeus_Files	IOperacionesDWH.cs:12-30 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Interfaces/IOperacionesDWH.cs#L12-L30)	Minor
-ZF-FR-12	Replace the static obsolete logger and correct the log lines	rewrite_recommended	All three projects	OperacionServicio.cs:72-88 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/OperacionServicio.cs#L72-L88)	Minor
-ZF-FR-13	Tidy naming, documentation, and culture-dependent calls	NiceToRewrite_ifTimePermits	AplicacionZeus_Files	Constantes.cs:9 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Enums/Constantes.cs#L9)	Minor
-ZF-FR-14	Check Exito for the parameter load and the four marking writes (GEN-11)	MustChange/rewrite	InfraestructuraZeus_Files	DWHRepository.cs:37-63 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L37-L63)	Major
-ZF-FR-15	Name the repository operations, use typed exceptions, and delete the dead executor	rewrite_recommended	InfraestructuraZeus_Files	DWHRepository.cs:70-78 (../../ZEUS/ZeusFiles/InfraestructuraZeus_Files/Repositorios/DWHRepository.cs#L70-L78)	Minor
-ZF-FR-16	Inspect the service-state results at startup and shutdown (GEN-9)	MustChange/rewrite	Zeus_Files host	ServiceHost.cs:118-121 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L118-L121)	Major
-ZF-FR-17	Fix host hygiene: obsolete API, log-size unit, unused registrations, per-tick record and alerting	rewrite_recommended	Zeus_Files host	ServiceHost.cs:73-74 (../../ZEUS/ZeusFiles/Zeus_Files/ServiceHost.cs#L73-L74)	Minor
-ZF-FR-18	Correct the @idttrabajo parameter name in procedures 021 and 022	MustChange/rewrite	SQL / InfraestructuraZeus_Files	SQL 021 MarcarInicioControl:1-7 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/021%20SP%20MUFG_MX2_ZeusFiles_MarcarInicioControl.sql#L1-L7)	Major
-ZF-FR-19	Put the missing ProcesoDatosArchivoModelo procedure under source control	MustChange/rewrite	SQL	ProcedimientoAlmacenado.cs:30 (../../ZEUS/ZeusFiles/AplicacionZeus_Files/Enums/ProcedimientoAlmacenado.cs#L30)	Major
-ZF-FR-20	Control, wrap, and audit dynamic SQL execution; remove the generic executor	MustChange/rewrite	SQL	SQL 021 MarcarInicioControl:13-29 (../../StoredProcedures/MWD_DB/DBMDW/ZEUS/Zeus_Files/DWH/Procedures/021%20SP%20MUFG_MX2_ZeusFiles_MarcarInicioControl.sql#L13-L29)	Major
-ZF-FR-21	Add a test project and the seams to support it (GEN-2)	MustChange/rewrite	Solution	ZEUS/ZeusFiles/Zeus_Files.sln:6-10 (../../ZEUS/ZeusFiles/Zeus_Files.sln#L6-L10)	Major
-ZF-FR-22	Replace the absolute D:\ServiceCMS references with a versioned package (GEN-1)	MustChange/rewrite	All three projects	Zeus_Files.csproj:74-79 (../../ZEUS/ZeusFiles/Zeus_Files/Zeus_Files.csproj#L74-L79) (+2 project files)	Blocker
-ZF-FR-23	Clean up the SQL project: duplicate item, idempotent scripts, names, error handling, parameter types	rewrite_recommended	SQL	DBMDW.sqlproj:1453-1455 (../../StoredProcedures/MWD_DB/DBMDW/DBMDW.sqlproj#L1453-L1455)	Minor
-ZF-FR-24	Document and tidy the repository and build	NiceToRewrite_ifTimePermits	Solution	README.md:1-93 (../../ZEUS/ZeusFiles/README.md#L1-L93)	Minor
+
+using AplicacionZeus_Files.Modelos;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace AplicacionZeus_Files.Interfaces
+{
+    /// <summary>
+    /// Interfaz de operaciones DWH
+    /// </summary>
+    public interface IOperacionesDWH
+    {
+        Task<Dictionary<string, string>> ParametrosSistema();
+        Task<RegistrosModelo> ConsultarRegistrosSP(string strSPName);
+        Task<List<ProcesosEjecutarModelo>> ListarProcesosEjecutar(string Cve_proyecto);
+        Task<List<TareasAjusteDtosModelo>> ListarTareasAjusteDatos();
+        Task<RegistrosModelo> MarcarInicioFinProcesoControl(long id_trabajo, int num_orden);
+        Task<RegistrosModelo> ObtenerPreQueriesPendientes();
+        Task<List<TrabajosCompuestosModelo>> BuscarTrabajosCompuestos(long IdTrabajo, string CveProyecto, string DesProyectotabla, string DesProyectoFiles);
+        Task<RegistrosModelo> MarcarTerminadosSinProyecto(long IdTrabajo, string CveProyecto);
+        Task<RegistrosModelo> MarcarProcesosInicio(long IdTrabajo, string CveProyecto, string DesProyectotabla, string DesProyectoFiles);
+        Task<List<EstructuraTablaZeusModel>> ObtenerEstructuraTablaZeus(string CveProducto, string CveTipo, string CveSistema, string TablaZeus);
+        Task<RegistrosModelo> MarcarTerminados(long IdTrabajo, string CveProyecto, int NumReg, string ZeusFileName, long FileSize, string TablaZeus, string ArchivoOriginal);
+        Task<List<TrailerRecordModelo>> ObtenerDatosTrailerRecord(long IdTrabajo, string ZeusFileName);
+        Task<RegistrosModelo> ComprobarArchivosFaltantes(long IdTrabajo);
+        Task<RegistrosModelo> ValidarFinCarga();
+        Task<bool> MarcarInicioControl(long IdTrabajo, int NumOrden, string SqlQuery);
+        Task MarcarAjusteConError(long IdTrabajo, int NumOrden, string MensajeError);
+        Task MarcarErrorProcesoControl(long id_trabajo, int num_orden, string mensaje_error);
+        Task MarcarProcesoConError(long IdTrabajo, string MensajeError, string CveProducto, string CveTipo, string CveSistema);
+        Task<List<DatosArchivoModelo>> ProcesoDatosArchivoModelo(string claveProducto, string claveTipo, string claveSistema, string tablaZeus, long idTrabajo);
+    }
+}
+
+namespace AplicacionZeus_Files.Enums
+{
+    /// <summary>
+    /// Clase donde se almacenan las constantes del servicio
+    /// </summary>
+    public class Constantes
+    {
+        public const string CLAVE_PROYECTO = "ZEUS";
+        public const string MAIL_FROM = "avisos_zeus@mx.mufg.jp";
+        public const string SUBJECT = "Generacion de archivos Zeus, fechaProceso:";
+        public const string GENERAL = "GRAL";
+        public const string SALDO = "SALDO";
+        public const string ID_TRABAJO = "ID_TRABAJO";
+        public const string INI = "INI";
+    }
+}
+
+namespace AplicacionZeus_Files.Enums
+{
+    /// <summary>
+    /// Clases donde almacenan los procedimientos almacenados en constantes
+    /// </summary>
+    public class ProcedimientoAlmacenado
+    {
+        public const string sp_Parametros_Sistema = "dbo.MUFG_MX2_Comun_ObtenerParametrosSistema";
+        public const string sp_ConsultarRegistrosCtlProcesoD = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsCtlProcesos_d";
+        public const string sp_ConsultarRegistrosCtlPrcZeusReglasDatD = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsZeusReglasDat_d";
+        public const string sp_ConsultarRegistrosCtlProcesoD_Pendientes = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsCtlProcesos_d_Pendientes";
+        public const string sp_ConsultarRegistrosCtlPrcZeusReglasDatD_Pendientes = "dbo.MUFG_MX2_ZeusFiles_ConsultarRegsZeusReglasDat_d_Pendientes";
+        public const string sp_ConsultarProcesosEjecutar = "dbo.MUFG_MX2_ZeuzFiles_ListarprocesosEjecutar";
+        public const string sp_ConsultarTareasAjusteDatos = "dbo.MUFG_MX2_ZeuzFiles_ListarTareasAjusteDatos";
+        public const string sp_MarcarInicioFinProcesoControl = "dbo.MUFG_MX2_ZeuzFiles_MarcarInicioFinProcesoControl";
+        public const string sp_MarcarErrorControl = "dbo.MUFG_MX2_ZeuzFiles_MarcarErrorProcesoControl";
+        public const string sp_ConsultarPreQueriesPendientes = "dbo.MUFG_MX2_ZeuzFiles_ObtenerPreQuerisPendientesProc";
+        public const string sp_ConsultarTrabajosCompuestos = "dbo.MUFG_MX2_ZeusFiles_BuscarTrabajosCompuestos";
+        public const string sp_MarcarTerminadosSinProyecto = "dbo.MUFG_MX2_ZeusFiles_MarcarTerminadosSinProyecto";
+        public const string sp_MarcarInicioProcesos = "dbo.MUFG_MX2_ZeusFiles_MarcarProcesosInicio";
+        public const string sp_ObtenerEstructuraTablaZeus = "dbo.MUFG_MX2_ZeusFiles_ObtenerEstructuraTablaZeus";
+        public const string sp_ConsultaDatosArchivo = "dbo.MUFG_MX2_ZeusFiles_DatosArchivoConsulta";
+        public const string sp_MarcarTerminados = "dbo.MUFG_MX2_ZeusFiles_MarcarTerminados";
+        public const string sp_ObtenerDatosTrailerRecord = "dbo.MUFG_MX2_ZeusFiles_ObtenerDatosTrailerRecord";
+        public const string sp_ComprobarArchivosFaltantes = "dbo.MUFG_MX2_ZeusFiles_ComprobarArchivosFaltantes";
+        public const string sp_MarcarProcesoConError = "dbo.MUFG_MX2_ZeusFiles_MarcarProcesoConError";
+        public const string sp_ValidarFinalCarga = "dbo.MUFG_MX2_ZeusFiles_ValidarFinalCarga";
+        public const string sp_MarcarInicioControl = "dbo.MUFG_MX2_ZeusFiles_MarcarInicioControl";
+        public const string sp_MarcarAjusteConError = "dbo.MUFG_MX2_ZeusFiles_MarcarAjusteConError";
+        public const string sp_ProcesoDatosArchivoModelo = "dbo.MUFG_MX2_ZeusFiles_ProcesoDatosArchivoModelo";
+    }
+}
+
+using MUFG_T24.Configuracion_utilidades;
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase configuracion Modelo
+    /// </summary>
+    public class ConfiguracionModelo : Configuracion
+    {
+        public string StrRutaZeusEnvio { get; set; }
+        public string StrRutaZeusResp { get; set; }
+        public string StrMailZeusTo { get; set; }
+        public string StrMailZeusCc { get; set; }
+        public new ConfiguracionModelo Clone()
+        {
+            return (ConfiguracionModelo)MemberwiseClone();
+        }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase datos modelo archivo
+    /// </summary>
+    public class DatosArchivoModelo
+    {
+        public string datos_archivo { get; set; }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Estructura Tabla Zeus Model
+    /// </summary>
+    public class EstructuraTablaZeusModel
+    {
+        public string column_name { get; set; }
+        public int? character_maximum_length { get; set; }
+        public string des_alineacion { get; set; }
+        public int num_posicion { get; set; }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase de modelo ParametrosModelo
+    /// </summary>
+    public class ParametrosModelo
+    {
+        public string Id_parametro { get; set; }
+        public string des_valor { get; set; }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase de modelo ProcesosEjecutarModelo
+    /// </summary>
+    public class ProcesosEjecutarModelo
+    {
+        public long id_trabajo { get; set; }
+        public string cve_producto { get; set; }
+        public string cve_tipo { get; set; }
+        public string cve_sistema { get; set; }
+        public int fecha_proceso { get; set; }
+        public string des_proyecto_tabla { get; set; }
+        public string des_proyecto_files { get; set; }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase de modelo RegistrosModelo
+    /// </summary>
+    public class RegistrosModelo
+    {
+        public int num_regs { get; set; }
+        public int Faltantes { get; set; }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase modelo TareasAjusteDtosModelo
+    /// </summary>
+    public class TareasAjusteDtosModelo
+    {
+        public long id_trabajo { get; set; }
+        public string cve_momento { get; set; }
+        public string cve_producto { get; set; }
+        public string cve_tipo { get; set; }
+        public string cve_sistema { get; set; }
+        public int num_orden { get; set; }
+        public string des_tabla { get; set; }
+        public string des_descripcion { get; set; }
+        public string des_query { get; set; }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase modelo TrabajosCompuestosModelo
+    /// </summary>
+    public class TrabajosCompuestosModelo
+    {
+        public string cve_producto { get; set; }
+        public string cve_tipo { get; set; }
+        public string cve_sistema { get; set; }
+    }
+}
+
+namespace AplicacionZeus_Files.Modelos
+{
+    /// <summary>
+    /// Clase modelo TrailerRecordModelo
+    /// </summary>
+    public class TrailerRecordModelo
+    {
+        public string Datos { get; set; }
+    }
+}
+
+using System.Reflection;
+using System.Runtime.InteropServices;
+
+// General Information about an assembly is controlled through the following
+// set of attributes. Change these attribute values to modify the information
+// associated with an assembly.
+[assembly: AssemblyTitle("InfraestructuraZeus_Files")]
+[assembly: AssemblyDescription("")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("")]
+[assembly: AssemblyProduct("InfraestructuraZeus_Files")]
+[assembly: AssemblyCopyright("Copyright ©  2026")]
+[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCulture("")]
+
+// Setting ComVisible to false makes the types in this assembly not visible
+// to COM components.  If you need to access a type in this assembly from
+// COM, set the ComVisible attribute to true on that type.
+[assembly: ComVisible(false)]
+
+// The following GUID is for the ID of the typelib if this project is exposed to COM
+[assembly: Guid("a2d06809-77b4-45be-95cc-6b29ee61a766")]
+
+// Version information for an assembly consists of the following four values:
+//
+//      Major Version
+//      Minor Version
+//      Build Number
+//      Revision
+//
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+
+using AplicacionZeus_Files.Enums;
+using AplicacionZeus_Files.Interfaces;
+using AplicacionZeus_Files.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace InfraestructuraZeus_Files.Repositorios
+{
+    /// <summary>
+    /// Clase donde se implementan llamadas a BD
+    /// </summary>
+    public class DWHRepository : RepositorioMaestro, IOperacionesDWH
+    {
+        #region Constructor
+
+        /// <summary>
+        /// Constructor del repositorio para acceso a Base de datos
+        /// </summary>
+        /// <param name="alertaT"></param>
+        public DWHRepository() :
+            base(BasedatosProveedor.SqlServer, NombreBasedatos.DWH, null, null)
+        { }
+
+        #endregion
+
+        #region Métodos
+
+        /// <summary>
+        /// Función para obtener los parametros del Sistema
+        /// </summary>
+        /// <returns></returns>
+        public async Task<Dictionary<string, string>> ParametrosSistema()
+        {
+            string parametrosSistema = string.Join(",", Enum.GetNames(typeof(ParametrosSistema)).Select(p => $"'{p}'"));
+            var result = await EjecutarStoredProcedureQuery<ParametrosModelo>(ProcedimientoAlmacenado.sp_Parametros_Sistema, cmd =>
+            {
+                IDbDataParameter param = cmd.CreateParameter();
+                param.ParameterName = "@strParametros";
+                param.Value = parametrosSistema;
+                cmd.Parameters.Add(param);
+            });
+
+            if (result.Data == null) return new Dictionary<string, string>();
+
+            Dictionary<string, string> parametros = new Dictionary<string, string>();
+            foreach (var parametro in result.Data)
+            {
+                if (parametros.ContainsKey(parametro.Id_parametro))
+                {
+                    Config.EscribirLog($"ERROR|obtenerParametrosSistema|El parámetro '{parametro.Id_parametro}' está duplicado en la base de datos.");
+                    continue;
+                }
+
+                parametros.Add(parametro.Id_parametro, parametro.des_valor);
+            }
+
+            return parametros;
+        }
+
+        /// <summary>
+        /// Función para consultar los Registros Pendientes
+        /// </summary>
+        /// <param name="strSPName"></param>
+        /// <returns></returns>
+        public async Task<RegistrosModelo> ConsultarRegistrosSP(string strSPName)
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(strSPName);
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para obtener los Procesos que se ejecutarán
+        /// </summary>
+        /// <param name="claveProyecto">Clave del proyecto a consultar</param>
+        /// <returns></returns>
+        public async Task<List<ProcesosEjecutarModelo>> ListarProcesosEjecutar(string claveProyecto)
+        {
+            var result = await EjecutarStoredProcedureQuery<ProcesosEjecutarModelo>(ProcedimientoAlmacenado.sp_ConsultarProcesosEjecutar, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", claveProyecto));
+            });
+
+            if (result.Exito)
+                return result.Data ?? new List<ProcesosEjecutarModelo>();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
+        }
+
+        /// <summary>
+        /// Obtener la lista de Tareas a Ejecutar
+        /// </summary>
+        /// <returns></returns>
+        public async Task<List<TareasAjusteDtosModelo>> ListarTareasAjusteDatos()
+        {
+            var result = await EjecutarStoredProcedureQuery<TareasAjusteDtosModelo>(ProcedimientoAlmacenado.sp_ConsultarTareasAjusteDatos);
+
+            if (result.Exito)
+                return result.Data ?? new List<TareasAjusteDtosModelo>();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
+        }
+
+        /// <summary>
+        /// Actualiza el estado del Proceso
+        /// </summary>
+        /// <param name="idTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="numeroOrden">Número de Orden de la tarea a ejecutar</param>
+        /// <returns></returns>
+        public async Task<RegistrosModelo> MarcarInicioFinProcesoControl(long idTrabajo, int numeroOrden)
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarInicioFinProcesoControl, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", idTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@num_orden", numeroOrden));
+            });
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para obtener las sentencias pendientes de ejecutar 
+        /// </summary>
+        /// <returns></returns>
+        public async Task<RegistrosModelo> ObtenerPreQueriesPendientes()
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_ConsultarPreQueriesPendientes);
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para obtener trabajos adicionales Pendientes
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="claveProyecto">Clave del proyecto a consultar</param>
+        /// <param name="DesProyectotabla">Tabla de donde se obtiene la información</param>
+        /// <param name="DesProyectoFiles">Nombre del archivo</param>
+        /// <returns></returns>
+        public async Task<List<TrabajosCompuestosModelo>> BuscarTrabajosCompuestos(long IdTrabajo, string claveProyecto, string DesProyectotabla, string DesProyectoFiles)
+        {
+            var result = await EjecutarStoredProcedureQuery<TrabajosCompuestosModelo>(ProcedimientoAlmacenado.sp_ConsultarTrabajosCompuestos, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", IdTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", claveProyecto));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_tabla", DesProyectotabla));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_files", DesProyectoFiles));
+            });
+
+            if (result.Exito)
+                return result.Data ?? new List<TrabajosCompuestosModelo>();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
+
+        }
+
+        /// <summary>
+        /// Función para actualizar el estado de los procesos que no tienen asignado nombre de proyecto
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="claveProyecto">Clave del proyecto a consultar</param>
+        /// <returns></returns>
+        public async Task<RegistrosModelo> MarcarTerminadosSinProyecto(long IdTrabajo, string claveProyecto)
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarTerminadosSinProyecto, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", IdTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", claveProyecto));
+            });
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para actualizar el estado del proyecto cuando el proceso inicia
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="CveProyecto">Clave del proyecto a consultar</param>
+        /// <param name="DesProyectotabla">Tabla a consultar</param>
+        /// <param name="DesProyectoFiles">Nombre del archivo</param>
+        /// <returns></returns>
+
+        public async Task<RegistrosModelo> MarcarProcesosInicio(long IdTrabajo, string CveProyecto, string DesProyectotabla, string DesProyectoFiles)
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarInicioProcesos, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", IdTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_proyecto", CveProyecto));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_tabla", DesProyectotabla));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@des_proyecto_files", DesProyectoFiles));
+            });
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para obtener las columnas y el formato que deben llevar los datos
+        /// </summary>
+        /// <param name="CveProducto">Código del producto que generará el archivo</param>
+        /// <param name="CveTipo">Tipo de Movimiento</param>
+        /// <param name="CveSistema">Sistema</param>
+        /// <param name="TablaZeus">Tabla a consultar</param>
+        /// <returns></returns>
+        public async Task<List<EstructuraTablaZeusModel>> ObtenerEstructuraTablaZeus(string CveProducto, string CveTipo, string CveSistema, string TablaZeus)
+        {
+            var result = await EjecutarStoredProcedureQuery<EstructuraTablaZeusModel>(ProcedimientoAlmacenado.sp_ObtenerEstructuraTablaZeus, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_producto", CveProducto));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_tipo", CveTipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_sistema", CveSistema));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tabla_zeus", TablaZeus));
+            });
+
+            if (result.Exito)
+                return result.Data ?? new List<EstructuraTablaZeusModel>();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
+        }
+
+        /// <summary>
+        /// Función para actualizar el estado a terminado del proceso
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="CveProyecto">Clave del proyecto a consultar</param>
+        /// <param name="NumReg">Numero de registros procesados</param>
+        /// <param name="ZeusFileName">Nombre del Archivo</param>
+        /// <param name="FileSize">Tamaño del Archivo</param>
+        /// <param name="TablaZeus">Tabla con la que se trabajó</param>
+        /// <param name="ArchivoOriginal">Nombre original del archivo</param>
+        /// <returns></returns>
+        public async Task<RegistrosModelo> MarcarTerminados(long IdTrabajo, string CveProyecto, int NumReg, string ZeusFileName, long FileSize, string TablaZeus, string ArchivoOriginal)
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarTerminados, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@numregs", NumReg));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@zeusfilename", ZeusFileName));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@filesize", FileSize));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cveproyecto", CveProyecto));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tablazeus", TablaZeus));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@fileori", ArchivoOriginal));
+            });
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para obtener el Total de registros del archivo
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="ZeusFileName">Nombre del archivo</param>
+        /// <returns></returns>
+        public async Task<List<TrailerRecordModelo>> ObtenerDatosTrailerRecord(long IdTrabajo, string ZeusFileName)
+        {
+            var result = await EjecutarStoredProcedureQuery<TrailerRecordModelo>(ProcedimientoAlmacenado.sp_ObtenerDatosTrailerRecord, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@zeusfilename", ZeusFileName));
+            });
+
+            if (result.Exito)
+                return result.Data ?? new List<TrailerRecordModelo>();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
+        }
+
+        /// <summary>
+        /// Función para verificar si existen procesos por ejecutar
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <returns></returns>
+        public async Task<RegistrosModelo> ComprobarArchivosFaltantes(long IdTrabajo)
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_ComprobarArchivosFaltantes, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
+            });
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para actualizar si algún proceso tuvo errores
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="MensajeError">Mensaje de error que se guardará</param>
+        /// <param name="CveProducto">Código del producto que generará el archivo</param>
+        /// <param name="CveTipo">Tipo</param>
+        /// <param name="CveSistema">Sistema</param>
+        /// <returns></returns>
+        public async Task MarcarProcesoConError(long IdTrabajo, string MensajeError, string CveProducto, string CveTipo, string CveSistema)
+        {
+            await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarProcesoConError, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@mensajeerror", MensajeError));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cveproducto", CveProducto));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cvetipo", CveTipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cvesistema", CveSistema));
+            });
+        }
+
+        /// <summary>
+        /// Función para comprobar que no existen mas archivos por procesar
+        /// </summary>
+        /// <returns></returns>
+        public async Task<RegistrosModelo> ValidarFinCarga()
+        {
+            var result = await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_ValidarFinalCarga);
+
+            if (result.Exito)
+                return result?.Data?.FirstOrDefault() ?? new RegistrosModelo();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}"); ;
+        }
+
+        /// <summary>
+        /// Función para marcar el inicio de un proceso
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="NumOrden">Número de Orden de la tarea a ejecutar</param>
+        /// <param name="SqlQuery">Consulta a ejecutar</param>
+        /// <returns></returns>
+        public async Task<bool> MarcarInicioControl(long IdTrabajo, int NumOrden, string SqlQuery)
+        {
+            var result = await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarInicioControl, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@numorden", NumOrden));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@sqlquery", SqlQuery));
+            });
+
+            return result.Exito ? true : throw new Exception(result.MensajeError);//Error de des_query si es que hay.
+        }
+
+        /// <summary>
+        ///  Función para Actualizar el estado del Proceso si existe algún error.
+        /// </summary>
+        /// <param name="idTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="numeroOrden">Número de Orden de la tarea a ejecutar</param>
+        /// <param name="mensajeError">El mensaje con el que se actualizará el trabajo</param>
+        /// <returns></returns>
+        public async Task MarcarErrorProcesoControl(long idTrabajo, int numeroOrden, string mensajeError)
+        {
+            try
+            {
+                await EjecutarStoredProcedureQuery<RegistrosModelo>(ProcedimientoAlmacenado.sp_MarcarErrorControl, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@id_trabajo", idTrabajo));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@num_orden", numeroOrden));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@error_descripcion", mensajeError));
+                });
+
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Se presentó una excepcion al guardar el error. {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Función para marcar las tareas de sentencias que no se ejecutaron y tienen error
+        /// </summary>
+        /// <param name="IdTrabajo">Identificador del trabajo ejecutado</param>
+        /// <param name="NumOrden">Número de Orden de la tarea a ejecutar</param>
+        /// <param name="MensajeError">Mensaje de error</param>
+        /// <returns></returns>
+        public async Task MarcarAjusteConError(long IdTrabajo, int NumOrden, string MensajeError)
+        {
+            try
+            {
+                await EjecutarStoredProceduredNonQuery(ProcedimientoAlmacenado.sp_MarcarAjusteConError, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@idtrabajo", IdTrabajo));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@numorden", NumOrden));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@mensajeerror", MensajeError));
+                });
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Se presentó una excepción en al Marcar Ajuste con Error, ex: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Procesa y configura un script, ademas de ejecutarlo
+        /// Devuelve un objeto de tipo DatosArchivoModelo
+        /// </summary>
+        /// <param name="claveProducto"></param>
+        /// <param name="claveTipo"></param>
+        /// <param name="claveSistema"></param>
+        /// <param name="tablaZeus"></param>
+        /// <param name="idTrabajo"></param>
+        /// <returns></returns>
+        /// <exception cref="ArgumentException"></exception>
+        public async Task<List<DatosArchivoModelo>> ProcesoDatosArchivoModelo(string claveProducto, string claveTipo, string claveSistema, string tablaZeus, long idTrabajo)
+        {
+            var result = await EjecutarStoredProcedureQuery<DatosArchivoModelo>(ProcedimientoAlmacenado.sp_ProcesoDatosArchivoModelo, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pClaveProducto", claveProducto));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pCLaveTipo", claveTipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pClaveSistema", claveSistema));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pTablaZeus", tablaZeus));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pIdTrabajo", idTrabajo));
+            });
+
+            if (result.Exito)
+                return result.Data ?? new List<DatosArchivoModelo>();
+            else
+                throw new InvalidOperationException($"El procedimiento almacenado presentó el siguiente problema: {result.MensajeError}");
+        }
+
+        #endregion
+    }
+}
+
+using AplicacionZeus_Files;
+using AplicacionZeus_Files.Interfaces;
+using AplicacionZeus_Files.Modelos;
+using AplicacionZeus_Files.Operaciones;
+using InfraestructuraZeus_Files.Repositorios;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Zeus_Files
+{
+    /// <summary>
+    /// Clase principal del servicio Windows (presentación).
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        #region Propiedades
+
+        private Container _containerDI;
+        private Configuracion _configuracionBase;
+        private ConfiguracionModelo _configuracionModelo;
+
+        protected override string NombreServicioLog => NombreServicio.Zeus_Files.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 5000;
+
+        #endregion
+
+        #region Constructor
+
+        /// <summary>
+        /// Constructor 
+        /// </summary>|
+        public ServiceHost() { }
+
+        #endregion
+
+        #region Procesos
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del _containerDI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Almacena configuracion necesaria para el funcionamiento del servicio
+            _configuracionBase = new Configuracion();
+            _configuracionModelo = new ConfiguracionModelo();
+
+            //Inicializa la obtención de la configuracion general y el logging...
+            {
+                ConfiguracionEncriptadaHelper.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.Zeus_Files.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+
+                RutasConfiguracion rutas = new RutasConfiguracion()
+                {
+                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+                };
+
+                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+                Logging.Write("INFO|OnStart|Leyendo archivo de configuración.");
+            }
+
+            //Registra la configuración...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<ConfiguracionModelo>(() => _configuracionModelo.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            //Registra los componentes
+            _containerDI.Register<IOperacionesDWH, DWHRepository>();
+            _containerDI.Register<Productos>();
+            _containerDI.Register<Archivos>();
+            _containerDI.Register<OperacionServicio>();
+
+            _containerDI.Verify();
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                //Obtiene el proceso actual.
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, cancellationToken);
+
+                if (!_configuracionBase.Pid.HasValue)
+                {
+                    throw new InvalidOperationException(
+                        "No fue posible obtener el PID del proceso.");
+                }
+
+                //Marca el servicio en uso.
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(
+                    _configuracionBase.Pid.Value, _configuracionBase.NombreProceso,
+                    _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio,
+                    cancellationToken);
+
+                //Parametrizacion de la configuracion local
+                {
+                    _configuracionModelo.NombreServicio = _configuracionBase.NombreServicio;
+                    _configuracionModelo.TimerInterval = _configuracionBase.TimerInterval;
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Parametrizaciones|Error: {ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<OperacionServicio>();
+                    await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
+
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                //Apagado normal
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
+            }
+            finally
+            {
+                _containerDI?.Dispose();
+            }
+        }
+
+        #endregion
+    }
+}
+
+namespace Zeus_Files
+{
+    partial class ServiceHost {}
+}
+
+using MUFG_T24.Comunes;
+using MUFG_T24.ControladorServicios_Utilidades;
+
+namespace Zeus_Files
+{
+    /// <summary>
+    /// Clase de entrada.
+    /// </summary>
+    internal static class Program
+    {
+        /// <summary>
+        /// Punto de entrada Main.
+        /// </summary>
+        static void Main(string[] args)
+        {
+            WindowsServiceProgramRunner.Run(
+                NombreServicio.Zeus_Files.ToString(),
+                    () => new ServiceHost(), args
+#if DEBUG
+                        , (service, startupArgs) => ((ServiceHost)service).DebugRun(startupArgs)
+#endif
+            );
+        }
+    }
+}
+
+Zeus_Files/App.config
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+    <startup> 
+        <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" />
+    </startup>
+</configuration>
 
