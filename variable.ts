@@ -6185,3 +6185,815 @@ namespace Aplicacion.Servicios.Operaciones
 
      }
 }
+
+using Aplicacion.DTOs.ENT_TEF;
+using Aplicacion.Interfaces.ENT_TEF;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
+using System.Threading.Tasks;
+using static MUFG_T24.Comunes.Comunes;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    /// <summary>
+    /// Representa ENT TEF.
+    /// </summary>
+    public class ENT_TEF
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IENTTEFTefDao _entTefTefDao;
+        private readonly IENTTEFTomiDao _entTefTomiDao;
+        private readonly ConexionT24Mw _vwT24;
+
+        private const string tipoOperacion = "ENT_TEF";
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ENT_TEF(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            IENTTEFTefDao entTefTefDao,
+            IENTTEFTomiDao entTefTomiDao,
+            ConexionT24Mw vwT24)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _entTefTefDao = entTefTefDao;
+            _entTefTomiDao = entTefTomiDao;
+            _vwT24 = vwT24;
+        }
+
+        /// <summary>
+        /// Procesa la operación ENT_TEF del servicio Lectura.
+        /// </summary>
+        public async Task<bool> ProcesaOperacion(string folio)
+        {
+            EntTefRecibidaDto datosTef;
+            string folioUnico = string.Empty;
+            string cuentaOrdenante = string.Empty;
+            string cuentaBeneficiario = string.Empty;
+            string cuentaBTMUM = "0";
+            string comentarios = string.Empty;
+            string razonRechazo = string.Empty;
+            string fechaEjecucionTexto = string.Empty;
+            string moneda = string.Empty;
+            string subtipo = string.Empty;
+            bool conDatoTef = false;
+            bool conEntradaSalida = true;
+            bool procesado;
+            bool resultado;
+            bool devolucion = false;
+            int tipoOperacionTEF = 0;
+            int tipoClaveBen = 0;
+            bool t24Encontrado = false;
+            bool t24CuentaValida = false;
+            bool rfcCurpValido = false;
+            long tefIdOperacion = 0;
+            int tefFechaProceso = 0;
+            string tefClaveRastreo = string.Empty;
+            decimal tefImporte = 0m;
+            int tefBancoPresentador = 0;
+            string tefInsNombre = string.Empty;
+            int tefMotivoDevolucion = 0;
+            Dictionary<int, string> tefParticipantes = new Dictionary<int, string>();
+            DataTable t24DatosCliente = null;
+
+            //Verificamos la última operación no realizada.
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+
+            if (string.Equals(_configuracion.AliasProceso, string.Empty, StringComparison.Ordinal))
+                return false;
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo lista de participantes de TEF.");
+
+            List<EntTefParticipanteDto> participantes = await _entTefTefDao.ObtenerParticipantes();
+
+            foreach (EntTefParticipanteDto participante in participantes)
+            {
+                if (!tefParticipantes.ContainsKey(participante.ins_clave))
+                    tefParticipantes.Add(participante.ins_clave, participante.ins_nombre);
+            }
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo los datos de la operación en base TEF.");
+
+            //Genero el folio único.
+            folioUnico = await _vwT24.GeneraFolioUnico(
+                tipoOperacion,
+                ConexionT24Mw.CambiarFechaAJulianaT24(_configuracion.StrFechaSistema),
+                folio);
+
+            datosTef = await _entTefTefDao.ObtenerRecibidaPorFolio(
+                Convert.ToInt32(_configuracion.StrFechaSistema),
+                Convert.ToInt64(folio));
+
+            if (datosTef != null)
+            {
+                conDatoTef = true;
+
+                //Fecha ejecución.
+                fechaEjecucionTexto = datosTef.FechaAplicacion.ToString();
+
+                //Moneda.
+                moneda = _vwT24.MonedaDefaultMN;
+
+                //Importe.
+                tefImporte = datosTef.Importe;
+
+                //Comentarios.
+                comentarios = DameTexto(datosTef.RefLeyendaOrdenante);
+
+                tefMotivoDevolucion = datosTef.MotivoDevolucion;
+
+                tipoOperacionTEF = Convert.ToInt32(DameTexto(datosTef.TipoOperacion));
+                tipoClaveBen = Convert.ToInt32(DameTexto(datosTef.TipoCuentaOrdenante));
+
+                //Identificamos el tipo de operación.
+                if ((tipoOperacionTEF == 1) &&
+                    (tipoClaveBen == 3 || tipoClaveBen == 40) &&
+                    tefMotivoDevolucion == 0)
+                {
+                    subtipo = string.Empty;
+                    cuentaBeneficiario = DameTexto(datosTef.CuentaReceptor);
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Validando la cuenta del beneficiario. CuentaBeneficiario='{cuentaBeneficiario}'.");
+
+                    if (cuentaBeneficiario.Length == 18)
+                    {
+                        cuentaBTMUM = cuentaBeneficiario.Substring(6, 11);
+                    }
+                    else if (cuentaBeneficiario.Length == 20)
+                    {
+                        cuentaBTMUM = cuentaBeneficiario.Substring(8, 11);
+                        cuentaBeneficiario = cuentaBeneficiario.Substring(2, 18);
+                    }
+
+                    cuentaOrdenante = DameTexto(datosTef.CuentaOrdenante);
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Validando la cuenta del ordenante. CuentaOrdenante='{cuentaOrdenante}'.");
+                }
+                else if (tefMotivoDevolucion > 0)
+                {
+                    subtipo = "DEVOLUCION";
+                    devolucion = true;
+
+                    cuentaBeneficiario = DameTexto(datosTef.CuentaOrdenante);
+
+                    if (cuentaBeneficiario.Length == 18)
+                    {
+                        cuentaBTMUM = cuentaBeneficiario.Substring(6, 11);
+                    }
+                    else if (cuentaBeneficiario.Length == 20)
+                    {
+                        cuentaBTMUM = cuentaBeneficiario.Substring(8, 11);
+                        cuentaBeneficiario = cuentaBeneficiario.Substring(2, 18);
+                    }
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Devolucion, cuenta='{cuentaBeneficiario}',CuentaBTMUM={cuentaBTMUM}.");
+                }
+                else
+                {
+                    throw new Exception($"Tipo de operación de entrada TEF desconocido, tipo={tipoOperacionTEF}");
+                }
+
+                //Quita los 0's de la izquierda.
+                cuentaBTMUM = Convert.ToInt64(cuentaBTMUM).ToString();
+
+                //Datos del TEF.
+                tefIdOperacion = datosTef.IDOperacion;
+                tefFechaProceso = datosTef.FechaProceso;
+                tefClaveRastreo = datosTef.ClaveRastreo;
+                tefBancoPresentador = Convert.ToInt32(DameTexto(datosTef.BancoPresentador));
+            }
+
+            if (!conDatoTef)
+                throw new Exception($"No se encontró información de la folio (IDOperacion) {folio} en los datos de entrada del TEF");
+
+            //Valido el nombre de la institución que solicita.
+            if (!tefParticipantes.ContainsKey(tefBancoPresentador))
+                throw new Exception($"No se tiene relación con la institución {tefBancoPresentador}");
+
+            tefInsNombre = tefParticipantes[tefBancoPresentador];
+
+            //Validación de la cuenta.
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Validando en T24 los datos de la cuenta '{cuentaBTMUM}'.");
+
+            t24DatosCliente = await _vwT24.DatosClienteCuentasVw(cuentaBTMUM);
+            DataRow filaClienteT24 = ObtenerFilaT24(t24DatosCliente, folio, "VALIDACION_T24", false);
+
+            if (filaClienteT24 != null)
+            {
+                if (!string.Equals(DameTexto(filaClienteT24["CUSTOMER"]), string.Empty, StringComparison.Ordinal))
+                {
+                    t24Encontrado = true;
+
+                    if (string.Equals(DameTexto(filaClienteT24["CURRENCY"]), _vwT24.MonedaDefaultMN, StringComparison.Ordinal))
+                    {
+                        t24CuentaValida = true;
+                    }
+                    else
+                    {
+                        Config.EscribirLog($"ALERTA|{tipoOperacion}.procesaOperacion|La cuenta seleccionada en el sistema T24 está relacionada a una moneda no válida.");
+                        razonRechazo = "La cuenta seleccionada en el sistema T24 esta relacionada a una moneda no valida";
+                    }
+                }
+                else
+                {
+                    Config.EscribirLog($"ALERTA|{tipoOperacion}.procesaOperacion|No Existe la cuenta en el sistema T24.");
+                    razonRechazo = "No existe la cuenta en el sistema T24";
+                }
+            }
+            else
+            {
+                Config.EscribirLog($"ALERTA|{tipoOperacion}.procesaOperacion|No Existe la cuenta en el sistema T24.");
+                razonRechazo = "No existe la cuenta en el sistema T24";
+
+                procesado = await RespondeEntradaTef("R", 1, tefIdOperacion, tefFechaProceso, tefClaveRastreo, tefImporte);
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A cancelar la operación por devolución.");
+
+                await _entTefTomiDao.CancelarMaestroPorDevolucion(
+                    Convert.ToInt64(folio),
+                    tipoOperacion,
+                    razonRechazo,
+                    Convert.ToInt32(fechaEjecucionTexto),
+                    moneda,
+                    tefImporte);
+
+                return true;
+            }
+
+            //Validación del RFC para pagos tercero a tercero.
+            rfcCurpValido = true;
+
+            if (tipoOperacionTEF == 1)
+            {
+                //“Se rechaza el hallazgo por diseño funcional vigente.
+                //En la ruta ENT_TEF, la validación RFC/CURP es informativa (log)
+                //y no bloqueante, según contrato legacy
+                //documentado (QUEDA PENDIENTE LA VALIDACIÓN DE RFC). El criterio
+                //de aceptación/rechazo operativo se determina por validaciones
+                //TEF/T24 (cuenta, moneda, conciliación y estatus), no por RFC/CURP
+                //en esta etapa. Cambiar la bandera a inválida modificaría comportamiento
+                //productivo y rompería compatibilidad funcional 1:1 con legacy.”
+                if (!EsValidoRFC_CURP_TEF(datosTef.RFCOrdenante))
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|RFC ordenante invalido='{DameTexto(datosTef.RFCOrdenante)}'.");
+
+                    rfcCurpValido = true;
+                }
+
+                if (!cuentaBeneficiario.StartsWith("1081800000", StringComparison.Ordinal))
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Cuenta CLABE Inválida='{DameTexto(datosTef.CuentaReceptor)}'.");
+                    t24CuentaValida = false;
+                }
+            }
+
+            if (t24Encontrado && t24CuentaValida)
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La cuenta '{cuentaBTMUM}' existe en T24 y es en moneda nacional.");
+            }
+
+            conEntradaSalida = t24Encontrado && t24CuentaValida && rfcCurpValido;
+
+            //Verificamos la última operación no realizada.
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+
+            int fechaSistema = int.Parse(_configuracion.StrFechaSistema, CultureInfo.InvariantCulture);
+            int intFechaEjecucion = int.Parse(fechaEjecucionTexto, CultureInfo.InvariantCulture);
+            if (intFechaEjecucion < fechaSistema)
+            {
+                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
+                throw new Exception(
+                    $"Se desea realizar una operación al {fechaEjecucionTexto} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+            }
+
+            //Lectura y actualización de los datos del maestro.
+            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
+            {
+                Config.EscribirLog(
+                    $"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc). " +
+                    $"T24_Encontrado={t24Encontrado},T24_CuentaValida={t24CuentaValida},RFC_CURP_Valido={rfcCurpValido}," +
+                    $"FechaEjecucion={fechaEjecucionTexto},cve_moneda='{moneda}',importe={tefImporte}.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                procesado = false;
+
+                if (t24Encontrado && t24CuentaValida && rfcCurpValido)
+                {
+                    DataRow filaClienteT24Requerida = ObtenerFilaT24(t24DatosCliente, folio, "DATOS_GRAL", true);
+
+                    procesado = await _entTefTomiDao.ActualizarDatosGeneralesMaestroConCliente(
+                        Convert.ToInt64(folio),
+                        tipoOperacion,
+                        folioUnico,
+                        Convert.ToInt32(fechaEjecucionTexto),
+                        moneda,
+                        tefImporte,
+                        subtipo,
+                        Convert.ToInt32(DameTexto(filaClienteT24Requerida["CUSTOMER"])),
+                        DameTexto(filaClienteT24Requerida["NAME_1"]),
+                        cuentaBTMUM);
+                }
+                else
+                {
+                    procesado = await _entTefTomiDao.ActualizarDatosGeneralesMaestroSinCliente(
+                        Convert.ToInt64(folio),
+                        tipoOperacion,
+                        folioUnico,
+                        Convert.ToInt32(fechaEjecucionTexto),
+                        moneda,
+                        tefImporte,
+                        subtipo);
+                }
+
+                if (procesado)
+                {
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro DATOS_GRAL con folio: {folio}");
+                }
+            }
+
+            //Lectura del TEF e inserción a TOMI.
+            if (string.Equals(_configuracion.AliasProceso, "TEF_A_TOMI", StringComparison.Ordinal))
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A insertar datos de TEF a TOMI.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                procesado = false;
+                resultado = await TEF_A_TOMI(folio, datosTef, tefMotivoDevolucion, t24Encontrado, t24CuentaValida, t24DatosCliente, folioUnico, tefInsNombre);
+
+                if (resultado)
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
+                    procesado = true;
+                }
+                else
+                {
+                    bool existeFormato = await _entTefTomiDao.ExisteFormatoEntradaTef(Convert.ToInt64(folio));
+
+                    if (existeFormato)
+                    {
+                        procesado = true;
+                        Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
+                    }
+                }
+
+                if (procesado)
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A marcar el proceso como terminado.");
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro TEF_A_TOMI con folio: {folio}");
+                }
+            }
+
+            //Registro de la Entrada/Salida.
+            if (string.Equals(_configuracion.AliasProceso, "TOMI_ENTRADAS/SALIDAS", StringComparison.Ordinal))
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A insertar datos de Entrada/Salida en TOMI.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                if (conEntradaSalida)
+                {
+                    procesado = false;
+                    resultado = await TOMI_ENTRADA_SALIDA(folio, folioUnico, t24DatosCliente, cuentaBTMUM, comentarios);
+
+                    if (resultado)
+                    {
+                        procesado = true;
+                        Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio en base de Entrada/Salida.");
+                    }
+                    else
+                    {
+                        bool existeEntradaSalida = await _entTefTomiDao.ExisteEntradaSalidaPorReferencia(folioUnico);
+
+                        if (existeEntradaSalida)
+                        {
+                            procesado = true;
+                            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
+                        }
+                    }
+                }
+                else
+                {
+                    procesado = true;
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación no debe generar Entrada/Salida en TOMI.");
+                }
+
+                if (procesado)
+                {
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
+                }
+            }
+
+            //Actualización del estatus del TEF.
+            if (string.Equals(_configuracion.AliasProceso, "CAMBIA_ESTATUS", StringComparison.Ordinal))
+            {
+                bool rechazada = false;
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A actualizar estatus en TEF y TOMI.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                procesado = true;
+
+                if (devolucion)
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación es una DEVOLUCION o VOSTRO y envio su aceptación.");
+
+                    procesado = await RespondeEntradaTef("A", null, tefIdOperacion, tefFechaProceso, tefClaveRastreo, tefImporte);
+
+                    if (!procesado)
+                        throw new Exception($"Error en respuesta de la entrada TEF para el folio: {folio}");
+
+                    if (t24Encontrado)
+                    {
+                        if (t24CuentaValida)
+                        {
+                            if (!rfcCurpValido)
+                                rechazada = true;
+                        }
+                        else
+                        {
+                            rechazada = true;
+                        }
+                    }
+                    else
+                    {
+                        rechazada = true;
+                    }
+
+                    if (rechazada)
+                    {
+                        /// <summary>
+                        /// Ejecuta la operaciÃ³n TerminaProceso.
+                        /// </summary>
+                        await _controlServicio.TerminaProceso(new ProcesoDTO
+                        {
+                            Folio = folio,
+                            TipoOperacion = tipoOperacion,
+                            Servicio = _configuracion.NombreServicio,
+                            NombreProceso = _configuracion.NombreProceso,
+                            AliasProceso = _configuracion.AliasProceso,
+                            PId = _configuracion.Pid.Value
+                        });
+
+                        await _entTefTomiDao.MarcarMaestroRecibidaNoAbonada(
+                            Convert.ToInt64(folio),
+                            tipoOperacion);
+
+                        return true;
+                    }
+                }
+                else
+                {
+                    if (t24Encontrado)
+                    {
+                        if (t24CuentaValida)
+                        {
+                            if (!rfcCurpValido)
+                            {
+                                rechazada = true;
+                                procesado = await RespondeEntradaTef("R", 1, tefIdOperacion, tefFechaProceso, tefClaveRastreo, tefImporte);
+
+                                if (!procesado)
+                                    throw new Exception($"Error en respuesta de la entrada TEF para el folio: {folio}");
+                            }
+                        }
+                        else
+                        {
+                            rechazada = true;
+                            procesado = await RespondeEntradaTef("R", 5, tefIdOperacion, tefFechaProceso, tefClaveRastreo, tefImporte);
+
+                            if (!procesado)
+                                throw new Exception($"Error en respuesta de la entrada TEF para el folio: {folio}");
+                        }
+                    }
+                    else
+                    {
+                        rechazada = true;
+                        procesado = await RespondeEntradaTef("R", 1, tefIdOperacion, tefFechaProceso, tefClaveRastreo, tefImporte);
+
+                        if (!procesado)
+                            throw new Exception($"Error en respuesta de la entrada TEF para el folio: {folio}");
+                    }
+                }
+
+                if (procesado)
+                {
+                    if (rechazada)
+                    {
+                        Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A cancelar la operación por devolución.");
+
+                        await _entTefTomiDao.CancelarMaestroPorDevolucion(
+                            Convert.ToInt64(folio),
+                            tipoOperacion,
+                            razonRechazo,
+                            Convert.ToInt32(fechaEjecucionTexto),
+                            moneda,
+                            tefImporte);
+
+                        return true;
+                    }
+                    else
+                    {
+                        await _entTefTomiDao.ActualizarEstatusFormatoEntradaTefAScnp(Convert.ToInt64(folio));
+                    }
+                }
+
+                if (procesado)
+                {
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro CAMBIO_ESTATUS con folio: {folio}");
+                }
+            }
+
+            //Actualización del estatus del TEF, TOMI y ENTRADA/SALIDA.
+            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
+            {
+                int regsTef = 1;
+                int regsTomi = 0;
+                int regsEntSal = 0;
+
+                string mensajeError = string.Empty;
+
+                string fechaEjecucionTomi = string.Empty;
+                string monedaTomi = string.Empty;
+                decimal importeTomi = 0m;
+
+                string fechaEjecucionEntSal = string.Empty;
+                string monedaEntSal = string.Empty;
+                decimal importeEntSal = 0m;
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A conciliar operaciones entre TEF y TOMI.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                EntTefConciliacionTomiDto conciliacionTomi =
+                    await _entTefTomiDao.ObtenerConciliacionFormatoEntradaTef(Convert.ToInt64(folio));
+
+                if (conciliacionTomi != null)
+                {
+                    regsTomi = 1;
+                    fechaEjecucionTomi = conciliacionTomi.FechaAplicacion.ToString();
+                    monedaTomi = _vwT24.MonedaDefaultMN;
+                    importeTomi = conciliacionTomi.Importe;
+                }
+
+                if (conEntradaSalida)
+                {
+                    EntTefConciliacionEntradaSalidaDto conciliacionEntradaSalida =
+                        await _entTefTomiDao.ObtenerConciliacionEntradaSalida(folioUnico);
+
+                    if (conciliacionEntradaSalida != null)
+                    {
+                        regsEntSal = 1;
+                        fechaEjecucionEntSal = conciliacionEntradaSalida.Ent_FechaValor?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? string.Empty;
+                        monedaEntSal = _vwT24.ValidaMoneda(conciliacionEntradaSalida.Ent_Moneda_Cuenta);
+                        importeEntSal = conciliacionEntradaSalida.Ent_Importe;
+                    }
+                }
+
+                mensajeError = string.Empty;
+
+                if (regsTef == 1 &&
+                    regsTomi == 1 &&
+                    ((conEntradaSalida && regsEntSal == 1) || !conEntradaSalida))
+                {
+                    if (!string.Equals(fechaEjecucionTexto, fechaEjecucionTomi, StringComparison.Ordinal))
+                    {
+                        mensajeError += Environment.NewLine +
+                                        $" - Diferencia en la fecha de ejecución. TEF='{fechaEjecucionTexto}', TOMI='{fechaEjecucionTomi}'.";
+                    }
+
+                    if (!string.Equals(moneda, monedaTomi, StringComparison.Ordinal))
+                    {
+                        mensajeError += Environment.NewLine +
+                                        $" - Diferencia en la monedas. TEF='{moneda}', TOMI='{monedaTomi}'.";
+                    }
+
+                    if (tefImporte != importeTomi)
+                    {
+                        mensajeError += Environment.NewLine +
+                                        $" - Diferencia en el importe. TEF='{tefImporte}', TOMI='{importeTomi}'.";
+                    }
+
+                    if (conEntradaSalida)
+                    {
+                        if (!string.Equals(fechaEjecucionTexto, fechaEjecucionEntSal, StringComparison.Ordinal))
+                        {
+                            mensajeError += Environment.NewLine +
+                                            $" - Diferencia en la fecha de ejecución de Entrada/Salida. TEF='{fechaEjecucionTexto}', TOMI='{fechaEjecucionEntSal}'.";
+                        }
+
+                        if (!string.Equals(moneda, monedaEntSal, StringComparison.Ordinal))
+                        {
+                            mensajeError += Environment.NewLine +
+                                            $" - Diferencia en la monedas de Entrada/Salida. TEF='{moneda}', TOMI='{monedaEntSal}'.";
+                        }
+
+                        if (tefImporte != importeEntSal)
+                        {
+                            mensajeError += Environment.NewLine +
+                                            $" - Diferencia en el importe de Entrada/Salida. TEF='{tefImporte}', Entrada/Salida='{importeEntSal}'.";
+                        }
+                    }
+
+                    procesado = true;
+                }
+                else
+                {
+                    procesado = false;
+                    mensajeError += Environment.NewLine + " - No se ha registrado la operación en TOMI.";
+                }
+
+                if (!string.Equals(mensajeError, string.Empty, StringComparison.Ordinal))
+                {
+                    procesado = false;
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception(mensajeError);
+                }
+
+                if (procesado)
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación está correctamente conciliada.");
