@@ -4837,3 +4837,1351 @@ namespace Aplicacion.Servicios.Operaciones
 
     }
 }
+
+using Aplicacion.DTOs.ENT_COAS;
+using Aplicacion.Interfaces.ENT_COAS;
+using Aplicacion.Modelos;
+using Infraestructura.Repositorio.ENT_COAS;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
+using System.Linq;
+using System.Threading.Tasks;
+using static MUFG_T24.Comunes.Comunes;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    public class ENT_COAS
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IENTCOASTomiDao _tomiDao;
+        private readonly IENTCOASSpeiDao _speiDao;
+        private readonly ConexionT24Mw _vwT24;
+
+        private const string tipoOperacion = "ENT_COAS";
+
+        private string folioUnico = string.Empty;
+
+        private decimal cuentaBtmum = 0;
+        private string cuentaBeneficiario = string.Empty;
+        private string cuentaOrdenante = string.Empty;
+        private string codigoSwift = string.Empty;
+        private string codigoSwiftShort = string.Empty;
+        private string comentarios = string.Empty;
+        private string razonRechazo = string.Empty;
+
+        private decimal speiImporte = 0;
+        private decimal speiOpClave = 0;
+        private decimal speiFechaOper = 0;
+        private decimal speiOpFolio = 0;
+        private decimal speiInsClave = 0;
+        private string speiCveRastreo = string.Empty;
+        private string speiInsNombre = string.Empty;
+        private decimal causaDevolucionSpei = 0;
+
+        private decimal tipoOperacionSpei = 0;
+        private decimal tipoClaveBen = 0;
+
+        private bool t24Encontrado = false;
+        private bool t24CuentaValida = false;
+        private bool rfcCurpValido = false;
+
+        private DataTable datosClienteT24;
+
+        private readonly List<string> btmumClabes = new List<string>() { "00012180004471781901", "00002180019710381753", "00002180087000493707" };
+
+        public ENT_COAS(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            IENTCOASTomiDao tomiDao,
+            IENTCOASSpeiDao speiDao,
+            ConexionT24Mw vwT24)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _tomiDao = tomiDao;
+            _speiDao = speiDao;
+            _vwT24 = vwT24;
+        }
+
+        public async Task<bool> procesaOperacion(string folio)
+        {
+            string fechaEjecucion = string.Empty;
+            string moneda = string.Empty;
+            string subtipo = string.Empty;
+
+            bool conDatoSpei = false;
+            bool conEntradaSalida = true;
+            bool procesado;
+            bool resultado;
+            bool esInterbancarioBtmum = false;
+            bool devolucion = false;
+            bool tipoVostro = false;
+
+            decimal causaDev = 0;
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Iniciando");
+
+            InicializarVariablesOperacion();
+
+            _configuracion.AliasProceso =
+                await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
+                return false;
+
+            var participantes = await _speiDao.ObtenerParticipantesSpei();
+
+            var participantesDic = participantes
+                .GroupBy(x => x.InsClave)
+                .ToDictionary(x => x.Key, x => x.First().InsNombre);
+
+            folioUnico = await _vwT24.GeneraFolioUnico(
+                tipoOperacion,
+                ConexionT24Mw.CambiarFechaAJulianaT24(_configuracion.StrFechaSistema),
+                folio);
+
+            var orden = await _tomiDao.ObtenerOrdenPagoRecibidaPorFolio(
+                folio,
+                Convert.ToInt32(_configuracion.StrFechaSistema));
+
+            if (orden != null && orden.OpClave == Convert.ToDecimal(folio))
+            {
+                conDatoSpei = true;
+
+                fechaEjecucion = orden.OpFechaOper?.ToString("0") ?? string.Empty;
+                moneda = _vwT24.MonedaDefaultMN;
+
+                speiImporte = orden.OpMonto ?? 0;
+                comentarios = $"{DameTexto(orden.OpConceptoPago)}{DameTexto(orden.OpConceptoPag2)}";
+
+                tipoOperacionSpei = orden.TpClave ?? 0;
+                tipoClaveBen = orden.TcClaveBen ?? 0;
+
+                if ((tipoOperacionSpei == 1 || tipoOperacionSpei == 5) && tipoClaveBen != 10)
+                {
+                    subtipo = string.Empty;
+
+                    cuentaBeneficiario = DameTexto(orden.OpCuentaBen);
+
+                    if (cuentaBeneficiario.Length == 18)
+                        cuentaBtmum = Convert.ToDecimal(cuentaBeneficiario.Substring(6, 11));
+                    else if (cuentaBeneficiario.Length == 20)
+                        cuentaBtmum = Convert.ToDecimal(cuentaBeneficiario.Substring(8, 11));
+
+                    cuentaOrdenante = DameTexto(orden.OpCuentaOrd);
+
+                    Config.EscribirLog(
+                        $"INFO|{tipoOperacion}.procesaOperacion|Validando si la cuenta del ordenante es BTMUM de bancos. CuentaOrdenante='{cuentaOrdenante}'.");
+
+                    esInterbancarioBtmum = false;
+
+                    foreach (string clabe in btmumClabes)
+                    {
+                        if (clabe == cuentaOrdenante)
+                        {
+                            esInterbancarioBtmum = true;
+                            subtipo = "BBC";
+                            break;
+                        }
+                    }
+
+                    Config.EscribirLog(
+                        $"INFO|{tipoOperacion}.procesaOperacion|Es una cuenta de bancos de BTMUM={esInterbancarioBtmum}.");
+                }
+                else if (tipoOperacionSpei == 6 || tipoOperacionSpei == 3)
+                {
+                    subtipo = "VOSTRO";
+                    tipoVostro = true;
+
+                    codigoSwift = DameTexto(orden.OpNomBen);
+                    cuentaBtmum = 0;
+
+                    if (codigoSwift.Length >= 8)
+                    {
+                        codigoSwiftShort = codigoSwift.Substring(0, 8);
+
+                        if (codigoSwiftShort == "BOFCUS33")
+                            cuentaBtmum = 4500180;
+                        else if (codigoSwiftShort == "BOTKUS33")
+                            cuentaBtmum = 4500202;
+                        else if (codigoSwiftShort == "BOTKJPJT")
+                            cuentaBtmum = 4500164;
+                        else if (codigoSwiftShort == "BOTKGB2L")
+                            cuentaBtmum = 4500253;
+                        else if (codigoSwiftShort == "MTBCUS33")
+                            cuentaBtmum = 5005256;
+                        else if (codigoSwiftShort == "BOTKBRSX")
+                            cuentaBtmum = 5007436;
+                        else if (codigoSwiftShort == "BOTKNL2X")
+                            cuentaBtmum = 5004817;
+                        else if (codigoSwiftShort == "BOTKUS6L")
+                            cuentaBtmum = 5003870;
+                        else if (codigoSwiftShort == "BOTKSGSX")
+                            cuentaBtmum = 5003985;
+                        else if (codigoSwiftShort == "BOTKESMX")
+                            cuentaBtmum = 5006377;
+                        else
+                            cuentaBtmum = 0;
+                    }
+
+                    if (cuentaBtmum == 0)
+                    {
+                        cuentaBeneficiario = DameTexto(orden.OpCuentaBen);
+
+                        if (cuentaBeneficiario.IndexOf("4500180", StringComparison.OrdinalIgnoreCase) >= 0)
+                            cuentaBtmum = 4500180;
+                        else if (cuentaBeneficiario.IndexOf("4500202", StringComparison.OrdinalIgnoreCase) >= 0)
+                            cuentaBtmum = 4500202;
+                        else if (cuentaBeneficiario.IndexOf("4500164", StringComparison.OrdinalIgnoreCase) >= 0)
+                            cuentaBtmum = 4500164;
+                        else if (cuentaBeneficiario.IndexOf("4500253", StringComparison.OrdinalIgnoreCase) >= 0)
+                            cuentaBtmum = 4500253;
+                        else if (cuentaBeneficiario.IndexOf("4500261", StringComparison.OrdinalIgnoreCase) >= 0)
+                            cuentaBtmum = 4500261;
+                    }
+                }
+                else if (tipoOperacionSpei == 0 || tipoClaveBen == 10)
+                {
+                    causaDevolucionSpei = orden.CdClave ?? 0;
+                }
+                else
+                {
+                    throw new Exception($"Tipo de operación de entrada SPEI desconocido, tipo={tipoOperacionSpei}");
+                }
+
+                cuentaBtmum = Convert.ToDecimal(Convert.ToInt64(cuentaBtmum));
+
+                speiOpClave = orden.OpClave ?? 0;
+                speiFechaOper = orden.OpFechaOper ?? 0;
+                speiOpFolio = orden.OpFolio ?? 0;
+                speiCveRastreo = orden.OpCveRastreo;
+                speiInsClave = orden.InsClave ?? 0;
+            }
+
+            if (tipoOperacionSpei == 0 || tipoClaveBen == 10)
+            {
+                subtipo = "DEVOLUCION";
+                devolucion = true;
+
+                await _tomiDao.MarcarOrdenEmitidaComoDevuelta(
+                    Convert.ToInt32(speiFechaOper),
+                    Convert.ToInt32(speiInsClave),
+                    speiImporte,
+                    speiCveRastreo,
+                    Convert.ToInt32(causaDevolucionSpei));
+
+                var ordenDevuelta =
+                    await _tomiDao.ObtenerOrdenEmitidaDevueltaParaValidacion(
+                        Convert.ToInt32(speiFechaOper),
+                        Convert.ToInt32(speiInsClave),
+                        speiImporte,
+                        speiCveRastreo);
+
+                if (ordenDevuelta != null)
+                {
+                    conDatoSpei = true;
+
+                    orden = AplicarCamposDevolucionSobreOrdenOriginal(orden, ordenDevuelta);
+
+                    if (string.IsNullOrEmpty(ordenDevuelta.OpCuentaOrd))
+                    {
+                        cuentaBeneficiario = string.Empty;
+                        cuentaBtmum = 0;
+                        esInterbancarioBtmum = true;
+                        subtipo = "Part.-Vostro";
+
+                        Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Devolucion, SIN CUENTA.");
+                    }
+                    else
+                    {
+                        cuentaBeneficiario = ordenDevuelta.OpCuentaOrd;
+
+                        if (cuentaBeneficiario.Length == 18)
+                            cuentaBtmum = Convert.ToDecimal(cuentaBeneficiario.Substring(6, 11));
+                        else if (cuentaBeneficiario.Length == 20)
+                            cuentaBtmum = Convert.ToDecimal(cuentaBeneficiario.Substring(8, 11));
+
+                        Config.EscribirLog(
+                            $"INFO|{tipoOperacion}.procesaOperacion|Devolucion, cuenta='{cuentaBeneficiario}',CuentaBTMUM={cuentaBtmum}.");
+                    }
+                }
+                else
+                {
+                    conDatoSpei = false;
+                }
+
+                cuentaBtmum = Convert.ToDecimal(Convert.ToInt64(cuentaBtmum));
+            }
+
+            if (!conDatoSpei)
+                throw new Exception($"No se encontró información de la folio (op_clave) {folio} en los datos de entrada del SPEI");
+
+            if (!participantesDic.ContainsKey(speiInsClave))
+                throw new Exception($"No se tiene relación con la institución {speiInsClave}");
+
+            speiInsNombre = participantesDic[speiInsClave];
+
+            if (esInterbancarioBtmum)
+            {
+                conEntradaSalida = false;
+                t24Encontrado = false;
+                t24CuentaValida = false;
+                rfcCurpValido = false;
+            }
+            else
+            {
+                Config.EscribirLog(
+                    $"INFO|{tipoOperacion}.procesaOperacion|Validando en T24 los datos de la cuenta '{cuentaBtmum}'.");
+
+                t24Encontrado = false;
+                t24CuentaValida = false;
+                rfcCurpValido = false;
+
+                datosClienteT24 = await _vwT24.DatosClienteCuentasVw(cuentaBtmum.ToString());
+
+                DataRow filaClienteT24 = ObtenerFilaT24(folio, "VALIDACION_T24", false);
+
+                if (filaClienteT24 != null)
+                {
+                    if (filaClienteT24["CUSTOMER"].ToString() != string.Empty)
+                    {
+                        t24Encontrado = true;
+
+                        if (filaClienteT24["CURRENCY"].ToString() == _vwT24.MonedaDefaultMN)
+                        {
+                            t24CuentaValida = true;
+                        }
+                        else
+                        {
+                            Config.EscribirLog(
+                                $"ALERTA|{tipoOperacion}.procesaOperacion|La cuenta seleccionada en el sistema T24 está relacionada a una moneda no válida.");
+
+                            razonRechazo = "La cuenta seleccionada en el sistema T24 esta relacionada a una moneda no valida";
+                        }
+                    }
+                    else
+                    {
+                        Config.EscribirLog($"ALERTA|{tipoOperacion}.procesaOperacion|No Existe la cuenta en el sistema T24.");
+                        razonRechazo = "No existe la cuenta en el sistema T24";
+                    }
+                }
+                else
+                {
+                    t24Encontrado = false;
+                    t24CuentaValida = false;
+                    razonRechazo = "No existe la cuenta en el sistema T24";
+
+                    Config.EscribirLog($"ALERTA|{tipoOperacion}.procesaOperacion|No Existe el cliente en el sistema T24.");
+                }
+
+                rfcCurpValido = true;
+
+                if (tipoOperacionSpei == 1)
+                {
+                    if (!EsValidoRFC_CURP_SPEI(orden.OpRfcCurpOrd))
+                    {
+                        Config.EscribirLog(
+                            $"INFO|{tipoOperacion}.procesaOperacion|RFC ordenante invalido='{DameTexto(orden.OpRfcCurpOrd)}'.");
+
+                        rfcCurpValido = false;
+                    }
+                }
+
+                if (t24Encontrado && t24CuentaValida)
+                {
+                    Config.EscribirLog(
+                        $"INFO|{tipoOperacion}.procesaOperacion|La cuenta '{cuentaBtmum}' existe en T24 y es en moneda nacional.");
+                }
+                else
+                {
+                    causaDev = 1;
+                    procesado = true;
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A cancelar la operación por cuenta o cliente inexistente.");
+
+                    await _tomiDao.CancelarPlanTrabajoMaestroDevuelto(
+                        folio,
+                        tipoOperacion,
+                        razonRechazo,
+                        fechaEjecucion,
+                        moneda,
+                        speiImporte);
+
+                    await _tomiDao.MarcarOrdenRecibidaDevueltaPorFolio(folio, Convert.ToInt32(causaDev));
+
+                    await _tomiDao.InsertarDevolucionCoasDesdeOrdenRecibida(
+                        folio,
+                        Convert.ToInt32(_configuracion.StrFechaSistema),
+                        Convert.ToInt32(causaDev));
+
+                    if (!procesado)
+                        throw new Exception($"Error en procesamiento de registro con folio: {folio}");
+
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+
+
+                    _configuracion.AliasProceso =
+
+                        await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+
+                        {
+
+                            Folio = folio,
+
+                            TipoOperacion = tipoOperacion,
+
+                            Servicio = _configuracion.NombreServicio,
+
+                            NombreProceso = _configuracion.NombreProceso,
+
+                            AliasProceso = _configuracion.AliasProceso,
+
+                            PId = _configuracion.Pid.Value
+
+                        });
+                }
+
+                conEntradaSalida = t24Encontrado && t24CuentaValida && rfcCurpValido;
+            }
+
+            _configuracion.AliasProceso =
+                await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+            int fechaSistema = int.Parse(_configuracion.StrFechaSistema, CultureInfo.InvariantCulture);
+            int intFechaEjecucion = int.Parse(fechaEjecucion, CultureInfo.InvariantCulture);
+            if (fechaEjecucion != _configuracion.StrFechaSistema)
+            {
+                if (intFechaEjecucion < fechaSistema)
+                {
+                    await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
+                }
+
+                throw new Exception(
+                    $"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+            }
+
+            // DATOS_GRAL
+            if (_configuracion.AliasProceso == "DATOS_GRAL")
+            {
+                Config.EscribirLog(
+                    $"INFO|{tipoOperacion}.procesaOperacion|Actualizando DATOS_GRAL. T24_Encontrado={t24Encontrado},T24_CuentaValida={t24CuentaValida},RFC_CURP_Valido={rfcCurpValido},FechaEjecucion={fechaEjecucion},esInterbancario={esInterbancarioBtmum},cve_moneda='{moneda}',importe={speiImporte}.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                int? numCliente = null;
+                string nombreCliente = null;
+                string numCuenta = null;
+
+                if (t24Encontrado && t24CuentaValida && rfcCurpValido)
+                {
+                    DataRow filaClienteT24 = ObtenerFilaT24(folio, "DATOS_GRAL", true);
+                    numCliente = Convert.ToInt32(filaClienteT24["CUSTOMER"].ToString());
+                    nombreCliente = filaClienteT24["NAME_1"].ToString();
+                    numCuenta = cuentaBtmum.ToString("0");
+                }
+
+                bool actualizado =
+                    await _tomiDao.ActualizarPlanTrabajoMaestroDatosGenerales(
+                        folio,
+                        tipoOperacion,
+                        folioUnico,
+                       fechaEjecucion,
+                        moneda,
+                        speiImporte,
+                        subtipo,
+                        numCliente,
+                        nombreCliente,
+                        numCuenta);
+
+                if (!actualizado)
+                    throw new Exception($"Error en procesamiento de registro DATOS_GRAL con folio: {folio}");
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+
+
+                _configuracion.AliasProceso =
+
+                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+            }
+
+            // COAS_A_TOMI
+            if (_configuracion.AliasProceso == "COAS_A_TOMI")
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A insertar datos de COAS a TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                resultado = await SPEI_A_TOMI(folio, orden);
+
+                if (resultado)
+                {
+                    procesado = true;
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
+                }
+                else
+                {
+                    int count = await _tomiDao.ContarEntradasSpeiPorFolio(folio);
+
+                    procesado = count > 0;
+
+                    if (procesado)
+                    {
+                        Config.EscribirLog(
+                            $"INFO|{tipoOperacion}.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
+                    }
+                }
+
+                if (!procesado)
+                    throw new Exception($"Error en procesamiento de registro COAS_A_TOMI con folio: {folio}");
+
+                if (esInterbancarioBtmum)
+                {
+                    try
+                    {
+                        await _tomiDao.MarcarOrdenRecibidaAceptada(folio);
+                        procesado = true;
+                    }
+                    catch
+                    {
+                        throw new Exception($"Error en respuesta de la entrada SPEI y cuenta CLABE de BTMUM para el folio: {folio}");
+                    }
+
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+
+
+                    _configuracion.AliasProceso =
+
+                        await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+
+                        {
+
+                            Folio = folio,
+
+                            TipoOperacion = tipoOperacion,
+
+                            Servicio = _configuracion.NombreServicio,
+
+                            NombreProceso = _configuracion.NombreProceso,
+
+                            AliasProceso = _configuracion.AliasProceso,
+
+                            PId = _configuracion.Pid.Value
+
+                        });
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A terminar la operacion por ser cuenta BTMUM pero de Bancos.");
+
+                    await _tomiDao.MarcarEntradaSpeiProcesada(folio);
+
+                    if (subtipo == "BBC")
+                    {
+                        await _tomiDao.FinalizarPlanTrabajoMaestroRecibidaNoAbonadaBbc(
+                            folio,
+                            tipoOperacion,
+                            subtipo,
+                            fechaEjecucion,
+                            moneda,
+                            speiImporte,
+                            "Operación de Bancos BTMUM");
+
+                        await _tomiDao.FinalizarDetallePlanTrabajoExceptoCep(folio, tipoOperacion);
+                    }
+                    else
+                    {
+                        await _tomiDao.FinalizarPlanTrabajoMaestroRecibidaNoAbonada(
+                            folio,
+                            tipoOperacion,
+                            subtipo,
+                            fechaEjecucion,
+                            moneda,
+                            speiImporte,
+                            "Operación de Bancos BTMUM");
+                    }
+
+                    return true;
+                }
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A marcar el proceso como terminado.");
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+
+
+                _configuracion.AliasProceso =
+
+                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+            }
+
+            // TOMI_ENTRADAS/SALIDAS
+            if (_configuracion.AliasProceso == "TOMI_ENTRADAS/SALIDAS")
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A insertar datos de Entrada/Salida en TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                if (conEntradaSalida)
+                {
+                    resultado = await TOMI_ENTRADA_SALIDA(folio);
+
+                    if (!resultado)
+                    {
+                        int count = await _tomiDao.ContarEntradasSalidasPorFolioUnico(folioUnico);
+                        resultado = count > 0;
+
+                        if (resultado)
+                        {
+                            Config.EscribirLog(
+                                $"INFO|{tipoOperacion}.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
+                        }
+                    }
+
+                    if (!resultado)
+                        throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio en base de Entrada/Salida.");
+                }
+                else
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación no debe generar Entrada/Salida en TOMI.");
+                }
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+
+
+                _configuracion.AliasProceso =
+
+                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+            }
+
+            // CAMBIA_ESTATUS
+            if (_configuracion.AliasProceso == "CAMBIA_ESTATUS")
+            {
+                bool rechazada = false;
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A actualizar estatus en SPEI y TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                procesado = true;
+
+                if (devolucion || tipoVostro)
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación es una DEVOLUCION o VOSTRO y envio su aceptación.");
+
+                    await _tomiDao.MarcarOrdenRecibidaAceptada(folio);
+
+                    if (t24Encontrado)
+                    {
+                        if (t24CuentaValida)
+                        {
+                            if (!rfcCurpValido)
+                                rechazada = true;
+                        }
+                        else
+                        {
+                            rechazada = true;
+                        }
+                    }
+                    else
+                    {
+                        rechazada = true;
+                    }
+
+                    if (rechazada)
+                    {
+                        await _controlServicio.TerminaProceso(new ProcesoDTO
+                        {
+                            Folio = folio,
+                            TipoOperacion = tipoOperacion,
+                            Servicio = _configuracion.NombreServicio,
+                            NombreProceso = _configuracion.NombreProceso,
+                            AliasProceso = _configuracion.AliasProceso,
+                            PId = _configuracion.Pid.Value
+                        });
+
+                        _configuracion.AliasProceso =
+                            await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                            {
+                                Folio = folio,
+                                TipoOperacion = tipoOperacion,
+                                Servicio = _configuracion.NombreServicio,
+                                NombreProceso = _configuracion.NombreProceso,
+                                AliasProceso = _configuracion.AliasProceso,
+                                PId = _configuracion.Pid.Value
+                            });
+
+                        await _tomiDao.ActualizarPlanTrabajoMaestroRecibidaNoAbonada(
+                            folio,
+                            tipoOperacion);
+
+                        return true;
+                    }
+                }
+                else
+                {
+                    if (t24Encontrado)
+                    {
+                        if (t24CuentaValida)
+                        {
+                            if (rfcCurpValido)
+                            {
+                                await _tomiDao.MarcarOrdenRecibidaAceptada(folio);
+                            }
+                            else
+                            {
+                                rechazada = true;
+                                causaDev = 14;
+
+                                await _tomiDao.MarcarOrdenRecibidaRechazada(folio, Convert.ToInt32(causaDev));
+                            }
+                        }
+                        else
+                        {
+                            rechazada = true;
+                            causaDev = 5;
+
+                            await _tomiDao.MarcarOrdenRecibidaRechazada(folio, Convert.ToInt32(causaDev));
+                        }
+                    }
+                    else
+                    {
+                        rechazada = true;
+                        causaDev = 1;
+
+                        await _tomiDao.MarcarOrdenRecibidaRechazada(folio, Convert.ToInt32(causaDev));
+                    }
+                }
+
+                if (procesado)
+                {
+                    if (rechazada)
+                    {
+                        Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A cancelar la operación por devolución.");
+
+                        await _tomiDao.CancelarPlanTrabajoMaestroDevuelto(
+                            folio,
+                            tipoOperacion,
+                            razonRechazo,
+                            fechaEjecucion,
+                            moneda,
+                            speiImporte);
+
+                        await _tomiDao.InsertarDevolucionCoasDesdeOrdenRecibida(
+                            folio,
+                            Convert.ToInt32(_configuracion.StrFechaSistema),
+                            Convert.ToInt32(causaDev));
+
+                        await _tomiDao.MarcarEntradaSpeiRechazada(folio, Convert.ToInt32(causaDev));
+                    }
+                    else
+                    {
+                        await _tomiDao.MarcarEntradaSpeiConfirmadaPendiente(folio);
+                    }
+                }
+
+                if (!procesado)
+                    throw new Exception($"Error en procesamiento de registro CAMBIO_ESTATUS con folio: {folio}");
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+
+
+                _configuracion.AliasProceso =
+
+                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+            }
+
+            // CONCILIAR
+            if (_configuracion.AliasProceso == "CONCILIAR")
+            {
+                string error = string.Empty;
+
+                string fechaEjecucionTomi = string.Empty;
+                string monedaTomi = string.Empty;
+                decimal importeTomi = 0;
+
+                string fechaEjecucionEntSal = string.Empty;
+                string monedaEntSal = string.Empty;
+                decimal importeEntSal = 0;
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A conciliar operaciones entre SPEI y TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                var datosTomi = await _tomiDao.ObtenerConciliacionTomiPorFolio(folio);
+
+                if (datosTomi == null)
+                    error += Environment.NewLine + " - No se ha registrado la operación en TOMI.";
+                else
+                {
+                    fechaEjecucionTomi = datosTomi.OpFechaOper?.ToString("0") ?? string.Empty;
+                    monedaTomi = _vwT24.MonedaDefaultMN;
+                    importeTomi = datosTomi.OpMonto ?? 0;
+
+                    if (fechaEjecucion != fechaEjecucionTomi)
+                        error += Environment.NewLine + $" - Diferencia en la fecha de ejecución. SPEI='{fechaEjecucion}', TOMI='{fechaEjecucionTomi}'.";
+
+                    if (moneda != monedaTomi)
+                        error += Environment.NewLine + $" - Diferencia en la monedas. SPEI='{moneda}', TOMI='{monedaTomi}'.";
+
+                    if (speiImporte != importeTomi)
+                        error += Environment.NewLine + $" - Diferencia en el importe. SPEI='{speiImporte}', TOMI='{importeTomi}'.";
+                }
+
+                if (conEntradaSalida)
+                {
+                    var datosEntSal =
+                        await _tomiDao.ObtenerConciliacionEntradaSalidaPorReferencia(folioUnico);
+
+                    if (datosEntSal == null)
+                        error += Environment.NewLine + " - No se ha registrado la operación en Entrada/Salida.";
+                    else
+                    {
+                        fechaEjecucionEntSal =
+                            datosEntSal.EntFechaValor.HasValue
+                                ? datosEntSal.EntFechaValor.Value.ToString("yyyyMMdd")
+                                : string.Empty;
+
+                        monedaEntSal = _vwT24.ValidaMoneda(datosEntSal.EntMonedaCuenta);
+                        importeEntSal = datosEntSal.EntImporte ?? 0;
+
+                        if (fechaEjecucion != fechaEjecucionEntSal)
+                            error += Environment.NewLine + $" - Diferencia en la fecha de ejecución de Entrada/Salida. SPEI='{fechaEjecucion}', TOMI='{fechaEjecucionEntSal}'.";
+
+                        if (moneda != monedaEntSal)
+                            error += Environment.NewLine + $" - Diferencia en la monedas de Entrada/Salida. SPEI='{moneda}', TOMI='{monedaEntSal}'.";
+
+                        if (speiImporte != importeEntSal)
+                            error += Environment.NewLine + $" - Diferencia en el importe de Entrada/Salida. SPEI='{speiImporte}', Entrada/Salida='{importeEntSal}'.";
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(error))
+                    throw new Exception(error);
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación está correctamente conciliada.");
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+
+
+                _configuracion.AliasProceso =
+
+                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+
+                _configuracion.AliasProceso = string.Empty;
+            }
+
+            return true;
+        }
+
+        private async Task<bool> SPEI_A_TOMI(string folio, EntCoasOrdenPagoDto orden)
+        {
+            try
+            {
+                if (orden == null)
+                    throw new Exception($"No existe información COAS para insertar en TOMI. Folio {folio}");
+
+                string nfEstatus =
+                    t24Encontrado && t24CuentaValida
+                        ? "PEND"
+                        : "RECC";
+
+                var dto = new EntCoasInsertarFormatoSpeiDto
+                {
+                    OpClave = orden.OpClave,
+                    OpFechaOper = orden.OpFechaOper,
+                    MeClave = orden.MeClave,
+                    OpFolio = orden.OpFolio,
+                    InsClave = orden.InsClave,
+                    OpMonto = orden.OpMonto,
+                    TpClave = orden.TpClave,
+                    OpCveRastreo = orden.OpCveRastreo,
+                    OpNomOrd = orden.OpNomOrd,
+                    TcClaveOrd = orden.TcClaveOrd,
+                    OpCuentaOrd = orden.OpCuentaOrd,
+                    OpRfcCurpOrd = orden.OpRfcCurpOrd,
+                    OpNomBen = orden.OpNomBen,
+                    TcClaveBen = orden.TcClaveBen,
+                    OpCuentaBen = orden.OpCuentaBen,
+                    OpRfcCurpBen = orden.OpRfcCurpBen,
+                    OpNomBen2 = orden.OpNomBen2,
+                    TcClaveBen2 = orden.TcClaveBen2,
+                    OpCuentaBen2 = orden.OpCuentaBen2,
+                    OpRfcCurpBen2 = orden.OpRfcCurpBen2,
+                    OpConceptoPago = orden.OpConceptoPago,
+                    OpConceptoPag2 = orden.OpConceptoPag2,
+                    OpIva = orden.OpIva,
+                    OpRefNumerica = orden.OpRefNumerica,
+                    OpRefCobranza = orden.OpRefCobranza,
+                    OpClavePago = orden.OpClavePago,
+                    ToClave = orden.ToClave,
+                    CdClave = orden.CdClave,
+                    OpEstado = orden.OpEstado,
+                    OpCde = orden.OpCde,
+                    OpFechaCap = orden.OpFechaCap,
+                    OpHoraCap = orden.OpHoraCap,
+                    OpTipoOrden = orden.OpTipoOrden,
+                    OpPrioridad = orden.OpPrioridad,
+                    UsuClave = orden.UsuClave,
+                    OpFolioServidor = orden.OpFolioServidor,
+                    OpRazonRechazo = razonRechazo,
+                    OpUsuAutoriza = orden.OpUsuAutoriza,
+                    OpHoraLiqBm = orden.OpHoraLiqBm,
+                    OpHoraLiqSist = orden.OpHoraLiqSist,
+
+                    NfEstatus = nfEstatus,
+                    NfFolioUnico = folioUnico,
+                    T24CustomerCode = ObtenerValorT24("CUSTOMER"),
+                    T24CompanyName = ObtenerValorT24("NAME_1"),
+                    T24BenAcctNo = cuentaBtmum.ToString("0"),
+                    NfBancoBenef = speiInsNombre,
+                    NfFechaEjecucion = Convert.ToInt32(_configuracion.StrFechaSistema)
+                };
+
+                bool insertado = await _tomiDao.InsertarFormatoSpei(dto);
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.SPEI_A_TOMI|Resultado={insertado}");
+
+                return insertado;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|{tipoOperacion}.SPEI_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
+
+                return false;
+            }
+        }
+        
+        private async Task<bool> TOMI_ENTRADA_SALIDA(string folio)
+        {
+            try
+            {
+                var entradaSpei = await _tomiDao.ObtenerEntradaSpeiTomiPorFolio(folio);
+
+                if (entradaSpei == null)
+                    return false;
+
+                var dto = new EntCoasInsertarEntradaSalidaDto
+                {
+                    Referencia = folioUnico,
+                    NumCliente = ConversionHelper.TryParseNullableDecimal(ObtenerValorT24("CUSTOMER")),
+                    Cdl = ConversionHelper.TryParseNullableDecimal(ObtenerValorT24("CUSTOMER")),
+                    Ordenante = ObtenerValorT24("ACCOUNT_TITLE_1"),
+                    Operacion = 198,
+                    OperacionDesc = "Entrada  (TTP)",
+                    Tipo = "D",
+                    TipoDesc = "Doméstica",
+                    Cuenta = cuentaBtmum,
+                    Nombre = ObtenerValorT24("ACCOUNT_TITLE_1"),
+                    CuentaMoneda = ObtenerValorT24("CURRENCY"),
+                    Via = 850,
+                    ViaDesc = "TRF RECIBIDA MXN SPEUA",
+                    Importe = Convert.ToDecimal(entradaSpei.OpMonto.Value),
+                    Saldo = 0,
+                    Comentarios = comentarios,
+                    FechaCaptura = ConversionHelper.TextoAFechaT24(_configuracion.StrFechaSistema),
+                    FechaValor = ConversionHelper.TextoAFechaT24(_configuracion.StrFechaSistema),
+                    Hora = DateTime.Now.ToLongTimeString(),
+                    Capturista = "JEAI",
+                    Fad = 0,
+                    ReferenciaControl = "A",
+                    ReferenciaControlCont = 0
+                };
+
+                bool insertado = await _tomiDao.InsertarEntradaSalida(dto);
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.TOMI_ENTRADA_SALIDA|Resultado={insertado}");
+
+                return insertado;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog(
+                    $"ERROR|{tipoOperacion}.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}. Trace: {ex}");
+
+                return false;
+            }
+        }
+
+        private bool EsValidoRFC_CURP_SPEI(object texto)
+        {
+            string textoValidar = DameTexto(texto).Trim();
+
+            if (textoValidar == "ND")
+                return true;
+
+            if (EsRFC(textoValidar))
+                return true;
+
+            if (EsCURP(textoValidar))
+                return true;
+
+            return false;
+        }
+
+        private void InicializarVariablesOperacion()
+        {
+            cuentaBtmum = 0;
+            cuentaBeneficiario = string.Empty;
+            cuentaOrdenante = string.Empty;
+            codigoSwift = string.Empty;
+            codigoSwiftShort = string.Empty;
+            comentarios = string.Empty;
+            razonRechazo = string.Empty;
+
+            speiImporte = 0;
+            speiOpClave = 0;
+            speiFechaOper = 0;
+            speiOpFolio = 0;
+            speiInsClave = 0;
+            speiCveRastreo = string.Empty;
+            speiInsNombre = string.Empty;
+            causaDevolucionSpei = 0;
+
+            tipoOperacionSpei = 0;
+            tipoClaveBen = 0;
+
+            t24Encontrado = false;
+            t24CuentaValida = false;
+            rfcCurpValido = false;
+
+            datosClienteT24 = null;
+        }
+
+        private EntCoasOrdenPagoDto AplicarCamposDevolucionSobreOrdenOriginal(
+            EntCoasOrdenPagoDto original,
+            EntCoasOrdenPagoDto devolucion)
+        {
+            if (original == null)
+                return devolucion;
+
+            original.OpCveRastreo = devolucion.OpCveRastreo;
+            original.OpNomOrd = devolucion.OpNomOrd;
+            original.TcClaveOrd = devolucion.TcClaveOrd;
+            original.OpCuentaOrd = devolucion.OpCuentaOrd;
+            original.OpRfcCurpOrd = devolucion.OpRfcCurpOrd;
+            original.OpNomBen = devolucion.OpNomBen;
+            original.TcClaveBen = devolucion.TcClaveBen;
+            original.OpCuentaBen = devolucion.OpCuentaBen;
+            original.OpRfcCurpBen = devolucion.OpRfcCurpBen;
+            original.OpNomBen2 = devolucion.OpNomBen2;
+            original.TcClaveBen2 = devolucion.TcClaveBen2;
+            original.OpCuentaBen2 = devolucion.OpCuentaBen2;
+            original.OpRfcCurpBen2 = devolucion.OpRfcCurpBen2;
+            original.OpConceptoPago = devolucion.OpConceptoPago;
+            original.OpConceptoPag2 = devolucion.OpConceptoPag2;
+            original.OpIva = devolucion.OpIva;
+            original.OpRefNumerica = devolucion.OpRefNumerica;
+            original.OpRefCobranza = devolucion.OpRefCobranza;
+            original.OpClavePago = devolucion.OpClavePago;
+            original.ToClave = devolucion.ToClave;
+            original.CdClave = devolucion.CdClave;
+            original.OpEstado = devolucion.OpEstado;
+            original.OpCde = devolucion.OpCde;
+            original.OpFechaCap = devolucion.OpFechaCap;
+            original.OpHoraCap = devolucion.OpHoraCap;
+            original.OpTipoOrden = devolucion.OpTipoOrden;
+            original.OpPrioridad = devolucion.OpPrioridad;
+            original.UsuClave = devolucion.UsuClave;
+            original.OpFolioServidor = devolucion.OpFolioServidor;
+            original.OpRazonRechazo = devolucion.OpRazonRechazo;
+            original.OpUsuAutoriza = devolucion.OpUsuAutoriza;
+            original.OpTopologia = devolucion.OpTopologia;
+            original.ErrClave = devolucion.ErrClave;
+            original.OpExporta = devolucion.OpExporta;
+            original.OpCargoAbono = devolucion.OpCargoAbono;
+            original.OpAfectaBan = devolucion.OpAfectaBan;
+            original.OpDuplicado = devolucion.OpDuplicado;
+            original.OpHoraLiqBm = devolucion.OpHoraLiqBm;
+            original.OpHoraLiqSist = devolucion.OpHoraLiqSist;
+
+            return original;
+        }
+  
+        private DataRow ObtenerFilaT24(string folio, string etapa, bool requerida)
+        {
+            if (datosClienteT24 == null)
+                throw new Exception($"Error técnico al consultar datos T24 para folio {folio} en etapa {etapa}.");
+
+            if (datosClienteT24.Rows.Count == 0)
+            {
+                if (requerida)
+                    throw new Exception($"No se encontraron datos T24 para folio {folio} en etapa {etapa}.");
+
+                return null;
+            }
+
+            return datosClienteT24.Rows[0];
+        }
+
+        private string ObtenerValorT24(string columna)
+        {
+            DataRow fila = ObtenerFilaT24(string.Empty, "LECTURA_COLUMNA", false);
+            if (fila == null)
+                return string.Empty;
+
+            if (!datosClienteT24.Columns.Contains(columna))
+                return string.Empty;
+
+            object valor = fila[columna];
+
+            return DameTexto(valor);
+        }
+
+     }
+}
