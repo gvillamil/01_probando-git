@@ -8997,3 +8997,255 @@ namespace Aplicacion.Servicios.Operaciones
                 throw new Exception("No se tiene información de CITY_BEN para realizar el pago.");
 
             Config.EscribirLog($"INFO|FXI.procesaOperacion|Veamos que trae la fecha{valoresFormato[13]}-----{fechaEjecucion}");
+
+            int fechaSistema = int.Parse(_configuracion.StrFechaSistema);
+            int intFechaEjecucion = int.Parse(fechaEjecucion);
+            if (intFechaEjecucion < fechaSistema)
+            {
+                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
+                throw new Exception(
+                    $"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+            }
+
+            // Genero el folio único.
+            folioUnico = await _vwT24.GeneraFolioUnico(
+                tipoOperacion,
+                ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
+                folio);
+
+            // ¿Fecha futura?
+            fechaFutura = string.CompareOrdinal(fechaEjecucion, _configuracion.StrFechaSistema) > 0;
+
+            // Fecha de ejecución y tiene un forex asignado?
+            Config.EscribirLog("INFO|FXI.procesaOperacion|Validando si la operación está asignada a un Forex.");
+
+            if (!string.IsNullOrWhiteSpace(folioForex))
+            {
+                Config.EscribirLog($"INFO|FXI.procesaOperacion|Asignado el folio forex: {folioForex} .");
+                conForex = true;
+
+                if (decimal.TryParse(folioForex, out _))
+                    throw new Exception($"El Folio del Forex no es válido porque es numérico; se espera una referencia alfanumérica/external ref: {folioForex}");
+
+                FxiForexEstatusTomiDto forexStatus = await _fxiDao.ObtenerEstatusForex(folioForex);
+                if (forexStatus != null &&
+                    string.Equals(forexStatus.STATUSOPERACION, "CANCELADO", StringComparison.OrdinalIgnoreCase))
+                {
+                    forexCancelado = true;
+                    conEntradaSalida = false;
+                    Config.EscribirLog("INFO|FXI.procesaOperacion|FOREX CANCELADO.");
+                }
+            }
+
+            SpecialInternationalDto instruction = SpecialInternationalDto.MapFromValoresFormato(valoresFormato);
+            string orderingCustomerRfc = await GetOrderingCustomerRfc(instruction.CustomerCdl);
+            Config.EscribirLog(orderingCustomerRfc);
+            instruction.OrderingCustomerTaxId = orderingCustomerRfc;
+
+            Result<bool> operationHasSpeiCoverResult = await CheckIfOperationHasSpeiCover(
+                tipoFormato,
+                instruction.DebitCurrency,
+                instruction.CorrespondingBankBic,
+                instruction.BeneficiaryBankBic);
+
+            bool operationHasSpeiCover = operationHasSpeiCoverResult.Data;
+
+            // Excepción de operación de entrada/salida.
+            if (string.Equals(tipoFormato, "FXE", StringComparison.Ordinal) &&
+                string.Equals(Convert.ToString(valoresFormato[7]), _vwT24.MonedaDefaultMN, StringComparison.Ordinal))
+            {
+                conEntradaSalida = false;
+            }
+
+            if (operationHasSpeiCover)
+                /// <summary>
+                /// Ejecuta la operaciÃ³n InsertSpeiCoverDetailPlan.
+                /// </summary>
+                await _fxiDao.InsertarRegistroSpeiCobertura(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
+
+            // Lectura y actualización de los datos del maestro.
+            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
+            {
+                string subTipo = string.Empty;
+
+                Config.EscribirLog("INFO|FXI.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+
+                if (conForex)
+                    subTipo = $"FX:{folioForex}";
+
+                if (!string.Equals(tipoFormato, "FXI", StringComparison.Ordinal))
+                    subTipo += string.Equals(subTipo, string.Empty, StringComparison.Ordinal) ? $"'{tipoFormato}'" : $",'{tipoFormato}'";
+
+                bool actualizado = await _fxiDao.ActualizarMaestroDatosGenerales(new FxiActualizarMaestroDatosGeneralesTomiDto
+                {
+                    Folio = ConversionHelper.ConvertirLongDirecto(folio, "Folio"),
+                    TipoOperacion = tipoOperacion,
+                    FolioUnico = folioUnico,
+                    FechaValor = ConversionHelper.ConvertirIntDirecto(fechaEjecucion, "FechaEjecucion"),
+                    Moneda = moneda,
+                    Importe = importe,
+                    NumCliente = ConversionHelper.ConvertirIntDirecto(valoresFormato[31], "Cdl"),
+                    NombreCliente = Convert.ToString(valoresFormato[1]),
+                    NumCuenta = Convert.ToString(valoresFormato[32]),
+                    SubtipoOperacion = subTipo
+                });
+
+                if (!actualizado)
+                    throw new Exception($"Error actualizando tb_srv_plan_trabajo_maestro para el folio {folio}.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n TerminaProceso.
+                /// </summary>
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+                /// <summary>
+                /// Ejecuta la operaciÃ³n RefrescarAliasProceso.
+                /// </summary>
+                _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+            }
+
+            // Lectura del CMS e inserción a TOMI.
+            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
+            {
+                Config.EscribirLog("INFO|FXI.procesaOperacion|A insertar datos de CMS a TOMI.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    AliasProceso = _configuracion.AliasProceso,
+
+                    PId = _configuracion.Pid.Value
+
+                });
+
+                procesado = false;
+                resultado = string.Equals(tipoFormato, "FXE", StringComparison.Ordinal)
+                    ? await CMS_A_TOMI_FXE(instruction)
+                    : await CMS_A_TOMI(folio, valoresFormato);
+
+                if (resultado)
+                {
+                    Config.EscribirLog("INFO|FXI.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
+                    procesado = true;
+                }
+                else
+                {
+                    // Posiblemente se restauró el servicio.
+                    bool existe = await _fxiDao.ExisteFormatoFxi(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
+                    if (existe)
+                    {
+                        procesado = true;
+                        Config.EscribirLog("INFO|FXI.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
+                    }
+                }
+
+                if (procesado)
+                {
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n RefrescarAliasProceso.
+                    /// </summary>
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {folio}");
+                }
+            }
+
+            // Registro de la Entrada/Salida.
+            if (string.Equals(_configuracion.AliasProceso, "TOMI_ENTRADAS/SALIDAS", StringComparison.Ordinal))
+            {
+                Config.EscribirLog("INFO|FXI.procesaOperacion|A insertar datos de Entrada/Salida en TOMI.");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+
+                {
+
+                    Folio = folio,
+
+                    TipoOperacion = tipoOperacion,
+
+                    Servicio = _configuracion.NombreServicio,
+
+                    NombreProceso = _configuracion.NombreProceso,
+
+                    
