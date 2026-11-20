@@ -7998,3 +7998,1002 @@ namespace Aplicacion.Servicios.Operaciones
 
                 bool resultado = await _fxdDao.InsertarEntradaSalidaSrv(
                     referencia: Convert.ToString(valoresEntSal[1]),
+numCliente: Convert.ToInt32(valoresEntSal[2]),
+                    cdl: Convert.ToDouble(valoresEntSal[3]),
+                    ordenante: Convert.ToString(valoresEntSal[4]),
+                    operacion: Convert.ToDouble(valoresEntSal[5]),
+                    operacionDesc: Convert.ToString(valoresEntSal[6]),
+                    tipo: Convert.ToString(valoresEntSal[7]),
+                    tipoDesc: Convert.ToString(valoresEntSal[8]),
+                    cuenta: Convert.ToDouble(valoresEntSal[9]),
+                    nombre: Convert.ToString(valoresEntSal[10]),
+                    cuentaMoneda: Convert.ToString(valoresEntSal[11]),
+                    via: Convert.ToDouble(valoresEntSal[12]),
+                    viaDesc: Convert.ToString(valoresEntSal[13]),
+                    importe: Convert.ToDouble(valoresEntSal[14]),
+                    saldo: Convert.ToDouble(valoresEntSal[15]),
+                    comentarios: Convert.ToString(valoresEntSal[16]),
+                    fechaCaptura: Convert.ToDateTime(valoresEntSal[17]),
+                    fechaValor: Convert.ToDateTime(valoresEntSal[18]),
+                    hora: Convert.ToString(valoresEntSal[19]),
+                    capturista: Convert.ToString(valoresEntSal[20]),
+                    fad: Convert.ToDouble(valoresEntSal[21]),
+                    referenciaControl: Convert.ToString(valoresEntSal[22]),
+                    referenciaControlCont: Convert.ToDouble(valoresEntSal[23]));
+
+                Config.EscribirLog($"INFO|FXD.TOMI_ENTRADA_SALIDA|Salida={(resultado ? 0 : 1)}.");
+                return resultado;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|FXD.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}.Trace:{ex}");
+            }
+
+            return false;
+        }
+
+        private static bool CompararMontos(object valor1, object valor2)
+        {
+            decimal monto1 = ConversionHelper.ConvertirDecimalDirecto(valor1, "Monto1");
+            decimal monto2 = ConversionHelper.ConvertirDecimalDirecto(valor2, "Monto2");
+            return monto1 == monto2;
+        }
+
+    }
+}
+
+
+
+    using global::Aplicacion.Interfaces.FirmaElectronica;
+    using global::Aplicacion.Interfaces.FXD;
+    using global::Aplicacion.Modelos;
+    using Aplicacion.Servicios.FirmaElectronica;
+    using MUFG_T24.Comunes;
+    using MUFG_T24.Comunes.Helpers;
+    using MUFG_T24.Interfaces_utilidades;
+    using MUFG_T24.Modelos;
+    using MUFG_T24.Repositorios;
+    using System;
+    using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    /// <summary>
+    /// Representa FXDGPH.
+    /// </summary>
+    public class FXDGPH
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IFXDGPHDao _fXDGPHDao;
+        private readonly ConexionT24Mw _vwT24;
+        private readonly IComunFXD _comunFXD;
+
+        private const string tipoOperacion = "FXD_GPH";
+        private string folioUnico = string.Empty;
+        private string folioPropuesto = string.Empty;
+        /// <summary>
+        /// Inicializa una nueva instancia de la clase FXDGPH.
+        /// </summary>
+
+        public FXDGPH(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            IFXDGPHDao dao,
+            ConexionT24Mw vwT24,
+            IComunFXD comunFXD)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _fXDGPHDao = dao;
+            _vwT24 = vwT24;
+            _comunFXD = comunFXD;
+        }
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+
+        public async Task<bool> ProcesaOperacion(string folio)
+        {
+            string fechaEjecucion = string.Empty;
+            bool procesado = false;
+
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+
+            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
+                return false;
+
+            using (var firma = new MetodosFirma(_configuracion))
+            {
+                if (!firma.CertificadoEncontrado())
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("Error en procesamiento de SPEI: No se encontro el certificado y/o llave para realizar la firma de la transacción");
+            }
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}");
+
+            // =========================
+            // DATOS_GRAL
+            // =========================
+            if (_configuracion.AliasProceso == "DATOS_GRAL")
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando maestro");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                var datos = await _fXDGPHDao.ObtenerDatosFxdGphPorFolio(folio);
+
+                if (datos != null)
+                {
+                    folioUnico = datos.NfFolioUnico ?? string.Empty;
+                    fechaEjecucion = datos.NfFechaEjecucion?.ToString() ?? string.Empty;
+                }
+
+                if (string.IsNullOrEmpty(folioUnico))
+                {
+                    folioUnico = await _vwT24.GeneraFolioUnico(
+                        "GPH",
+                        "01",
+                        tipoOperacion,
+                        ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
+                        folio);
+
+                    Config.EscribirLog($"INFO|FXD_GPH|folio_unico generado={folioUnico}");
+
+                    await _fXDGPHDao.ActualizarFolioUnicoFxdGph(folio, folioUnico);
+                }
+                else
+                {
+                    Config.EscribirLog($"INFO|FXD_GPH|leyendo folio_unico={folioUnico}");
+                }
+
+                folioPropuesto = await _vwT24.GeneraFolioPresupuesto(
+                    folioUnico,
+                    int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion)),
+                    tipoOperacion);
+
+                if (string.IsNullOrWhiteSpace(folioPropuesto))
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("Error al obtener el folio propuesto de T24");
+
+                await _fXDGPHDao.ActualizarPlanTrabajoMaestroDesdeFxdGph(
+                    folio,
+                    tipoOperacion,
+                    folioUnico,
+                ConversionHelper.ParseIntRequerido(fechaEjecucion, "NF_FECHA_EJECUCION", "Error parsing {0}: {1}"),
+                    _vwT24.MonedaDefaultMN);
+
+                procesado = true;
+
+                if (!await _comunFXD.GeneraFirmaDigital("tb_tombin_nf_fxd_gph", folio, folioPropuesto))
+                    throw new Exception($"Error generando firma digital {folio}");
+
+                if (procesado)
+                {
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    return true;
+                }
+                else
+                {
+                    throw new Exception($"Error en DATOS_GRAL {folio}");
+                }
+            }
+
+            return false;
+        }
+
+    }
+
+}
+
+using Aplicacion.Interfaces.FirmaElectronica;
+using Aplicacion.Interfaces.FXD;
+using Aplicacion.Modelos;
+using Aplicacion.Servicios.FirmaElectronica;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Threading.Tasks;
+
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    /// <summary>
+    /// Representa FXDH2 H.
+    /// </summary>
+    public class FXDH2H
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IFXDH2HDao _dao;
+        private readonly ConexionT24Mw _vwT24;
+        private readonly IComunFXD _comunFXD;
+
+        private const string tipoOperacion = "FXD_H2H";
+        private string folioUnico = string.Empty;
+        private string folioPropuesto = string.Empty;
+        /// <summary>
+        /// Inicializa una nueva instancia de la clase FXDH2H.
+        /// </summary>
+
+        public FXDH2H(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            IFXDH2HDao dao,
+            ConexionT24Mw vwT24,
+            IComunFXD comunFXD)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _dao = dao;
+            _vwT24 = vwT24;
+            _comunFXD = comunFXD;
+        }
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+
+        public async Task<bool> ProcesaOperacion(string folio)
+        {
+            string fechaEjecucion = string.Empty;
+            bool procesado = false;
+
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+
+            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
+                return false;
+
+            using (var firma = new MetodosFirma(_configuracion))
+            {
+                if (!firma.CertificadoEncontrado())
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("Error en procesamiento de SPEI: No se encontro el certificado y/o llave para realizar la firma de la transacción");
+            }
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}");
+
+            // =========================
+            // DATOS_GRAL
+            // =========================
+            if (_configuracion.AliasProceso == "DATOS_GRAL")
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando datos del plan maestro");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                // 1) Obtener datos
+                var datos = await _dao.ObtenerDatosFxdH2hPorFolio(folio);
+
+                if (datos != null)
+                {
+                    folioUnico = datos.NfFolioUnico ?? string.Empty;
+                    fechaEjecucion = datos.NfFechaEjecucion?.ToString() ?? string.Empty;
+                }
+
+                if (string.IsNullOrEmpty(folioUnico))
+                {
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("No hay folio_unico asignado para la operación");
+                }
+                else
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo folio_unico='{folioUnico}'");
+                }
+
+                folioPropuesto = await _vwT24.GeneraFolioPresupuesto(
+                    folioUnico,
+                    int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion)),
+                    tipoOperacion);
+
+                if (string.IsNullOrWhiteSpace(folioPropuesto))
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("Error al obtener el folio propuesto de T24");
+
+                bool actualizado = await _dao.ActualizarPlanTrabajoMaestroDesdeFxdH2h(
+                    folio,
+                    tipoOperacion,
+                    folioUnico,
+                ConversionHelper.ParseIntRequerido(fechaEjecucion, "NF_FECHA_EJECUCION", "Error al convertir {0}: {1}"),
+                    _vwT24.MonedaDefaultMN);
+
+                if (!actualizado)
+                    throw new Exception($"Error actualizando plan maestro {folio}");
+
+                procesado = true;
+
+                if (!await _comunFXD.GeneraFirmaDigital("tb_tombin_nf_fxd_h2h", folio, folioPropuesto))
+                    throw new Exception($"Error al generar la firma digital del: {folio}");
+
+                if (procesado)
+                {
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    return true;
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento DATOS_GRAL {folio}");
+                }
+            }
+
+            return false;
+        }
+
+    }
+}
+
+using Aplicacion.DTOs.FXD_Local;
+using Aplicacion.Interfaces.FirmaElectronica;
+using Aplicacion.Interfaces.FXDLocal;
+using Aplicacion.Modelos;
+using Aplicacion.Servicios.FirmaElectronica;
+using MUFG_T24.Comunes;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Globalization;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    /// <summary>
+    /// Representa FXD Local.
+    /// </summary>
+    public class FXD_Local
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IFXDLocalDao _fxdLocalDao;
+        private readonly IFXDLocalT24Dao _fxdLocalVistasT24Dao;
+        private readonly ConexionT24Mw _vwT24;
+        private readonly IComunFXD _comunFXD;
+
+        private const string tipoOperacion = "FXD_Local";
+        private string folioUnico = string.Empty;
+        private string lsFolioPropuesto = string.Empty;
+        /// <summary>
+        /// Inicializa una nueva instancia de la clase FXD_Local.
+        /// </summary>
+
+        public FXD_Local(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            IFXDLocalDao fxdLocalDao,
+            IFXDLocalT24Dao fxdLocalVistasT24Dao,
+            ConexionT24Mw vwT24,
+            IComunFXD comunFXD)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _fxdLocalDao = fxdLocalDao;
+            _fxdLocalVistasT24Dao = fxdLocalVistasT24Dao;
+            _vwT24 = vwT24;
+            _comunFXD = comunFXD;
+        }
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+
+        public async Task<bool> procesaOperacion(string folio)
+        {
+            string fechaEjecucion = string.Empty;
+            bool procesado;
+
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
+                return false;
+
+            using (var firma = new MetodosFirma(_configuracion))
+            {
+                if (!firma.CertificadoEncontrado())
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("Error en procesamiento de SPEI: No se encontro el certificado y/o llave para realizar la firma de la transacción");
+            }
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}.");
+
+            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
+            {
+                bool esPacs008;
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+                procesado = false;
+
+                esPacs008 = await _fxdLocalDao.EsPacs008PorFolio(folio);
+
+                FxdLocalDatosBasicosDto datosBasicos = await _fxdLocalDao.ObtenerDatosBasicosPorFolio(folio);
+                if (datosBasicos == null)
+                    throw new Exception($"No se encontraron datos básicos en tb_tombin_nf_fxd_local para el folio {folio}.");
+
+                folioUnico = datosBasicos.NfFolioUnico ?? string.Empty;
+                fechaEjecucion = datosBasicos.NfFechaEjecucion?.ToString() ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(fechaEjecucion))
+                    throw new Exception($"No se encontró nf_fecha_ejecucion para el folio {folio}.");
+
+                if (string.IsNullOrWhiteSpace(folioUnico))
+                {
+                    folioUnico = await _vwT24.GeneraFolioUnico(
+                        tipoOperacion,
+                        ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
+                        folio);
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Creamos folio_unico='{folioUnico}'.");
+
+                    bool actualizadoFolioUnico = await _fxdLocalDao.ActualizarFolioUnico(folio, folioUnico);
+                    if (!actualizadoFolioUnico)
+                        throw new Exception($"No se pudo actualizar nf_folio_unico para el folio {folio}.");
+                }
+                else
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo folio_unico='{folioUnico}'.");
+                }
+
+                if (!esPacs008)
+                {
+                    lsFolioPropuesto = await _vwT24.GeneraFolioPresupuesto(
+                        folioUnico,
+                        int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion), CultureInfo.InvariantCulture),
+                        tipoOperacion);
+
+                    if (string.IsNullOrWhiteSpace(lsFolioPropuesto))
+                        /// <summary>
+                        /// Ejecuta la operaciÃ³n Exception.
+                        /// </summary>
+                        throw new Exception("Error al obtener el folio propuesto de T24");
+                }
+
+                bool actualizadoMaestro = await _fxdLocalDao.ActualizarPlanTrabajoMaestroLectura(
+                    folio,
+                    tipoOperacion,
+                    folioUnico,
+                    _vwT24.MonedaDefaultMN,
+                    fechaEjecucion);
+
+                if (!actualizadoMaestro)
+                    throw new Exception($"Error actualizando tb_srv_plan_trabajo_maestro para el folio {folio}.");
+
+                procesado = true;
+                /// <summary>
+                /// Ejecuta la operaciÃ³n CalculaComision.
+                /// </summary>
+
+                await CalculaComision(folio);
+
+                if (!esPacs008)
+                {
+                    if (!await _comunFXD.GeneraFirmaDigital("tb_tombin_nf_fxd_local", folio, lsFolioPropuesto))
+                        /// <summary>
+                        /// Ejecuta la operaciÃ³n Exception.
+                        /// </summary>
+                        throw new Exception("Se presentó un error al generar la firma digital del: " + folio);
+                }
+
+                if (procesado)
+                {
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso =
+                        await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                        {
+                            Folio = folio,
+                            TipoOperacion = tipoOperacion,
+                            Servicio = _configuracion.NombreServicio,
+                            NombreProceso = _configuracion.NombreProceso,
+                            AliasProceso = _configuracion.AliasProceso,
+                            PId = _configuracion.Pid.Value
+                        });
+                    return true;
+                }
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+
+                throw new Exception("Error en procesamiento de registro DATOS_GRAL con folio: " + folio);
+            }
+
+            return false;
+        }
+
+        private async Task CalculaComision(string folio)
+        {
+            string fechaEjecucion = string.Empty;
+            decimal importeTomi = 0m;
+            string estatus = string.Empty;
+            string usuarioConfirma = string.Empty;
+            string moneda = string.Empty;
+            string cuentaDeb = string.Empty;
+
+            string speiOpClave = string.Empty;
+            string speiOpFechaOper = string.Empty;
+            string speiOpFolio = string.Empty;
+            string forex = string.Empty;
+            string tomiBenBanco = string.Empty;
+            string tomiBenCta = string.Empty;
+
+            bool esSwiftIn = false;
+            string valorXml = string.Empty;
+            bool commissionTypePorEnvio;
+            bool esBanco;
+
+            string detailCharge = string.Empty;
+            string t24CustomerCode = string.Empty;
+            string commissionDetailCharge = string.Empty;
+            string commissionType = string.Empty;
+            string commissionCcy = string.Empty;
+            decimal commissionAmount = 0m;
+            decimal commissionAmountTax = 0m;
+            decimal commissionAmountTot = 0m;
+            decimal commissionAmountMn = 0m;
+            decimal speiMontoEnviar = 0m;
+
+            string commissionCode = string.Empty;
+            string chargeCode = string.Empty;
+            string referenciaEmisor = string.Empty;
+
+            string commissionT24ComType = string.Empty;
+            string commissionT24Ccy = string.Empty;
+            decimal commissionT24Amount = 0m;
+            decimal commissionT24Tdc = 0m;
+            decimal tasaTax = 0m;
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se inicia el proceso para el cálculo de la comisión (si existe)");
+
+            FxdLocalDatosComisionDto datosComision = await _fxdLocalDao.ObtenerDatosComisionPorFolio(folio);
+            if (datosComision != null)
+            {
+                folioUnico = datosComision.NfFolioUnico ?? string.Empty;
+                fechaEjecucion = datosComision.NfFechaEjecucion?.ToString() ?? string.Empty;
+                importeTomi = datosComision.T24DebitAmount ?? 0m;
+                estatus = datosComision.NfEstatus ?? string.Empty;
+                usuarioConfirma = datosComision.NfUsuarioAutoriza ?? string.Empty;
+                moneda = _vwT24.ValidaMoneda(datosComision.T24DebitCurrency ?? string.Empty);
+                cuentaDeb = datosComision.T24DebitAcctNo ?? string.Empty;
+                forex = datosComision.NfForexRelacionado ?? string.Empty;
+                tomiBenBanco = datosComision.NfBancoBenef ?? string.Empty;
+                tomiBenCta = datosComision.T24BenAcctNo ?? string.Empty;
+
+                speiOpClave = datosComision.NfOpClaveSpei ?? string.Empty;
+                speiOpFechaOper = datosComision.NfOpFechaOperSpei ?? string.Empty;
+                speiOpFolio = datosComision.NfOpFolioSpei ?? string.Empty;
+
+                detailCharge = datosComision.NfCharge ?? string.Empty;
+                t24CustomerCode = datosComision.T24CustomerCode ?? string.Empty;
+
+                esSwiftIn = datosComision.EsSwiftIn == 1 || datosComision.EsSwiftInMx == 1;
+
+                if (!string.IsNullOrWhiteSpace(datosComision.NfVariablesXml))
+                    valorXml = datosComision.NfVariablesXml;
+
+                if (!string.IsNullOrWhiteSpace(datosComision.NfVariablesXmlMx))
+                    valorXml = datosComision.NfVariablesXmlMx;
+
+                referenciaEmisor = datosComision.T24DebitTheirRef ?? string.Empty;
+
+                commissionDetailCharge = datosComision.T24DetailCharge ?? string.Empty;
+                commissionType = datosComision.CommissionType ?? string.Empty;
+                commissionCcy = datosComision.CommissionCcy ?? string.Empty;
+                commissionAmount = datosComision.CommissionAmount ?? 0m;
+                commissionAmountTax = datosComision.CommissionAmountTax ?? 0m;
+                commissionAmountTot = datosComision.CommissionAmountTot ?? 0m;
+            }
+
+            if (esSwiftIn)
+            {
+                commissionTypePorEnvio = true;
+            }
+            else
+            {
+                esBanco = await _fxdLocalVistasT24Dao.EsBancoPorCustomerCode(t24CustomerCode);
+
+                if (esBanco)
+                {
+                    commissionTypePorEnvio = true;
+                }
+                else
+                {
+                    commissionTypePorEnvio = false;
+
+                    if (!string.Equals(detailCharge, "OUR", StringComparison.Ordinal))
+                    {
+                        throw new Exception(
+                            $"La operación no es posible realizar porque el emisor no es una entidad financiera y se especifica un detalle de cargo '{detailCharge}'.");
+                    }
+                }
+            }
+
+            if (commissionTypePorEnvio)
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación es una operación con cobro por comisión especial (CommissionType), inicia el analisis de commission_type.");
+
+                if (string.IsNullOrWhiteSpace(commissionDetailCharge))
+                {
+                    throw new Exception(
+                        $"No existe definición de comisión para emisor bancarios para el CDL='{t24CustomerCode}' y detailCharge='{detailCharge}'.");
+                }
+
+                Config.EscribirLog(
+                    $"INFO|{tipoOperacion}.procesaOperacion|Se detecta cobro de comisión, datos del esquema: DetailCharge='{detailCharge}', T24_customer_code='{t24CustomerCode}', Commission_Type='{commissionType}', Commission_CCY='{commissionCcy}', Commission_Amount='{commissionAmount}', Commission_AmountTot='{commissionAmountTot}'.");
+
+                if (string.IsNullOrWhiteSpace(commissionType) && commissionAmountTot == 0m)
+                {
+                    commissionAmountMn = 0m;
+                    speiMontoEnviar = importeTomi;
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se detecta cobro de comisión 0.");
+                }
+                else
+                {
+                    FxdLocalCommissionTypeT24Dto commissionT24 =
+                        await _fxdLocalVistasT24Dao.ObtenerCommissionTypeT24(commissionType);
+
+                    if (commissionT24 == null || string.IsNullOrWhiteSpace(commissionT24.ComType))
+                        throw new Exception($"No existe parametrización en T24 del esquema '{commissionType}'");
+
+                    commissionT24ComType = commissionT24.ComType ?? string.Empty;
+                    commissionT24Ccy = commissionT24.Currency ?? string.Empty;
+                    commissionT24Amount = commissionT24.FlatAmt ?? 0m;
+                    commissionT24Tdc = commissionT24.MidRevalRate ?? 1m;
+
+                    Config.EscribirLog(
+                        $"INFO|{tipoOperacion}.procesaOperacion|Se detecta cobro de comisión T24: CCY='{commissionT24Ccy}', Amount='{commissionT24Amount}', TDC='{commissionT24Tdc}'.");
+
+                    if (!string.Equals(commissionCcy, commissionT24Ccy, StringComparison.Ordinal) ||
+                        commissionAmount != commissionT24Amount)
+                    {
+                        /// <summary>
+                        /// Ejecuta la operaciÃ³n Exception.
+                        /// </summary>
+                        throw new Exception("Los datos de comisión a cobrar tiene diferencias entre la parametrización de T24 vs MW");
+                    }
+
+                    commissionAmountMn = Math.Round(commissionAmount * commissionT24Tdc, 2);
+
+                    if (commissionAmountTax > 0m)
+                    {
+                        tasaTax = commissionAmountTax / commissionAmount;
+                        commissionAmountMn = Math.Round(commissionAmountMn * (1 + tasaTax), 2);
+                    }
+
+                    if (string.Equals(detailCharge, "OUR", StringComparison.Ordinal))
+                    {
+                        commissionCode = "D";
+                        chargeCode = "D";
+                        speiMontoEnviar = importeTomi;
+                    }
+                    else
+                    {
+                        commissionCode = "C";
+                        chargeCode = "W";
+                        speiMontoEnviar = importeTomi - commissionAmountMn;
+                    }
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se detecta cobro de comisión en MN={commissionAmountMn}.");
+                }
+
+                if (Math.Round(speiMontoEnviar, 2) <= 0m)
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("El importe de envío a SPEI sería menor o igual a 0");
+
+                Config.EscribirLog(
+                    $"INFO|{tipoOperacion}.procesaOperacion|Los datos de la operación: Importe de la Operación='{importeTomi}', Comisión a cobrar en MN='{commissionAmountMn}', Importe de envío a SPEI='{speiMontoEnviar}'.");
+
+                bool actualizoComision = await _fxdLocalDao.ActualizarDatosComision(
+                    long.Parse(folio, CultureInfo.InvariantCulture),
+                    speiMontoEnviar,
+                    commissionType,
+                    commissionCode,
+                    chargeCode);
+
+                if (!actualizoComision)
+                    throw new Exception($"No fue posible actualizar los datos de comisión del folio {folio}.");
+            }
+            else
+            {
+                speiMontoEnviar = importeTomi;
+
+                Config.EscribirLog(
+                    $"INFO|{tipoOperacion}.procesaOperacion|La operación no es una operación de emisor bancario y no hay cobro de comisión espacial.");
+            }
+        }
+    }
+}
+
+using Aplicacion.DTOs.FXI;
+using Aplicacion.Interfaces.FXI;
+using Aplicacion.Modelos;
+using Infraestructura;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Runtime.Remoting.Messaging;
+using System.Threading.Tasks;
+using static MUFG_T24.Comunes.Comunes;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    /// <summary>
+    /// Representa FXI.
+    /// </summary>
+    public class FXI
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IFxiTomiDao _fxiDao;
+        private readonly IFxiCmsDao _fxiCmsDao;
+        private readonly IFxiT24Dao _fxiT24Dao;
+        private readonly ConexionT24Mw _vwT24;
+
+        private const string tipoOperacion = "FXI";
+        private string folioUnico = string.Empty;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public FXI(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            IFxiTomiDao fxiDao,
+            IFxiCmsDao fxiCmsDao,
+            IFxiT24Dao fxiT24Dao,
+            ConexionT24Mw vwT24)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _fxiDao = fxiDao;
+            _fxiCmsDao = fxiCmsDao;
+            _fxiT24Dao = fxiT24Dao;
+            _vwT24 = vwT24;
+        }
+
+        /// <summary>
+        /// Procesa la operación FXI.
+        /// </summary>
+        public async Task<bool> ProcesaOperacion(string folio)
+        {
+            object[] valoresFormato = new object[46];
+            string tipoFormato = string.Empty;
+            string fechaEjecucion = string.Empty;
+            string moneda = string.Empty;
+            decimal importe = 0m;
+            bool conForex = false;
+            bool forexCancelado = false;
+            string folioForex = string.Empty;
+            bool conEntradaSalida = true;
+            bool procesado;
+            bool resultado;
+            bool fechaFutura;
+
+            // Verificamos la última operación no realizada.
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+
+            if (string.Equals(_configuracion.AliasProceso, string.Empty, StringComparison.Ordinal))
+                return false;
+
+            // Datos del folio en CMS y TOMI.
+            tipoFormato = string.Empty;
+            fechaEjecucion = string.Empty;
+            moneda = string.Empty;
+            importe = 0m;
+            folioForex = string.Empty;
+            conForex = false;
+            forexCancelado = false;
+            conEntradaSalida = true;
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexión a base de datos del CMS.");
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo los datos de lo operación en base CMS.");
+
+            FxiFormatoCmsDto datosCms = await _fxiCmsDao.ObtenerFormatoPorFolio(folio);
+            if (datosCms is null)
+                throw new Exception($"No se encontraron datos de operación FXI para folio={folio}.");
+
+            tipoFormato = "FXI";
+            if (datosCms.TipoFormato == 4)
+                tipoFormato = "FXI";
+            else if (datosCms.TipoFormato == 11)
+                tipoFormato = "FXE";
+            else if (datosCms.TipoFormato == 14)
+                tipoFormato = "FXB";
+
+            valoresFormato[30] = datosCms.id_Formato;
+            valoresFormato[31] = datosCms.cdl;
+            valoresFormato[32] = datosCms.id_Cuenta;
+            valoresFormato[33] = datosCms.FechaCaptura;
+            valoresFormato[34] = datosCms.id_UsuarioCaptura;
+            valoresFormato[35] = datosCms.FechaAutorizacion;
+            valoresFormato[36] = datosCms.id_UsuarioAutorizo;
+            valoresFormato[37] = datosCms.MontoOperacion;
+            valoresFormato[38] = datosCms.id_Plantilla;
+            valoresFormato[39] = datosCms.id_Formato_Plantilla;
+
+            var parseado = ContenidoFormatoParser.Parse(datosCms.ContenidoFormato, folio);
+            ContenidoFormatoParser.ValidarMinimoIndice(parseado, folio, 28);
+
+            for (int idx = 0; idx <= 28; idx++)
+            {
+                valoresFormato[idx] = ContenidoFormatoParser.ObtenerValorPosicional(parseado, folio, idx);
+            }
+
+            valoresFormato[40] = ContenidoFormatoParser.ObtenerValorPorClave(parseado, "10053");
+
+            // Campos City Project.
+            valoresFormato[41] = ContenidoFormatoParser.ObtenerValorPorClave(parseado, "10054");
+            valoresFormato[42] = ContenidoFormatoParser.ObtenerValorPorClave(parseado, "10055");
+            valoresFormato[44] = ContenidoFormatoParser.ObtenerValorPorClave(parseado, "10056");
+            valoresFormato[43] = ContenidoFormatoParser.ObtenerValorPorClave(parseado, "10057");
+            valoresFormato[45] = ContenidoFormatoParser.ObtenerValorPorClave(parseado, "10058");
+
+            // Tipo de formato adicional.
+            if (string.Equals(tipoFormato, "FXI", StringComparison.Ordinal))
+            {
+                if (!string.Equals(Convert.ToString(valoresFormato[3]), "JPY", StringComparison.Ordinal) &&
+                    !string.Equals(Convert.ToString(valoresFormato[3]), "EUR", StringComparison.Ordinal) &&
+                    !string.Equals(Convert.ToString(valoresFormato[3]), "USD", StringComparison.Ordinal))
+                {
+                    tipoFormato = "FXO";
+                }
+            }
+
+            // Tipo de formato.
+            valoresFormato[29] = tipoFormato;
+
+            // Folio forex.
+            if (valoresFormato[6] != null)
+                folioForex = Convert.ToString(valoresFormato[6]);
+
+            // Fecha ejecución.
+            if (valoresFormato[13] != null)
+                fechaEjecucion = Convert.ToString(valoresFormato[13]);
+
+            // Moneda.
+            if (valoresFormato[3] != null)
+                moneda = _vwT24.ValidaMoneda(Convert.ToString(valoresFormato[3]));
+
+            // Importe.
+            importe = datosCms.MontoOperacion;
+
+            if (CompararMontos(valoresFormato[5], valoresFormato[8]) == false ||
+                CompararMontos(valoresFormato[5], valoresFormato[37]) == false)
+            {
+                throw new Exception(
+                    $"Hay diferencias entre los montos de la operación: MontoOperacion={valoresFormato[37]}, MontoCapturado={valoresFormato[5]}, MontoEnviado={valoresFormato[8]}.");
+            }
+
+            if (string.Equals(Convert.ToString(valoresFormato[40]), string.Empty, StringComparison.Ordinal))
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+                throw new Exception("No se tiene información de COUNTRY_BEN para realizar el pago.");
+
+            if (string.IsNullOrWhiteSpace(Convert.ToString(valoresFormato[41])))
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+                throw new Exception("No se tiene información de CITY_BEN para realizar el pago.");
+
+            Config.EscribirLog($"INFO|FXI.procesaOperacion|Veamos que trae la fecha{valoresFormato[13]}-----{fechaEjecucion}");
