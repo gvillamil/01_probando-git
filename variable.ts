@@ -1,2687 +1,87 @@
-TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                var detalleTomi = await _tomiDao.ObtenerDetalleTomiParaConciliacion(folio);
-
-                if (detalleTomi != null)
-                {
-                    regsTomi = 1;
-                    importeTomi = detalleTomi.T24DebitAmount ?? 0;
-                }
-
-                var sumarizadoNoPendiente =
-                    await _tomiDao.ObtenerSumarizadoDetalleNoPendientePorMaestro(mtoFolio);
-
-                if (sumarizadoNoPendiente != null)
-                {
-                    tomiMtoRegs = sumarizadoNoPendiente.NumRegs;
-                    tomiMtoImporte = sumarizadoNoPendiente.ImpMonto ?? 0;
-                }
-
-                if (conEntradaSalida)
-                {
-                    var entradaSalida =
-                        await _tomiDao.ObtenerEntradaSalidaParaConciliacion(folioUnico);
-
-                    if (entradaSalida != null)
-                    {
-                        regsEntSal = 1;
-                        fechaEjecucionEntSal = entradaSalida.EntFechaValor?.ToString("yyyyMMdd");
-                        monedaEntSal = _vwT24.ValidaMoneda(entradaSalida.EntMonedaCuenta);
-                        importeEntSal = entradaSalida.EntImporte;
-                    }
-                }
-
-                if (regsCms == 1 &&
-                    regsTomi == 1 &&
-                    ((conEntradaSalida && regsEntSal == 1) || !conEntradaSalida))
-                {
-                    if (detImporte != importeTomi)
-                    {
-                        mensajeError +=
-                            $"{Environment.NewLine} - Diferencia en el importe. CMS='{detImporte}', TOMI='{importeTomi}'.";
-                    }
-
-                    if (mtoRegs != tomiMtoRegs)
-                    {
-                        mensajeError +=
-                            $"{Environment.NewLine} - Diferencia en el total de registros. CMS='{mtoRegs}', TOMI='{tomiMtoRegs}'.";
-                    }
-
-                    if (Math.Round(mtoImporte, 2) != Math.Round(tomiMtoImporte, 2))
-                    {
-                        mensajeError +=
-                            $"{Environment.NewLine} - Diferencia en la sumatoría del importe de registros. CMS='{mtoImporte}', TOMI='{tomiMtoImporte}'.";
-                    }
-
-                    if (conEntradaSalida)
-                    {
-                        if (mtoFechaEjecucion != fechaEjecucionEntSal)
-                        {
-                            mensajeError +=
-                                $"{Environment.NewLine} - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='{mtoFechaEjecucion}', TOMI='{fechaEjecucionEntSal}'.";
-                        }
-
-                        if (mtoMoneda != monedaEntSal)
-                        {
-                            mensajeError +=
-                                $"{Environment.NewLine} - Diferencia en la monedas de Entrada/Salida. CMS='{mtoMoneda}', TOMI='{monedaEntSal}'.";
-                        }
-
-                        if (detImporte != importeEntSal)
-                        {
-                            mensajeError +=
-                                $"{Environment.NewLine} - Diferencia en el importe de Entrada/Salida. CMS='{detImporte}', Entrada/Salida='{importeEntSal}'.";
-                        }
-                    }
-
-                    procesado = true;
-                }
-                else
-                {
-                    procesado = false;
-                    mensajeError += $"{Environment.NewLine} - No se ha registrado la operación en TOMI.";
-                }
-
-                if (!string.IsNullOrEmpty(mensajeError))
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception(mensajeError);
-
-                if (!procesado)
-                    throw new Exception($"Error en procesamiento de registro CONCILIAR con folio: {folio}");
-
-                if (fechaFutura)
-                {
-                    await _tomiDao.MarcarPlanTrabajoDetalleFechaFutura(folio, tipoOperacion);
-                    await _tomiDao.MarcarPlanTrabajoMaestroFechaFutura(mtoFolio, tipoOperacion);
-                }
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación está correctamente conciliada.");
-
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso = string.Empty;
-            }
-
-            return true;
-        }
-
-        private async Task<bool> CMS_A_TOMI(string folio, object[] valoresFormato)
-        {
-            try
-            {
-                var detalle = new PaPFxiInsertarDetallePapTomiDto
-                {
-                    NfFolioUnico = folioUnico,
-                    NfTipo = DameTexto(valoresFormato[29]),
-                    NfFolio = ConversionHelper.ConvertirLongDefaultCero(valoresFormato[30]),
-
-                    T24CustomerCode = DameTexto(valoresFormato[31]),
-                    T24DebitAcctNo = DameTexto(valoresFormato[32]),
-                    NfEstatus = "PEND",
-
-                    NfUsuarioCaptura = DameTexto(valoresFormato[34]),
-                    NfUsuarioAutoriza = DameTexto(valoresFormato[36]),
-
-                    NfFechaCaptura = ConversionHelper.ConvertirNullableDateTimeDirect(valoresFormato[33]),
-                    NfFechaAutoriza = ConversionHelper.ConvertirNullableDateTimeDirect(valoresFormato[35]),
-
-                    T24DebitAmount = ConversionHelper.ConvertirNullableDecimal(valoresFormato[37]),
-
-                    T24ShortName = TextoBESS(DameTexto(valoresFormato[1])),
-                    T24DebitCurrency = DameTexto(valoresFormato[3]),
-
-                    NfForexRelacionado = DameTexto(valoresFormato[6]),
-                    NfMontoEnviar = ConversionHelper.ConvertirNullableDecimal(valoresFormato[8]),
-
-                    T24DebitTheirRef = TextoBESS(DameTexto(valoresFormato[9])),
-                    NfTipoCuenta = TextoBESS(DameTexto(valoresFormato[10])),
-                    NfPayment = TextoBESS(DameTexto(valoresFormato[11])),
-                    NfCharge = TextoBESS(DameTexto(valoresFormato[12])),
-
-                    NfFechaEjecucion = ConversionHelper.ConvertirNullableInt(valoresFormato[13]),
-
-                    T24BenCustName = TextoBESS(DameTexto(valoresFormato[14])),
-                    NfFxdComment = TextoBESS(DameTexto(valoresFormato[15])),
-                    NfRfcBeneficiario = TextoBESS(DameTexto(valoresFormato[16])),
-                    NfTasaRetencion = DameTexto(valoresFormato[17]),
-
-                    NfBancoBenef = TextoBESS(DameTexto(valoresFormato[18])),
-                    NfSwiftBeneficiario = DameTexto(valoresFormato[19]),
-                    T24BenAcctNo = DameTexto(valoresFormato[21]),
-
-                    NfBancoCorresponsal = TextoBESS(DameTexto(valoresFormato[23])),
-                    NfSwiftCorresponsal = DameTexto(valoresFormato[24]),
-                    NfCuentaCorresponsal = TextoBESS(DameTexto(valoresFormato[25])),
-
-                    NfMensaje = TextoBESS(DameTexto(valoresFormato[27])),
-                    NfCountry = DameTexto(valoresFormato[28]),
-
-                    IdPlantilla = DameTexto(valoresFormato[38]),
-                    IdFormatoPlantilla = ConversionHelper.ConvertirNullableLongDefaultCero(valoresFormato[39]),
-
-                    IdFilesBtmum = ConversionHelper.ConvertirNullableLong(valoresFormato[40]),
-                    NoPagos = ConversionHelper.ConvertirNullableInt(valoresFormato[41]),
-                    PagosDescripcion = DameTexto(valoresFormato[42]),
-                    NoPagosProcesados = ConversionHelper.ConvertirNullableInt(valoresFormato[43]),
-                    NoPagosDevueltos = ConversionHelper.ConvertirNullableInt(valoresFormato[44]),
-
-                    IdFormatoPap = ConversionHelper.ConvertirNullableLong(valoresFormato[45]),
-
-                    Ref1 = DameTexto(valoresFormato[46]),
-                    Ref2 = DameTexto(valoresFormato[47]),
-                    Ref3 = DameTexto(valoresFormato[48]),
-                    Ref4 = DameTexto(valoresFormato[49]),
-                    Ref5 = DameTexto(valoresFormato[50]),
-
-                    CountryBen = DameTexto(valoresFormato[51]),
-                    CityBen = DameTexto(valoresFormato[52]),
-                    StreetBen = DameTexto(valoresFormato[53]),
-                    ColonyBen = DameTexto(valoresFormato[54]),
-                    BuildingNumberBen = DameTexto(valoresFormato[55]),
-                    PostCodeBen = DameTexto(valoresFormato[56])
-                };
-
-                bool resultado = await _tomiDao.InsertarDetallePapTomi(detalle);
-
-                Config.EscribirLog($"INFO|PaP_FXI.CMS_A_TOMI|Resultado={resultado}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog(
-                    $"ERROR|PaP_FXI.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
-
-                return false;
-            }
-        }
-
-        private async Task<bool> CMS_A_TOMI_MAESTRO(string folioMaestro, object[] valoresFormatoMto)
-        {
-            try
-            {
-                var maestro = new PaPFxiInsertarMaestroPapTomiDto
-                {
-                    NfFolioUnico = folioUnico,
-                    NfTipo = DameTexto(valoresFormatoMto[29]),
-                    NfFolio = ConversionHelper.ConvertirLongDefaultCero(valoresFormatoMto[30]),
-
-                    T24CustomerCode = DameTexto(valoresFormatoMto[31]),
-                    T24DebitAcctNo = DameTexto(valoresFormatoMto[32]),
-                    NfEstatus = "PEND",
-
-                    NfUsuarioCaptura = DameTexto(valoresFormatoMto[34]),
-                    NfUsuarioAutoriza = DameTexto(valoresFormatoMto[36]),
-
-                    NfFechaCaptura = ConversionHelper.ConvertirNullableDateTimeDirect(valoresFormatoMto[33]),
-                    NfFechaAutoriza = ConversionHelper.ConvertirNullableDateTimeDirect(valoresFormatoMto[35]),
-
-                    T24DebitAmount = ConversionHelper.ConvertirNullableDecimal(valoresFormatoMto[37]),
-
-                    T24ShortName = DameTexto(valoresFormatoMto[1]),
-                    T24DebitCurrency = DameTexto(valoresFormatoMto[3]),
-
-                    NfForexRelacionado = DameTexto(valoresFormatoMto[6]),
-
-                    NfMontoEnviar = 0,
-
-                    T24DebitTheirRef = DameTexto(valoresFormatoMto[9]),
-                    NfTipoCuenta = DameTexto(valoresFormatoMto[10]),
-                    NfPayment = DameTexto(valoresFormatoMto[11]),
-                    NfCharge = DameTexto(valoresFormatoMto[12]),
-
-                    NfFechaEjecucion = ConversionHelper.ConvertirNullableInt(valoresFormatoMto[13]),
-
-                    T24BenCustName = DameTexto(valoresFormatoMto[14]),
-                    NfFxdComment = DameTexto(valoresFormatoMto[15]),
-                    NfRfcBeneficiario = DameTexto(valoresFormatoMto[16]),
-                    NfTasaRetencion = DameTexto(valoresFormatoMto[17]),
-
-                    NfBancoBenef = DameTexto(valoresFormatoMto[18]),
-                    NfSwiftBeneficiario = DameTexto(valoresFormatoMto[19]),
-                    T24BenAcctNo = DameTexto(valoresFormatoMto[21]),
-
-                    NfBancoCorresponsal = DameTexto(valoresFormatoMto[23]),
-                    NfSwiftCorresponsal = DameTexto(valoresFormatoMto[24]),
-                    NfCuentaCorresponsal = DameTexto(valoresFormatoMto[25]),
-
-                    NfMensaje = DameTexto(valoresFormatoMto[27]),
-                    NfCountry = DameTexto(valoresFormatoMto[28]),
-
-                    IdPlantilla = DameTexto(valoresFormatoMto[38]),
-
-                    IdFormatoPlantilla = 0,
-
-                    IdFilesBtmum = ConversionHelper.ConvertirNullableLong(valoresFormatoMto[40]),
-                    NoPagos = ConversionHelper.ConvertirNullableInt(valoresFormatoMto[41]),
-                    PagosDescripcion = DameTexto(valoresFormatoMto[42]),
-                    NoPagosProcesados = ConversionHelper.ConvertirNullableInt(valoresFormatoMto[43]),
-                    NoPagosDevueltos = ConversionHelper.ConvertirNullableInt(valoresFormatoMto[44])
-                };
-
-                bool resultado = await _tomiDao.InsertarMaestroPapTomi(maestro);
-
-                Config.EscribirLog($"INFO|PaP_FXI.CMS_A_TOMI_MAESTRO|Resultado={resultado}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog(
-                    $"ERROR|PaP_FXI.CMS_A_TOMI_MAESTRO|Se presenta exception: {ex.Message}. Trace: {ex}");
-
-                return false;
-            }
-        }
-
-        private async Task<bool> TOMI_ENTRADA_SALIDA(string folio)
-        {
-            try
-            {
-                var detalles = await _tomiDao.ObtenerDetalleTomiParaEntradaSalida(folio);
-
-                if (detalles == null || detalles.Count == 0)
-                    return false;
-
-                PaPFxiInsertarEntradaSalidaDto entradaSalida = null;
-
-                foreach (var detalle in detalles)
-                {
-                    entradaSalida = new PaPFxiInsertarEntradaSalidaDto
-                    {
-                        Referencia = detalle.NfFolioUnico,
-                        NumCliente = ConversionHelper.ConvertirNullableInt(detalle.T24CustomerCode),
-                        Cdl = ConversionHelper.ConvertirNullableDecimal(detalle.T24CustomerCode),
-                        Ordenante = detalle.T24CompanyName,
-
-                        Operacion = 218,
-                        OperacionDesc = "Salida  (TTS)",
-                        Tipo = "I",
-                        TipoDesc = "Internacional",
-
-                        Importe = detalle.T24DebitAmount,
-                        Saldo = 0,
-                        Comentarios = detalle.NfMensaje,
-
-                        FechaCaptura = ConversionHelper.TextoToFechaDesdeObject(_configuracion.StrFechaSistema),
-                        FechaValor = ConversionHelper.TextoToFechaDesdeObject(detalle.NfFechaEjecucion),
-                        Hora = DateTime.Now.ToLongTimeString(),
-
-                        Capturista = "JEAI",
-                        Fad = 0,
-                        ReferenciaControl = "A",
-                        ReferenciaControlCont = 0
-                    };
-
-                    bool usarCuentaOriginal;
-
-                    if (detalle.T24DebitCurrency != _vwT24.MonedaDefaultMN)
-                    {
-                        usarCuentaOriginal = string.IsNullOrEmpty(detalle.NfForexRelacionado);
-                    }
-                    else
-                    {
-                        usarCuentaOriginal = detalle.NfForexRelacionado == "1";
-                    }
-
-                    if (usarCuentaOriginal)
-                    {
-                        entradaSalida.Cuenta = ConversionHelper.ConvertirNullableDecimal(detalle.T24DebitAcctNo);
-                        entradaSalida.Nombre = detalle.NfNombreCuenta;
-                        entradaSalida.CuentaMoneda = detalle.NfMonedaCuenta;
-                        entradaSalida.Via = 810;
-                        entradaSalida.ViaDesc = "TRF ENVIADA USD BTMNY";
-                    }
-                    else
-                    {
-                        /// <summary>
-                        /// Ejecuta la operaciÃ³n AsignarCuentaFadPorMoneda.
-                        /// </summary>
-                        AsignarCuentaFadPorMoneda(entradaSalida, detalle.T24DebitCurrency);
-                    }
-                }
-
-                if (entradaSalida == null)
-                    return false;
-
-                bool resultado = await _tomiDao.InsertarEntradaSalida(entradaSalida);
-
-                Config.EscribirLog($"INFO|PaP_FXI.TOMI_ENTRADA_SALIDA|Resultado={resultado}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog(
-                    $"ERROR|PaP_FXI.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}. Trace: {ex}");
-
-                return false;
-            }
-        }
-
-        private static object[] CargarValoresFormatoDetalle(PaPFxiDetalleCmsDto detalleCms)
-        {
-            object[] valoresFormato = new object[57];
-
-            valoresFormato[29] = "FXI";
-            valoresFormato[30] = detalleCms.IdFormato;
-            valoresFormato[31] = detalleCms.Cdl;
-            valoresFormato[32] = detalleCms.IdCuenta;
-            valoresFormato[33] = detalleCms.FechaCaptura;
-            valoresFormato[34] = detalleCms.IdUsuarioCaptura;
-            valoresFormato[35] = detalleCms.FechaAutorizacion;
-            valoresFormato[36] = detalleCms.IdUsuarioAutorizo;
-            valoresFormato[37] = detalleCms.MontoOperacion;
-            valoresFormato[38] = detalleCms.IdPlantilla;
-            valoresFormato[39] = detalleCms.IdFormatoPlantilla;
-            valoresFormato[40] = detalleCms.IdFilesBtmum;
-            valoresFormato[41] = detalleCms.NoPagos;
-            valoresFormato[42] = detalleCms.PagosDescripcion;
-            valoresFormato[43] = detalleCms.NoPagosProcesados;
-            valoresFormato[44] = detalleCms.NoPagosDevueltos;
-            valoresFormato[45] = detalleCms.IdFormatoPap;
-            valoresFormato[46] = detalleCms.Ref1;
-            valoresFormato[47] = detalleCms.Ref2;
-            valoresFormato[48] = detalleCms.Ref3;
-            valoresFormato[49] = detalleCms.Ref4;
-            valoresFormato[50] = detalleCms.Ref5;
-
-            string contenidoFormato = detalleCms.ContenidoFormato;
-
-            if (string.IsNullOrEmpty(contenidoFormato))
-                throw new Exception($"El contenidoFormato del folio {detalleCms.IdFormato} viene vacío.");
-
-            string[] valoresPipes = contenidoFormato.Split('|');
-
-            if (valoresPipes.Length - 1 < 28)
-            {
-                throw new Exception(
-                    $"El contenidoFormato del folio {detalleCms.IdFormato} es diferente al esperado, debe ser 28 datos y se tienen {valoresPipes.Length - 1}.");
-            }
-
-            for (int idxPipes = 0; idxPipes <= 28; idxPipes++)
-            {
-                string[] llaveValor = valoresPipes[idxPipes].Split('=');
-                valoresFormato[idxPipes] = llaveValor[1];
-            }
-
-            if (contenidoFormato.Contains("|10053="))
-            {
-                string[] llaveValor = valoresPipes[29].Split('=');
-                valoresFormato[51] = llaveValor[1]; // Pais beneficiario
-            }
-            else
-            {
-                valoresFormato[51] = string.Empty;
-            }
-
-            // Campos City Project
-            if (contenidoFormato.Contains("|10054="))
-            {
-                string[] llaveValor = valoresPipes[30].Split('=');
-                valoresFormato[52] = llaveValor[1]; // Ciudad beneficiario
-            }
-            else
-            {
-                valoresFormato[52] = string.Empty;
-            }
-
-            if (contenidoFormato.Contains("|10055="))
-            {
-                string[] llaveValor = valoresPipes[31].Split('=');
-                valoresFormato[53] = llaveValor[1]; // Calle beneficiario
-            }
-            else
-            {
-                valoresFormato[53] = string.Empty;
-            }
-
-            if (contenidoFormato.Contains("|10056="))
-            {
-                string[] llaveValor = valoresPipes[32].Split('=');
-                valoresFormato[55] = llaveValor[1]; // Numero beneficiario
-            }
-            else
-            {
-                valoresFormato[55] = string.Empty;
-            }
-
-            if (contenidoFormato.Contains("|10057="))
-            {
-                string[] llaveValor = valoresPipes[33].Split('=');
-                valoresFormato[54] = llaveValor[1]; // Colonia beneficiario
-            }
-            else
-            {
-                valoresFormato[54] = string.Empty;
-            }
-
-            if (contenidoFormato.Contains("|10058="))
-            {
-                string[] llaveValor = valoresPipes[34].Split('=');
-                valoresFormato[56] = llaveValor[1]; // CP beneficiario
-            }
-            else
-            {
-                valoresFormato[56] = string.Empty;
-            }
-
-            return valoresFormato;
-        }
-
-        private static void AsignarCuentaFadPorMoneda(
-    PaPFxiInsertarEntradaSalidaDto entradaSalida,
-    string moneda)
-        {
-            switch (moneda)
-            {
-                case "USD":
-                    entradaSalida.Cuenta = 3300064;
-                    entradaSalida.Nombre = "BTMM USD FAD";
-                    entradaSalida.CuentaMoneda = "USD";
-                    entradaSalida.Via = 810;
-                    entradaSalida.ViaDesc = "TRF ENVIADA USD BTMNY";
-                    break;
-
-                case "EUR":
-                    entradaSalida.Cuenta = 3399940;
-                    entradaSalida.Nombre = "BTMM EUR FAD";
-                    entradaSalida.CuentaMoneda = "EUR";
-                    entradaSalida.Via = 830;
-                    entradaSalida.ViaDesc = "TRF ENVIADA EUR";
-                    break;
-
-                case "JPY":
-                    entradaSalida.Cuenta = 3399902;
-                    entradaSalida.Nombre = "BTMM JPY FAD";
-                    entradaSalida.CuentaMoneda = "JPY";
-                    entradaSalida.Via = 820;
-                    entradaSalida.ViaDesc = "TRF ENVIADA JPY";
-                    break;
-
-                case "HKD":
-                    entradaSalida.Cuenta = 3300420;
-                    entradaSalida.Nombre = "BTMM HKD FAD";
-                    entradaSalida.CuentaMoneda = "HKD";
-                    entradaSalida.Via = 810;
-                    entradaSalida.ViaDesc = "TRF ENVIADA USD BTMNY";
-                    break;
-
-                case "CAD":
-                    entradaSalida.Cuenta = 3399903;
-                    entradaSalida.Nombre = "BTMM CAD FAD";
-                    entradaSalida.CuentaMoneda = "CAD";
-                    entradaSalida.Via = 810;
-                    entradaSalida.ViaDesc = "TRF ENVIADA USD BTMNY";
-                    break;
-
-                case "SGD":
-                    entradaSalida.Cuenta = 3300153;
-                    entradaSalida.Nombre = "BTMM SGD FAD";
-                    entradaSalida.CuentaMoneda = "SGD";
-                    entradaSalida.Via = 810;
-                    entradaSalida.ViaDesc = "TRF ENVIADA USD BTMNY";
-                    break;
-
-                case "GBP":
-                    entradaSalida.Cuenta = 3300404;
-                    entradaSalida.Nombre = "BTMM GBP FAD";
-                    entradaSalida.CuentaMoneda = "GBP";
-                    entradaSalida.Via = 810;
-                    entradaSalida.ViaDesc = "TRF ENVIADA USD BTMNY";
-                    break;
-
-                case "AUD":
-                    entradaSalida.Cuenta = 3300129;
-                    entradaSalida.Nombre = "BTMM AUD FAD";
-                    entradaSalida.CuentaMoneda = "AUD";
-                    entradaSalida.Via = 810;
-                    entradaSalida.ViaDesc = "TRF ENVIADA USD BTMNY";
-                    break;
-            }
-        }
-
-        private static object[] CargarValoresFormatoMaestro(PaPFxiMaestroCmsDto maestroCms)
-        {
-            object[] valoresFormatoMto = new object[46];
-
-            valoresFormatoMto[29] = "FXD";
-            valoresFormatoMto[30] = maestroCms.IdFormato;
-            valoresFormatoMto[31] = maestroCms.Cdl;
-            valoresFormatoMto[32] = maestroCms.IdCuenta;
-            valoresFormatoMto[33] = maestroCms.FechaCaptura;
-            valoresFormatoMto[34] = maestroCms.IdUsuarioCaptura;
-            valoresFormatoMto[35] = maestroCms.FechaAutorizacion;
-            valoresFormatoMto[36] = maestroCms.IdUsuarioAutorizo;
-            valoresFormatoMto[37] = maestroCms.MontoOperacion;
-            valoresFormatoMto[38] = maestroCms.IdPlantilla;
-            valoresFormatoMto[39] = maestroCms.IdFormatoPlantilla;
-            valoresFormatoMto[40] = maestroCms.IdFilesBtmum;
-            valoresFormatoMto[41] = maestroCms.NoPagos;
-            valoresFormatoMto[42] = maestroCms.PagosDescripcion;
-            valoresFormatoMto[43] = maestroCms.NoPagosProcesados;
-            valoresFormatoMto[44] = maestroCms.NoPagosDevueltos;
-
-            string contenidoFormato = maestroCms.ContenidoFormato;
-
-            if (string.IsNullOrEmpty(contenidoFormato))
-                throw new Exception($"El contenidoFormato del folio {maestroCms.IdFormato} viene vacío.");
-
-            string[] valoresPipes = contenidoFormato.Split('|');
-
-            if (valoresPipes.Length - 1 < 28)
-            {
-                throw new Exception(
-                    $"El contenidoFormato del folio {maestroCms.IdFormato} es diferente al esperado, debe ser 28 datos y se tienen {valoresPipes.Length - 1}.");
-            }
-
-            for (int idxPipes = 0; idxPipes <= 28; idxPipes++)
-            {
-                string[] llaveValor = valoresPipes[idxPipes].Split('=');
-                valoresFormatoMto[idxPipes] = llaveValor[1];
-            }
-
-            return valoresFormatoMto;
-        }
-
-    }
-}
-
-using Aplicacion.DTOs.PaP;
-using Aplicacion.Interfaces.FirmaElectronica;
-using Aplicacion.Interfaces.PaP;
-using Aplicacion.Modelos;
-using Aplicacion.Servicios.FirmaElectronica;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Globalization;
-using System.Threading.Tasks;
-using static MUFG_T24.Comunes.Comunes;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    /// <summary>
-    /// Representa Pa P FXD.
-    /// </summary>
-    public class PaP_FXD
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly IPaPFXDDao _PaPFXDDao;
-        private readonly IPaPFXDCmsDao _PaPFXDCmsDao;
-        private readonly ConexionT24Mw _vwT24;
-        private readonly IComunFXD _comunFXD;
-
-        private const string tipoOperacion = "PaP_FXD";
-
-        private string folioUnico = string.Empty;
-        private string folioPropuesto = string.Empty;
-        /// <summary>
-        /// Inicializa una nueva instancia de la clase PaP_FXD.
-        /// </summary>
-
-        public PaP_FXD(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            IPaPFXDDao paPFXDDao,
-            IPaPFXDCmsDao paPFXDCmsDao,
-            ConexionT24Mw vwT24,
-            IComunFXD comunFXD)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _PaPFXDDao = paPFXDDao;
-            _PaPFXDCmsDao = paPFXDCmsDao;
-            _vwT24 = vwT24;
-            _comunFXD = comunFXD;
-        }
-
-        /// <summary>
-        /// Procesa la operación PaP FXD del servicio Lectura.
-        /// </summary>
-        public async Task<bool> ProcesaOperacion(string folio)
-        {
-            PaPFxdMaestroCmsDto maestroCms;
-            PaPFxdDetalleCmsDto detalleCms;
-            PaPFxdContenidoDto maestroContenido;
-            PaPFxdContenidoDto detalleContenido;
-            PapFxdSumatoriaDetalleDto sumatoriaDetalle;
-            PapFxdDetalleImporteDto detalleProcesadoTomi;
-            FxdEntradaSalidaDto entradaSalida;
-
-            long folioNumero = ConversionHelper.ParseLongSeguro(folio, nameof(folio));
-            long folioMaestro = 0;
-            int noPagosMaestro = 0;
-            string fechaEjecucionMaestroTexto = string.Empty;
-            string fechaEjecucionDetalleTexto = string.Empty;
-            string monedaMaestro = string.Empty;
-            string monedaDetalle = string.Empty;
-            decimal importeMaestro = 0m;
-            decimal importeDetalle = 0m;
-
-            string nombreCliente = string.Empty;
-            string folioForexMaestro = string.Empty;
-            string folioForexDetalle = string.Empty;
-
-            bool conForex = false;
-            bool forexCancelado = false;
-            bool conEntradaSalida = true;
-            bool procesado;
-            bool resultado;
-
-            // Verificamos la última operación no realizada.
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-
-            if (string.Equals(_configuracion.AliasProceso, "", StringComparison.Ordinal))
-                return false;
-
-            // Confirmo certificado y llave para firma digital.
-            using (var firma = new MetodosFirma(_configuracion))
-            {
-                if (!firma.CertificadoEncontrado())
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de SPEI: No se encontro el certificado y/o llave para realizar la firma de la transacción");
-            }
-
-            Config.EscribirLog($"INFO|PaP_FXD.procesaOperacion|Inicia proceso folio={folio}.");
-
-            // Datos del maestro en CMS.
-            maestroCms = await _PaPFXDCmsDao.ObtenerMaestroPapFxdPorDetalle(folio);
-            // Datos del detalle en CMS.
-            detalleCms = await _PaPFXDCmsDao.ObtenerDetallePapFxdPorFolio(folio);
-
-            if (maestroCms == null)
-                maestroCms = new PaPFxdMaestroCmsDto();
-
-            if (detalleCms == null)
-                detalleCms = new PaPFxdDetalleCmsDto();
-
-            // Parseo legacy de contenidoFormato.
-            maestroContenido = ParseContenidoFormato(maestroCms.ContenidoFormato, folio);
-            detalleContenido = ParseContenidoFormato(detalleCms.ContenidoFormato, folio);
-
-            // ---------------------------
-            // Maestro
-            // ---------------------------
-            folioMaestro = maestroCms.IdFormato;
-            noPagosMaestro = Convert.ToInt32(maestroCms.NoPagos);
-            importeMaestro = maestroCms.MontoOperacion;
-
-            folioForexMaestro = string.Empty;
-
-            fechaEjecucionMaestroTexto = maestroContenido.FechaEjecucion;
-            monedaMaestro = _vwT24.ValidaMoneda(maestroContenido.Moneda);
-
-            // ---------------------------
-            // Detalle
-            // ---------------------------
-            importeDetalle = detalleCms.MontoOperacion;
-
-            folioForexDetalle = string.Empty;
-
-            fechaEjecucionDetalleTexto = detalleContenido.FechaEjecucion;
-            monedaDetalle = _vwT24.ValidaMoneda(detalleContenido.Moneda);
-
-            nombreCliente = detalleContenido.NombreCliente;
-
-            Config.EscribirLog($"INFO|PaP_FXD.procesaOperacion|Veamos que trae la fecha {fechaEjecucionDetalleTexto}-----{fechaEjecucionMaestroTexto}");
-
-            int fechaSistema = int.Parse(_configuracion.StrFechaSistema, CultureInfo.InvariantCulture);
-            int intFechaEjecucion = int.Parse(fechaEjecucionMaestroTexto, CultureInfo.InvariantCulture);
-            if (intFechaEjecucion < fechaSistema)
-            {
-                await _controlServicio.MarcarErrorFechaPasada(folioNumero);
-                throw new Exception($"Se desea realizar una operación al {fechaEjecucionMaestroTexto} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-            }
-
-            // Genero el folio único y folio propuesto T24.
-            folioUnico = await _vwT24.GeneraFolioUnico(
-                tipoOperacion,
-                ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucionMaestroTexto),
-                folio);
-
-            folioPropuesto = await _vwT24.GeneraFolioPresupuesto(
-                folioUnico,
-                int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucionMaestroTexto)),
-                tipoOperacion);
-
-            if (string.IsNullOrWhiteSpace(folioPropuesto))
-                /// <summary>
-                /// Ejecuta la operaciÃ³n Exception.
-                /// </summary>
-                throw new Exception("Error al obtener el folio propuesto de T24");
-
-            // Validación maestro vs detalle.
-            if (!string.Equals(folioForexMaestro, folioForexDetalle, StringComparison.Ordinal))
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Forex: Maestro:'{folioForexMaestro}', Detalle:'{folioForexDetalle}'.");
-
-            if (!string.Equals(fechaEjecucionMaestroTexto, fechaEjecucionDetalleTexto, StringComparison.Ordinal))
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Fecha de ejecución: Maestro:'{fechaEjecucionMaestroTexto}', Detalle:'{fechaEjecucionDetalleTexto}'.");
-
-            if (!string.Equals(monedaMaestro, monedaDetalle, StringComparison.Ordinal))
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Moneda: Maestro:'{monedaMaestro}', Detalle:'{monedaDetalle}'.");
-
-            Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|Validando si la operación está asignada a un Forex.");
-
-            if (!string.Equals(folioForexMaestro, "", StringComparison.Ordinal))
-            {
-                Config.EscribirLog($"INFO|PaP_FXD.procesaOperacion|Asignado el folio forex: {folioForexMaestro}.");
-                conForex = true;
-
-                if (double.TryParse(folioForexMaestro, NumberStyles.Any, CultureInfo.InvariantCulture, out _))
-                    throw new Exception($"El Folio del Forex no es válido porque es numérico; se espera una referencia alfanumérica/external ref: {folioForexMaestro}");
-
-                ForexStatusDto forexStatus = await _PaPFXDDao.ObtenerForexStatusPorExternalRef(folioForexMaestro);
-                if (forexStatus != null &&
-                    string.Equals(forexStatus.StatusOperacion, "CANCELADO", StringComparison.OrdinalIgnoreCase))
-                {
-                    forexCancelado = true;
-                    conEntradaSalida = false;
-                    Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|FOREX CANCELADO.");
-                }
-            }
-
-            // Lectura y actualización de los datos del maestro.
-            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
-            {
-                string subTipo = string.Empty;
-
-                Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-
-                if (conForex)
-                    subTipo = $"FX:{folioForexMaestro}";
-
-                int fechaValor = ConversionHelper.ParseFechaEntera(fechaEjecucionMaestroTexto);
-
-                procesado = await _PaPFXDDao.ActualizarPlanTrabajoMaestroPapFxdLectura(
-                    folioDetalle: folioNumero,
-                    tipoOperacion: tipoOperacion,
-                    folioUnico: folioUnico,
-                    fechaValor: fechaValor,
-                    moneda: monedaMaestro,
-                    importeDetalle: importeDetalle,
-                    importeMaestro: importeMaestro,
-                    numCliente: DameTexto(detalleCms.Cdl),
-                    nombreCliente: nombreCliente,
-                    numCuenta: DameTexto(detalleCms.IdCuenta),
-                    subtipoOperacion: subTipo,
-                    noPagos: noPagosMaestro,
-                    folioMaestro: folioMaestro);
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro DATOS_GRAL con folio: {folio}");
-                }
-            }
-
-            // Lectura del CMS e inserción a TOMI.
-            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
-            {
-                Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|A insertar datos de CMS a TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-
-                procesado = false;
-
-                resultado = await CMS_A_TOMI(folio, detalleCms, detalleContenido, folioUnico);
-                if (resultado)
-                {
-                    Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
-
-                    if (!await _comunFXD.GeneraFirmaDigital("tb_tombin_nf_fxd_pap_detalle", folio, folioPropuesto))
-                        throw new Exception($"Se presentó un error al generar la firma digital del folio: {folio}");
-
-                    procesado = true;
-                }
-                else
-                {
-                    // Posiblemente se restauró el servicio.
-                    int numRegsDetalle = await _PaPFXDDao.ContarRegistrosPapFxdDetallePorFolio(folioNumero);
-                    if (numRegsDetalle > 0)
-                    {
-                        procesado = true;
-                        Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                    }
-                }
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {folio}");
-                }
-            }
-
-            // Registro de la Entrada/Salida.
-            if (string.Equals(_configuracion.AliasProceso, "TOMI_ENTRADAS/SALIDAS", StringComparison.Ordinal))
-            {
-                Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|A insertar datos de Entrada/Salida en TOMI (registro detalle).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-
-                if (conEntradaSalida)
-                {
-                    procesado = false;
-
-                    int numRegsEntSal = await _PaPFXDDao.ContarEntradasSalidasPorReferencia(folioUnico);
-                    if (numRegsEntSal > 0)
-                    {
-                        procesado = true;
-                        Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
-                    }
-
-                    if (!procesado)
-                    {
-                        resultado = await TOMI_ENTRADA_SALIDA(folio, detalleCms, detalleContenido, folioUnico);
-                        if (resultado)
-                        {
-                            procesado = true;
-                            Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|Se insertó correctamente el folio detalle en base de Entrada/Salida.");
-                        }
-                    }
-
-                    if (procesado)
-                    {
-                        await _controlServicio.TerminaProceso(new ProcesoDTO
-                        {
-                            Folio = folio,
-                            TipoOperacion = tipoOperacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            PId = _configuracion.Pid.Value
-                        });
-
-                        _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                        {
-                            Folio = folio,
-                            TipoOperacion = tipoOperacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            PId = _configuracion.Pid.Value
-                        });
-                    }
-                    else
-                    {
-                        throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
-                    }
-                }
-            }
-
-            // Actualización del estatus del CMS y TOMI.
-            if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
-            {
-                Config.EscribirLog($"INFO|PaP_FXD.procesaOperacion|A actualizar estatus en CMS y TOMI. Buscando sumarizado de los detalles del folioMaestro={folioMaestro}");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                sumatoriaDetalle = await _PaPFXDDao.ObtenerSumatoriaDetallePapFxd(folioMaestro, soloNoPendientes: false);
-
-                int tomiRegs = sumatoriaDetalle?.NumRegs ?? 0;
-                decimal tomiImporte = sumatoriaDetalle?.ImpMonto ?? 0m;
-
-                procesado = false;
-
-                if (noPagosMaestro == tomiRegs &&
-                    decimal.Round(importeMaestro, 2) == decimal.Round(tomiImporte, 2))
-                {
-                    Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|El sumarizado de detalles está completo.");
-
-                    int detallesNoPend = await _PaPFXDDao.ContarDetallesPapFxdConEstatusDistintoPend(folioNumero);
-                    if (detallesNoPend > 0)
-                    {
-                        procesado = true;
-                        Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|El folio ya se había marcado como realizado.");
-                    }
-
-                    if (!procesado)
-                    {
-                        Config.EscribirLog($"INFO|PaP_FXD.procesaOperacion|A tratar de insertar el maestro con folio {folioMaestro}.");
-
-                        resultado = await CMS_A_TOMI_MAESTRO(folioMaestro.ToString(CultureInfo.InvariantCulture), maestroCms, maestroContenido, folioUnico);
-                        if (resultado)
-                        {
-                            Config.EscribirLog($"INFO|PaP_FXD.procesaOperacion|Se insertó correctamente el folio maestro {folioMaestro} en base de TOMI.");
-                            procesado = true;
-                        }
-                        else
-                        {
-                            int numRegsMaestro = await _PaPFXDDao.ContarRegistrosPapFxdMaestroPorFolio(folioMaestro);
-                            if (numRegsMaestro > 0)
-                            {
-                                procesado = true;
-                                Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|El folio maestro en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                            }
-                        }
-                    }
-
-                    if (procesado)
-                    {
-                        if (conForex && forexCancelado)
-                        {
-                            const string descripcionError = "El forex relacionado ha sido cancelado";
-
-                            bool cmsOk = await _PaPFXDCmsDao.ActualizarCmsRechazadoPorForexCancelado(folioMaestro.ToString(CultureInfo.InvariantCulture));
-                            if (!cmsOk)
-                                throw new Exception($"No fue posible actualizar CMS como rechazado por forex cancelado para folio maestro={folioMaestro}.");
-
-                            bool tomiOk = await _PaPFXDDao.ActualizarTomiRechazadoPorForexCancelado(folioMaestro);
-                            if (!tomiOk)
-                                throw new Exception($"No fue posible actualizar TOMI como rechazado por forex cancelado para folio maestro={folioMaestro}.");
-
-                            Config.EscribirLog($"INFO|PaP_FXD.procesaOperacion|Forex Rechazado con Anterioridad: {folioMaestro}");
-                            Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|A cancelar la operación.");
-
-                            bool planDetalleOk = await _PaPFXDDao.ActualizarPlanTrabajoMaestroDetalleCanceladoPorForex(
-                                folioDetalle: folioNumero,
-                                tipoOperacion: tipoOperacion,
-                                fechaValor: ConversionHelper.ParseFechaEntera(fechaEjecucionMaestroTexto),
-                                moneda: monedaMaestro,
-                                importe: importeDetalle,
-                                descripcionError: descripcionError);
-
-                            if (!planDetalleOk)
-                                throw new Exception($"No fue posible actualizar tb_srv_plan_trabajo_maestro detalle como cancelado por forex para folio={folio}.");
-
-                            bool planMaestroOk = await _PaPFXDDao.ActualizarPlanTrabajoMaestroMaestroCanceladoPorForex(
-                folioMaestro: ConversionHelper.ParseLongSeguro(await _vwT24.ObtenerFolioMaestro(folio, tipoOperacion), "folio_maestro"),
-                                tipoOperacion: tipoOperacion,
-                                fechaValor: ConversionHelper.ParseFechaEntera(fechaEjecucionMaestroTexto),
-                                moneda: monedaMaestro,
-                                importe: importeMaestro,
-                                descripcionError: descripcionError);
-
-                            if (!planMaestroOk)
-                                throw new Exception($"No fue posible actualizar tb_srv_plan_trabajo_maestro maestro como cancelado por forex para folio maestro={folioMaestro}.");
-
-                            await _controlServicio.TerminaProceso(new ProcesoDTO
-                            {
-                                Folio = folio,
-                                TipoOperacion = tipoOperacion,
-                                Servicio = _configuracion.NombreServicio,
-                                NombreProceso = _configuracion.NombreProceso,
-                                AliasProceso = _configuracion.AliasProceso,
-                                PId = _configuracion.Pid.Value
-                            });
-
-                            return true;
-                        }
-                        else
-                        {
-                            DateTime fechaConfirma = DateTime.ParseExact(
-                                DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                                "yyyy/MM/dd HH:mm",
-                                CultureInfo.InvariantCulture);
-                            const string usuarioConfirma = "OPER CMS";
-
-                            if (string.Equals(fechaEjecucionMaestroTexto, _configuracion.StrFechaSistema, StringComparison.Ordinal))
-                            {
-                                bool cmsOk = await _PaPFXDCmsDao.ActualizarCmsAceptadoHoy(folioMaestro.ToString(CultureInfo.InvariantCulture));
-                                if (!cmsOk)
-                                    throw new Exception($"No fue posible actualizar CMS como aceptado hoy para folio maestro={folioMaestro}.");
-
-                                bool tomiOk = await _PaPFXDDao.ActualizarTomiAceptadoHoy(folioMaestro, usuarioConfirma, fechaConfirma);
-                                if (!tomiOk)
-                                    throw new Exception($"No fue posible actualizar TOMI como aceptado hoy para folio maestro={folioMaestro}.");
-
-                                Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|Operación fecha valor hoy.");
-                            }
-                            else if (string.CompareOrdinal(fechaEjecucionMaestroTexto, _configuracion.StrFechaSistema) < 0)
-                            {
-                                await _controlServicio.MarcarErrorFechaPasada(folioNumero);
-                                throw new Exception($"Se desea realizar una operación al {fechaEjecucionMaestroTexto} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-                            }
-                            else
-                            {
-                                bool cmsOk = await _PaPFXDCmsDao.ActualizarCmsPendienteEjecucion(folioMaestro.ToString(CultureInfo.InvariantCulture));
-                                if (!cmsOk)
-                                    throw new Exception($"No fue posible actualizar CMS como pendiente de ejecución para folio maestro={folioMaestro}.");
-
-                                bool tomiOk = await _PaPFXDDao.ActualizarTomiPendienteEjecucion(folioMaestro, usuarioConfirma, fechaConfirma);
-                                if (!tomiOk)
-                                    throw new Exception($"No fue posible actualizar TOMI como pendiente de ejecución para folio maestro={folioMaestro}.");
-
-                                Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|Operación fecha valor futura.");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    Config.EscribirLog($"AVISO|PaP_FXD.procesaOperacion|Faltan detalles a procesar para marcar el cambio de estatus en el folio Maestro:{folioMaestro}.");
-                    return true;
-                }
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CAMBIO_ESTATUS con folio: {folio}");
-                }
-            }
-
-            // Conciliación.
-            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
-            {
-                int regsCms = 1;
-                int regsTomi = 0;
-                int regsEntSal = 0;
-                string msjError = string.Empty;
-
-                string fechaEjecucionEntSal = string.Empty;
-                string monedaEntSal = string.Empty;
-                decimal importeEntSal = 0m;
-                decimal importeTomiDetalle = 0m;
-
-                Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|A conciliar operaciones entre CMS y TOMI (maestro y detalles).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                detalleProcesadoTomi = await _PaPFXDDao.ObtenerDetalleProcesadoPorFolio(folioNumero);
-                if (detalleProcesadoTomi != null)
-                {
-                    regsTomi = 1;
-                    importeTomiDetalle = detalleProcesadoTomi.T24DebitAmount ?? 0m;
-                }
-
-                sumatoriaDetalle = await _PaPFXDDao.ObtenerSumatoriaDetallePapFxd(folioMaestro, soloNoPendientes: true);
-                int tomiRegsNoPend = sumatoriaDetalle?.NumRegs ?? 0;
-                decimal tomiImporteNoPend = sumatoriaDetalle?.ImpMonto ?? 0m;
-
-                if (conEntradaSalida)
-                {
-                    entradaSalida = await _PaPFXDDao.ObtenerEntradaSalidaPorReferencia(folioUnico);
-                    if (entradaSalida != null)
-                    {
-                        regsEntSal = 1;
-                        fechaEjecucionEntSal = entradaSalida.EntFechaValor?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? string.Empty;
-                        monedaEntSal = _vwT24.ValidaMoneda(entradaSalida.EntMonedaCuenta);
-                        importeEntSal = entradaSalida.EntImporte ?? 0m;
-                    }
-                }
-
-                if (regsCms == 1 && regsTomi == 1 && ((conEntradaSalida && regsEntSal == 1) || !conEntradaSalida))
-                {
-                    if (importeDetalle != importeTomiDetalle)
-                        msjError += $"{Environment.NewLine} - Diferencia en el importe. CMS='{importeDetalle}', TOMI='{importeTomiDetalle}'.";
-
-                    if (noPagosMaestro != tomiRegsNoPend)
-                        msjError += $"{Environment.NewLine} - Diferencia en el total de registros. CMS='{noPagosMaestro}', TOMI='{tomiRegsNoPend}'.";
-
-                    if (decimal.Round(importeMaestro, 2) != decimal.Round(tomiImporteNoPend, 2))
-                        msjError += $"{Environment.NewLine} - Diferencia en la sumatoría del importe de registros. CMS='{importeMaestro}', TOMI='{tomiImporteNoPend}'.";
-
-                    if (conEntradaSalida)
-                    {
-                        if (!string.Equals(fechaEjecucionMaestroTexto, fechaEjecucionEntSal, StringComparison.Ordinal))
-                            msjError += $"{Environment.NewLine} - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='{fechaEjecucionMaestroTexto}', TOMI='{fechaEjecucionEntSal}'.";
-
-                        if (!string.Equals(monedaMaestro, monedaEntSal, StringComparison.Ordinal))
-                            msjError += $"{Environment.NewLine} - Diferencia en la monedas de Entrada/Salida. CMS='{monedaMaestro}', TOMI='{monedaEntSal}'.";
-
-                        if (importeDetalle != importeEntSal)
-                            msjError += $"{Environment.NewLine} - Diferencia en el importe de Entrada/Salida. CMS='{importeDetalle}', Entrada/Salida='{importeEntSal}'.";
-                    }
-
-                    procesado = string.IsNullOrWhiteSpace(msjError);
-                }
-                else
-                {
-                    procesado = false;
-                    msjError += $"{Environment.NewLine} - No se ha registrado la operación en TOMI.";
-                }
-
-                if (!string.IsNullOrWhiteSpace(msjError))
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception(msjError);
-
-                if (procesado)
-                {
-                    Config.EscribirLog("INFO|PaP_FXD.procesaOperacion|La operación está correctamente conciliada.");
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = string.Empty;
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CONCILIAR con folio: {folio}");
-                }
-            }
-
-            return true;
-        }
-
-        private async Task<bool> CMS_A_TOMI(
-            string folio,
-            PaPFxdDetalleCmsDto detalleCms,
-            PaPFxdContenidoDto detalleContenido,
-            string folioUnicoGenerado)
-        {
-            try
-            {
-                bool resultado = await _PaPFXDDao.InsertarFormatoPapFxdDetalleEnTomi(
-                    nfFolioUnico: folioUnicoGenerado,
-                    nfTipo: "FXD",
-                    nfFolio: detalleCms.IdFormato,
-                    t24CustomerCode: DameTexto(detalleCms.Cdl),
-                    t24DebitAcctNo: DameTexto(detalleCms.IdCuenta),
-                    nfEstatus: "PEND",
-                    nfUsuarioCaptura: detalleCms.IdUsuarioCaptura,
-                    nfUsuarioAutoriza: detalleCms.IdUsuarioAutorizo,
-                    nfFechaCaptura: detalleCms.FechaCaptura,
-                    nfFechaAutoriza: detalleCms.FechaAutorizacion,
-                    t24DebitAmount: detalleCms.MontoOperacion,
-                    t24ShortName: DameTexto(detalleContenido.Valores[1]),
-                    nfForexRelacionado: DameTexto(detalleContenido.Valores[3]),
-                    t24DebitCurrency: DameTexto(detalleContenido.Valores[4]),
-                    nfBancoBenef: DameTexto(detalleContenido.Valores[6]),
-                    t24BenAcctNo: DameTexto(detalleContenido.Valores[7]),
-                    nfTipoCuenta: DameTexto(detalleContenido.Valores[8]),
-                    t24BenCustName: TextoSPEI(detalleContenido.Valores[10]),
-                    nfRfcBeneficiario: TextoSPEI(detalleContenido.Valores[11]),
-                    nfTasaRetencion: DameTexto(detalleContenido.Valores[12]),
-                    nfFechaEjecucion: ConversionHelper.ParseFechaEntera(DameTexto(detalleContenido.Valores[13])),
-                    t24DebitTheirRef: TextoSPEI(detalleContenido.Valores[15]),
-                    nfMontoEnviar: ConversionHelper.ParseDecimalSeguro(detalleContenido.Valores[18]),
-                    idPlantilla: detalleCms.IdPlantilla,
-                    idFormatoPlantilla: detalleCms.IdFormatoPlantilla,
-                    idFilesBtmum: detalleCms.IdFilesBtmum,
-                noPagos: ConversionHelper.ConvertLongToNullableInt(detalleCms.NoPagos),
-                    pagosDescripcion: detalleCms.PagosDescripcion,
-                noPagosProcesados: ConversionHelper.ConvertLongToNullableInt(detalleCms.NoPagosProcesados),
-                noPagosDevueltos: ConversionHelper.ConvertLongToNullableInt(detalleCms.NoPagosDevueltos),
-                    idFormatoPap: detalleCms.IdFormatoPap,
-                    ref1: detalleCms.Ref1,
-                    ref2: detalleCms.Ref2,
-                    ref3: detalleCms.Ref3,
-                    ref4: detalleCms.Ref4,
-                    ref5: detalleCms.Ref5);
-
-                Config.EscribirLog($"INFO|PaP_FXD.CMS_A_TOMI|Salida={(resultado ? 0 : -1)}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|PaP_FXD.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
-            }
-
-            return false;
-        }
-
-        private async Task<bool> CMS_A_TOMI_MAESTRO(
-            string folioMaestro,
-            PaPFxdMaestroCmsDto maestroCms,
-            PaPFxdContenidoDto maestroContenido,
-            string folioUnicoGenerado)
-        {
-            try
-            {
-                bool resultado = await _PaPFXDDao.InsertarFormatoPapFxdMaestroEnTomi(
-                    nfFolioUnico: folioUnicoGenerado,
-                    nfTipo: "FXD",
-                    nfFolio: maestroCms.IdFormato,
-                    t24CustomerCode: DameTexto(maestroCms.Cdl),
-                    t24DebitAcctNo: DameTexto(maestroCms.IdCuenta),
-                    nfEstatus: "PEND",
-                    nfUsuarioCaptura: maestroCms.IdUsuarioCaptura,
-                    nfUsuarioAutoriza: maestroCms.IdUsuarioAutorizo,
-                    nfFechaCaptura: maestroCms.FechaCaptura,
-                    nfFechaAutoriza: maestroCms.FechaAutorizacion,
-                    t24DebitAmount: maestroCms.MontoOperacion,
-                    t24ShortName: DameTexto(maestroContenido.Valores[1]),
-                    nfForexRelacionado: DameTexto(maestroContenido.Valores[3]),
-                    t24DebitCurrency: DameTexto(maestroContenido.Valores[4]),
-                    nfBancoBenef: DameTexto(maestroContenido.Valores[6]),
-                    t24BenAcctNo: DameTexto(maestroContenido.Valores[7]),
-                    nfTipoCuenta: DameTexto(maestroContenido.Valores[8]),
-                    t24BenCustName: DameTexto(maestroContenido.Valores[10]),
-                    nfRfcBeneficiario: DameTexto(maestroContenido.Valores[11]),
-                    nfTasaRetencion: DameTexto(maestroContenido.Valores[12]),
-                    nfFechaEjecucion: ConversionHelper.ParseFechaEntera(DameTexto(maestroContenido.Valores[13])),
-                    t24DebitTheirRef: DameTexto(maestroContenido.Valores[15]),
-                    nfMontoEnviar: ConversionHelper.ParseDecimalSeguroConDefaultCero(maestroContenido.Valores[18]),
-                    idPlantilla: maestroCms.IdPlantilla,
-                    idFormatoPlantilla: maestroCms.IdFormatoPlantilla,
-                    idFilesBtmum: maestroCms.IdFilesBtmum,
-                noPagos: ConversionHelper.ConvertLongToNullableInt(maestroCms.NoPagos),
-                    pagosDescripcion: maestroCms.PagosDescripcion,
-                noPagosProcesados: ConversionHelper.ConvertLongToNullableInt(maestroCms.NoPagosProcesados),
-                noPagosDevueltos: ConversionHelper.ConvertLongToNullableInt(maestroCms.NoPagosDevueltos));
-
-                Config.EscribirLog($"INFO|PaP_FXD.CMS_A_TOMI_MAESTRO|Salida={(resultado ? 0 : -1)}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|PaP_FXD.CMS_A_TOMI_MAESTRO|Se presenta exception: {ex.Message}. Trace: {ex}");
-            }
-
-            return false;
-        }
-
-        private async Task<bool> TOMI_ENTRADA_SALIDA(
-            string folio,
-            PaPFxdDetalleCmsDto detalleCms,
-            PaPFxdContenidoDto detalleContenido,
-            string folioUnicoGenerado)
-        {
-            try
-            {
-                long folioNumero = ConversionHelper.ParseLongSeguro(folio, nameof(folio));
-
-                var detallesTomi = await _PaPFXDDao.ObtenerDetallePapFxdTomiPorFolio(folioNumero);
-                if (detallesTomi == null || detallesTomi.Count == 0)
-                    throw new Exception($"No se encontraron datos TOMI para generar Entrada/Salida del folio={folio}.");
-
-                PapFxdDetalleTomiDto detalleTomi = null;
-                foreach (var item in detallesTomi)
-                {
-                    detalleTomi = item;
-                }
-
-                bool resultado = await _PaPFXDDao.InsertarEntradaSalidaSrv(
-                    referencia: string.IsNullOrWhiteSpace(detalleTomi.NfFolioUnico) ? folioUnicoGenerado : detalleTomi.NfFolioUnico,
-                numCliente: ConversionHelper.ParseIntOrZero(detalleTomi.T24CustomerCode, "T24_CUSTOMER_CODE"),
-                cdl: ConversionHelper.ParseDoubleOrZero(detalleTomi.T24CustomerCode, "T24_CUSTOMER_CODE"),
-                    ordenante: detalleTomi.T24CompanyName,
-                    operacion: 218d,
-                    operacionDesc: "Salida  (TTS)",
-                    tipo: "D",
-                    tipoDesc: "Doméstica",
-                cuenta: ConversionHelper.ParseDoubleOrZero(detalleTomi.T24DebitAcctNo, "T24_DEBIT_ACCT_NO"),
-                    nombre: detalleTomi.NfNombreCuenta,
-                    cuentaMoneda: detalleTomi.NfMonedaCuenta,
-                    via: 800d,
-                    viaDesc: "TRF ENVIADA MXN SPEUA",
-                importe: ConversionHelper.ToDouble(detalleTomi.T24DebitAmount),
-                    saldo: 0d,
-                    comentarios: detalleTomi.T24DebitTheirRef,
-                    fechaCaptura: ConversionHelper.ParseFechaSistema(_configuracion.StrFechaSistema),
-                    fechaValor: ConversionHelper.ParseFechaSistema(DameTexto(detalleTomi.NfFechaEjecucion)),
-                    hora: DateTime.Now.ToLongTimeString(),
-                    capturista: "JEAI",
-                    fad: 0d,
-                    referenciaControl: "A",
-                    referenciaControlCont: 0d);
-
-                Config.EscribirLog($"INFO|PaP_FXD.TOMI_ENTRADA_SALIDA|Salida={(resultado ? 0 : -1)}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|PaP_FXD.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}. Trace: {ex}");
-            }
-
-            return false;
-        }
-
-
-        // ---------------------------------------------------------------------
-        // HELPERS
-        // ---------------------------------------------------------------------
-
-        private static PaPFxdContenidoDto ParseContenidoFormato(string contenidoFormato, string folio)
-        {
-            if (string.IsNullOrWhiteSpace(contenidoFormato))
-                throw new Exception($"El contenidoFormato del folio {folio} viene vacío.");
-
-            string[] valoresPipes = contenidoFormato.Split('|');
-            if (valoresPipes.Length < 19)
+valoresFormato[26] = datosCms.IdUsuarioAutorizo;
+            valoresFormato[27] = datosCms.MontoOperacion;
+            valoresFormato[28] = datosCms.IdPlantilla;
+            valoresFormato[29] = datosCms.IdFormatoPlantilla;
+            valoresFormato[30] = datosCms.CodigoOperacion;
+            valoresFormato[31] = datosCms.TipoOperacion;
+            valoresFormato[32] = datosCms.FechaAplicacionAbono;
+            valoresFormato[33] = datosCms.FechaCargoFondos;
+
+            string[] valoresPipes = (datosCms.ContenidoFormato ?? string.Empty)
+                .Split(new[] { "|" }, StringSplitOptions.None);
+
+            if (valoresPipes.Length - 1 < 18)
                 throw new Exception($"El contenidoFormato del folio {folio} es diferente al esperado, debe ser 18 datos y se tienen {valoresPipes.Length - 1}.");
 
-            string[] valores = new string[19];
-
-            for (int i = 0; i <= 18; i++)
+            for (int idx = 0; idx <= 18; idx++)
             {
-                string[] llaveValor = valoresPipes[i].Split(new[] { '=' }, 2);
+                string[] llaveValor = valoresPipes[idx].Split(new[] { "=" }, 2, StringSplitOptions.None);
 
-                if (llaveValor.Length < 2)
-                    throw new Exception($"El contenidoFormato del folio {folio} tiene un elemento inválido en la posición {i}: '{valoresPipes[i]}'.");
+                if (llaveValor.Length <= 1)
+                    throw new Exception($"El contenidoFormato del folio {folio} tiene un elemento inválido en la posición {idx}: '{valoresPipes[idx]}'.");
 
-                valores[i] = llaveValor[1];
+                valoresFormato[idx] = llaveValor[1];
             }
 
-            return new PaPFxdContenidoDto
+            // Folio Forex.
+            if (valoresFormato[3] != null)
+                folioForex = Convert.ToString(valoresFormato[3]);
+
+            // Fecha ejecución.
+            if (valoresFormato[13] != null)
+                fechaEjecucion = Convert.ToString(valoresFormato[13]);
+
+            // Moneda.
+            if (valoresFormato[4] != null)
+                moneda = _vwT24.ValidaMoneda(Convert.ToString(valoresFormato[4]));
+
+            // Importe.
+            importe = datosCms.MontoOperacion;
+
+            if (CompararMontos(valoresFormato[5], valoresFormato[18]) == false ||
+                CompararMontos(valoresFormato[5], valoresFormato[27]) == false)
             {
-                Valores = valores,
-                NombreCliente = valores[1] ?? string.Empty,
-                Moneda = valores[4] ?? string.Empty,
-                FechaEjecucion = valores[13] ?? string.Empty
-            };
-        }
-
-    }
-}
-
-using Aplicacion.Interfaces.PaP_FXT;
-using Aplicacion.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using static MUFG_T24.Comunes.Comunes;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    /// <summary>
-    /// Representa Pa P FXT.
-    /// </summary>
-    public class PaP_FXT
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly IPaPFXTCmsDao _paPFXTCmsDao;
-        private readonly IPaPFXTTomiDao _paPFXTTomiDao;
-        private readonly ConexionT24Mw _vwT24;
-
-        private const string tipoOperacion = "PaP_FXT";
-        private string folioUnico = "";
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public PaP_FXT(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            IPaPFXTCmsDao paPFXTCmsDao,
-            IPaPFXTTomiDao paPFXTTomiDao,
-            ConexionT24Mw vwT24)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _paPFXTCmsDao = paPFXTCmsDao;
-            _paPFXTTomiDao = paPFXTTomiDao;
-            _vwT24 = vwT24;
-        }
-
-        /// <summary>
-        /// Procesa la operación PaP_FXT del servicio Lectura.
-        /// </summary>
-        public async Task<bool> ProcesaOperacion(string folio)
-        {
-            PaPFXTFormatoPapMaestroCmsDto maestroCms;
-            PaPFXTFormatoPapDetalleCmsDto detalleCms;
-            PaPFXTContenidoFormatoDto contenidoMaestro = new PaPFXTContenidoFormatoDto();
-            PaPFXTContenidoFormatoDto contenidoDetalle = new PaPFXTContenidoFormatoDto();
-
-            long mtoFolio = 0;
-            int mtoRegs = 0;
-            string mtoFechaEjecucion = string.Empty;
-            string mtoMoneda = string.Empty;
-            decimal mtoImporte = 0m;
-            string mtoFolioForex = string.Empty;
-
-            string detFolioForex = string.Empty;
-            string detFechaEjecucion = string.Empty;
-            string detMoneda = string.Empty;
-            decimal detImporte = 0m;
-
-            bool conForex = false;
-            bool forexCancelado = false;
-            bool procesado;
-            bool fechaFutura;
-            bool resultado;
-
-            int tomiMtoRegs = 0;
-            decimal tomiMtoImporte = 0m;
-
-            long folioNumerico = Convert.ToInt64(folio);
-
-            // Verificamos la última operación no realizada.
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-
-            if (string.Equals(_configuracion.AliasProceso, "", StringComparison.Ordinal))
-                return false;
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexión a base de datos del CMS.");
-
-            // Datos del maestro.
-            maestroCms = await _paPFXTCmsDao.ObtenerFormatoPapMaestroPorFolio(folio);
-            if (maestroCms != null)
-            {
-                contenidoMaestro = ParsearContenidoFormatoPaPFXT(maestroCms.ContenidoFormato, folio);
-
-                mtoFolio = maestroCms.IdFormato;
-                mtoRegs = Convert.ToInt32(maestroCms.NoPagos);
-                mtoImporte = maestroCms.MontoOperacion;
-
-                mtoFolioForex = string.Empty;
-
-                if (contenidoMaestro.FechaEjecucion.HasValue)
-                    mtoFechaEjecucion = contenidoMaestro.FechaEjecucion.Value.ToString();
-
-                if (!string.IsNullOrWhiteSpace(contenidoMaestro.Moneda))
-                    mtoMoneda = _vwT24.ValidaMoneda(contenidoMaestro.Moneda);
+                throw new Exception(
+                    $"Hay diferencias entre los montos de la operación: MontoOperacion={valoresFormato[27]}, MontoCapturado={valoresFormato[5]}, MontoEnviado={valoresFormato[18]}.");
             }
 
-            // Datos del detalle.
-            detalleCms = await _paPFXTCmsDao.ObtenerFormatoPapDetallePorFolio(folio);
-            if (detalleCms != null)
-            {
-                contenidoDetalle = ParsearContenidoFormatoPaPFXT(detalleCms.ContenidoFormato, folio);
-
-                detImporte = detalleCms.MontoOperacion;
-
-                detFolioForex = string.Empty;
-
-                if (contenidoDetalle.FechaEjecucion.HasValue)
-                    detFechaEjecucion = contenidoDetalle.FechaEjecucion.Value.ToString();
-
-                if (!string.IsNullOrWhiteSpace(contenidoDetalle.Moneda))
-                    detMoneda = _vwT24.ValidaMoneda(contenidoDetalle.Moneda);
-            }
+            Config.EscribirLog($"INFO|TEF.procesaOperacion|Veamos que trae la fecha{valoresFormato[13]}-----{fechaEjecucion}");
 
             int fechaSistema = int.Parse(_configuracion.StrFechaSistema, CultureInfo.InvariantCulture);
-            int intFechaEjecucion = int.Parse(mtoFechaEjecucion, CultureInfo.InvariantCulture);
+            int intFechaEjecucion = int.Parse(fechaEjecucion, CultureInfo.InvariantCulture);
             if (intFechaEjecucion < fechaSistema)
             {
                 await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
-                throw new Exception($"Se desea realizar una operación al {mtoFechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+                throw new Exception(
+                    $"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
             }
 
             // Genero el folio único.
             folioUnico = await _vwT24.GeneraFolioUnico(
                 tipoOperacion,
-                ConexionT24Mw.CambiarFechaAJulianaT24(mtoFechaEjecucion),
+                ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
                 folio);
 
-            // Fecha futura.
-            fechaFutura = string.CompareOrdinal(mtoFechaEjecucion, _configuracion.StrFechaSistema) > 0;
+            // ¿Fecha futura?
+            fechaFutura = string.CompareOrdinal(fechaEjecucion, _configuracion.StrFechaSistema) > 0;
 
-            // Validación de maestro y detalle.
-            if (!string.Equals(mtoFolioForex, detFolioForex, StringComparison.Ordinal))
+            Config.EscribirLog("INFO|TEF.procesaOperacion|Validando si la operación está asignada a un Forex.");
+
+            if (!string.IsNullOrWhiteSpace(folioForex))
             {
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Forex: Maestro:'{mtoFolioForex}', Detalle:'{detFolioForex}'.");
-            }
-
-            if (!string.Equals(mtoFechaEjecucion, detFechaEjecucion, StringComparison.Ordinal))
-            {
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Fecha de ejecución: Maestro:'{mtoFechaEjecucion}', Detalle:'{detFechaEjecucion}'.");
-            }
-
-            if (!string.Equals(mtoMoneda, detMoneda, StringComparison.Ordinal))
-            {
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Moneda: Maestro:'{mtoMoneda}', Detalle:'{detMoneda}'.");
-            }
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Validando si la operación está asignada a un Forex.");
-
-            if (!string.Equals(mtoFolioForex, "", StringComparison.Ordinal))
-            {
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Asignado el folio forex: {mtoFolioForex} .");
-
+                Config.EscribirLog($"INFO|TEF.procesaOperacion|Asignado el folio forex: {folioForex} .");
                 conForex = true;
 
-                if (ConversionHelper.EsNumericoInvariant(mtoFolioForex))
-                    throw new Exception($"El Folio del Forex no es valido: {mtoFolioForex}");
+                if (decimal.TryParse(folioForex, out _))
+                    throw new Exception($"El Folio del Forex no es válido porque es numérico; se espera una referencia alfanumérica/external ref: {folioForex}");
 
-                PaPFXTForexEstatusTomiDto estatusForex = await _paPFXTTomiDao.ObtenerEstatusForexPorReferencia(mtoFolioForex);
-                if (estatusForex != null &&
-                    string.Equals(estatusForex.StatusOperacion, "CANCELADO", StringComparison.Ordinal))
-                {
-                    forexCancelado = true;
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|FOREX CANCELADO.");
-                }
-            }
-
-            // Lectura y actualización de los datos del maestro.
-            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
-            {
-                string subTipo = string.Empty;
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                procesado = false;
-
-                if (conForex)
-                    subTipo = $"FX:{mtoFolioForex}";
-
-                procesado = await _paPFXTTomiDao.ActualizarDatosGeneralesPlanTrabajo(
-                    new PaPFXTActualizarDatosGeneralesPlanTrabajoTomiDto
-                    {
-                        Folio = folioNumerico,
-                        FolioMaestro = mtoFolio,
-                        TipoOperacion = tipoOperacion,
-                        FolioUnico = folioUnico,
-                        FecValor = Convert.ToDecimal(mtoFechaEjecucion),
-                        CveMoneda = mtoMoneda,
-                        ImporteDetalle = detImporte,
-                        ImporteMaestro = mtoImporte,
-                        NumCliente = detalleCms.Cdl.HasValue ? Convert.ToInt32(detalleCms.Cdl.Value) : (int?)null,
-                        NombreCliente = contenidoDetalle.NombreCliente,
-                        NumCuenta = detalleCms.IdCuenta?.ToString(),
-                        NumPagos = mtoRegs,
-                        SubtipoOperacion = subTipo
-                    });
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro DATOS_GRAL con folio: {folio}");
-                }
-            }
-
-            // Lectura del CMS e inserción a TOMI.
-            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
-            {
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A insertar datos de CMS a TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                procesado = false;
-
-                resultado = await CMS_A_TOMI(
-                    folio,
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n ConstruirInsertarDetalleTomiDto.
-                    /// </summary>
-                    ConstruirInsertarDetalleTomiDto(folioUnico, detalleCms, contenidoDetalle));
-
-                if (resultado)
-                {
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
-                    procesado = true;
-                }
-                else
-                {
-                    // Posiblemente se restauró el servicio.
-                    PaPFXTExisteRegistroTomiDto existeDetalle = await _paPFXTTomiDao.ExisteFormatoPapDetallePorFolio(folioNumerico);
-                    if (existeDetalle != null && existeDetalle.NumRegs > 0)
-                    {
-                        procesado = true;
-                        Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                    }
-                }
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {folio}");
-                }
-            }
-
-            // Actualización del estatus del CMS y TOMI.
-            if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
-            {
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A actualizar estatus en CMS y TOMI. Buscando sumarizado de los detalles del folioMaestro={mtoFolio}");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                PaPFXTSumarizadoDetalleTomiDto sumarizadoDetalle = await _paPFXTTomiDao.ObtenerSumarizadoDetallePorIdFormatoPap(mtoFolio);
-                if (sumarizadoDetalle != null)
-                {
-                    tomiMtoRegs = sumarizadoDetalle.NumRegs;
-                    tomiMtoImporte = sumarizadoDetalle.ImpMonto ?? 0m;
-                }
-
-                procesado = false;
-
-                if (mtoRegs == tomiMtoRegs &&
-                    Math.Round(mtoImporte, 2) == Math.Round(tomiMtoImporte, 2))
-                {
-                    PaPFXTExisteRegistroTomiDto existeDetalleProcesado = await _paPFXTTomiDao.ExisteFormatoPapDetalleProcesadoPorFolio(folioNumerico);
-                    if (existeDetalleProcesado != null && existeDetalleProcesado.NumRegs > 0)
-                    {
-                        procesado = true;
-                        Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|El folio ya se había marcado como realizado.");
-                    }
-
-                    if (!procesado)
-                    {
-                        resultado = await CMS_A_TOMI_MAESTRO(
-                            mtoFolio.ToString(CultureInfo.InvariantCulture),
-                            /// <summary>
-                            /// Ejecuta la operaciÃ³n ConstruirInsertarMaestroTomiDto.
-                            /// </summary>
-                            ConstruirInsertarMaestroTomiDto(folioUnico, maestroCms, contenidoMaestro));
-
-                        if (resultado)
-                        {
-                            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio maestro {mtoFolio} en base de TOMI.");
-                            procesado = true;
-                        }
-                        else
-                        {
-                            PaPFXTExisteRegistroTomiDto existeMaestro = await _paPFXTTomiDao.ExisteFormatoPapMaestroPorFolio(mtoFolio);
-                            if (existeMaestro != null && existeMaestro.NumRegs > 0)
-                            {
-                                procesado = true;
-                                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|El folio maestro en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                            }
-                        }
-
-                        if (procesado)
-                        {
-                            if (conForex && forexCancelado)
-                            {
-                                await _paPFXTCmsDao.ActualizarEstatusFormatoPap(new PaPFXTActualizarEstatusCmsDto
-                                {
-                                    IdFormatoPap = mtoFolio,
-                                    Mensaje = "Formato rechazado",
-                                    Estatus = "RECC",
-                                    RazonRechazo = "El forex relacionado ha sido cancelado"
-                                });
-
-                                await _paPFXTTomiDao.ActualizarEstatusFormatoPapTomi(new PaPFXTActualizarEstatusTomiDto
-                                {
-                                    Folio = folioNumerico,
-                                    IdFormatoPap = mtoFolio,
-                                    NfEstatus = "RECC",
-                                    NfRazon = "El forex relacionado ha sido cancelado",
-                                    NfUsuarioConfirma = null,
-                                    NfFechaConfirma = null
-                                });
-
-                                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Forex Rechazado con Anterioridad: {mtoFolio}");
-
-                                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A cancelar la operación.");
-
-                                await _paPFXTTomiDao.CancelarPlanTrabajoPorForex(new PaPFXTCancelarPlanTrabajoPorForexTomiDto
-                                {
-                                    Folio = folioNumerico,
-                                    FolioMaestro = Convert.ToInt64(await _vwT24.ObtenerFolioMaestro(folio, tipoOperacion)),
-                                    TipoOperacion = tipoOperacion,
-                                    FecValor = Convert.ToDecimal(mtoFechaEjecucion),
-                                    CveMoneda = mtoMoneda,
-                                    ImporteDetalle = detImporte,
-                                    ImporteMaestro = mtoImporte,
-                                    ErrDescripcion = "El forex relacionado ha sido cancelado"
-                                });
-
-                                await _controlServicio.TerminaProceso(new ProcesoDTO
-                                {
-                                    Folio = folio,
-                                    TipoOperacion = tipoOperacion,
-                                    Servicio = _configuracion.NombreServicio,
-                                    NombreProceso = _configuracion.NombreProceso,
-                                    AliasProceso = _configuracion.AliasProceso,
-                                    PId = _configuracion.Pid.Value
-                                });
-
-                                return true;
-                            }
-
-                            if (string.Equals(mtoFechaEjecucion, _configuracion.StrFechaSistema, StringComparison.Ordinal))
-                            {
-                                DateTime fechaConfirma = DateTime.ParseExact(
-                                    DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                                    "yyyy/MM/dd HH:mm",
-                                    CultureInfo.InvariantCulture);
-
-                                await _paPFXTCmsDao.ActualizarEstatusFormatoPapSinRazon(new PaPFXTActualizarEstatusCmsDto
-                                {
-                                    IdFormatoPap = mtoFolio,
-                                    Mensaje = "Formato aceptado",
-                                    Estatus = "APFT"
-                                });
-
-                                await _paPFXTTomiDao.ActualizarEstatusFormatoPapTomi(new PaPFXTActualizarEstatusTomiDto
-                                {
-                                    Folio = folioNumerico,
-                                    IdFormatoPap = mtoFolio,
-                                    NfEstatus = "CONP",
-                                    NfRazon = null,
-                                    NfUsuarioConfirma = "OPER CMS",
-                                    NfFechaConfirma = fechaConfirma
-                                });
-
-                                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Operación fecha valor hoy.");
-                            }
-                            else if (string.CompareOrdinal(mtoFechaEjecucion, _configuracion.StrFechaSistema) < 0)
-                            {
-                                await _controlServicio.MarcarErrorFechaPasada(folioNumerico);
-                                throw new Exception($"Se desea realizar una operación al {mtoFechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-                            }
-                            else
-                            {
-                                DateTime fechaConfirma = DateTime.ParseExact(
-                                    DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                                    "yyyy/MM/dd HH:mm",
-                                    CultureInfo.InvariantCulture);
-
-                                await _paPFXTCmsDao.ActualizarEstatusFormatoPapSinRazon(new PaPFXTActualizarEstatusCmsDto
-                                {
-                                    IdFormatoPap = mtoFolio,
-                                    Mensaje = "Formato recibido pendiente ejecución",
-                                    Estatus = "REPE"
-                                });
-
-                                await _paPFXTTomiDao.ActualizarEstatusFormatoPapTomi(new PaPFXTActualizarEstatusTomiDto
-                                {
-                                    Folio = folioNumerico,
-                                    IdFormatoPap = mtoFolio,
-                                    NfEstatus = "CONF",
-                                    NfRazon = null,
-                                    NfUsuarioConfirma = "OPER CMS",
-                                    NfFechaConfirma = fechaConfirma
-                                });
-
-                                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Operación fecha valor fútura.");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    Config.EscribirLog($"AVISO|{tipoOperacion}.procesaOperacion|Faltan detalles a procesar para marcar el cambio de estatus en el folio Maestro:{mtoFolio}.");
-                    return true;
-                }
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CAMBIO_ESTATUS con folio: {folio}");
-                }
-            }
-
-            // Conciliación.
-            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
-            {
-                int regsCms;
-                int regsTomi;
-                string mensajeError = string.Empty;
-                decimal importeTomi = 0m;
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A conciliar operaciones entre CMS y TOMI (maestro y detalles).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                // Registros en CMS.
-                regsCms = 1;
-
-                // Registros en TOMI.
-                regsTomi = 0;
-                importeTomi = 0m;
-
-                PaPFXTConciliacionDetalleTomiDto detalleConciliacion = await _paPFXTTomiDao.ObtenerImporteDetalleConciliacionPorFolio(folioNumerico);
-                if (detalleConciliacion != null)
-                {
-                    regsTomi = 1;
-                    importeTomi = detalleConciliacion.T24DebitAmount ?? 0m;
-                }
-
-                tomiMtoRegs = 0;
-                tomiMtoImporte = 0m;
-
-                PaPFXTSumarizadoDetalleTomiDto sumarizadoProcesado = await _paPFXTTomiDao.ObtenerSumarizadoDetalleProcesadoPorIdFormatoPap(mtoFolio);
-                if (sumarizadoProcesado != null)
-                {
-                    tomiMtoRegs = sumarizadoProcesado.NumRegs;
-                    tomiMtoImporte = sumarizadoProcesado.ImpMonto ?? 0m;
-                }
-
-                if (regsCms == 1 && regsTomi == 1)
-                {
-                    if (detImporte != importeTomi)
-                    {
-                        mensajeError += Environment.NewLine +
-                                        $" - Diferencia en el importe. CMS='{detImporte}', TOMI='{importeTomi}'.";
-                    }
-
-                    if (mtoRegs != tomiMtoRegs)
-                    {
-                        mensajeError += Environment.NewLine +
-                                        $" - Diferencia en el total de registros. CMS='{mtoRegs}', TOMI='{tomiMtoRegs}'.";
-                    }
-
-                    if (Math.Round(mtoImporte, 2) != Math.Round(tomiMtoImporte, 2))
-                    {
-                        mensajeError += Environment.NewLine +
-                                        $" - Diferencia en la sumatoría del importe de registros. CMS='{mtoImporte}', TOMI='{tomiMtoImporte}'.";
-                    }
-
-                    procesado = true;
-                }
-                else
-                {
-                    procesado = false;
-                    mensajeError += Environment.NewLine + " - No se ha registrado la operación en TOMI.";
-                }
-
-                if (!string.Equals(mensajeError, "", StringComparison.Ordinal))
-                {
-                    procesado = false;
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception(mensajeError);
-                }
-
-                if (procesado)
-                {
-                    if (fechaFutura)
-                    {
-                        await _paPFXTTomiDao.MarcarPlanTrabajoFechaFutura(new PaPFXTMarcarFechaFuturaTomiDto
-                        {
-                            Folio = folioNumerico,
-                            FolioMaestro = mtoFolio,
-                            TipoOperacion = tipoOperacion
-                        });
-                    }
-
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación está correctamente conciliada.");
-
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = "";
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CONCILIAR con folio: {folio}");
-                }
-            }
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Cerrando conexión a base de datos del CMS.");
-
-            return true;
-        }
-
-        //=================================================================================================================
-        // Inserta registro en la base de datos de TOMI (los datos son del CMS) - DETALLES
-        //=================================================================================================================
-        private async Task<bool> CMS_A_TOMI(string folio, PaPFXTInsertarDetalleTomiDto datosDetalle)
-        {
-            try
-            {
-                bool resultado = await _paPFXTTomiDao.InsertarFormatoPapDetalle(datosDetalle);
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.CMS_A_TOMI|Salida={(resultado ? 0 : -1)}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|{tipoOperacion}.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
-            }
-
-            return false;
-        }
-
-        //=================================================================================================================
-        // Inserta registro en la base de datos de TOMI (los datos son del CMS) - MAESTRO
-        //=================================================================================================================
-        private async Task<bool> CMS_A_TOMI_MAESTRO(string folioMaestro, PaPFXTInsertarMaestroTomiDto datosMaestro)
-        {
-            try
-            {
-                bool resultado = await _paPFXTTomiDao.InsertarFormatoPapMaestro(datosMaestro);
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.CMS_A_TOMI_MAESTRO|Salida={(resultado ? 0 : -1)}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|{tipoOperacion}.CMS_A_TOMI_MAESTRO|Se presenta exception: {ex.Message}. Trace: {ex}");
-            }
-
-            return false;
-        }
-
-        private static PaPFXTContenidoFormatoDto ParsearContenidoFormatoPaPFXT(string contenidoFormato, string folio)
-        {
-            if (string.IsNullOrWhiteSpace(contenidoFormato))
-                throw new Exception($"El contenidoFormato del folio {folio} viene vacío.");
-
-            string[] valoresPipes = contenidoFormato.Split('|');
-
-            if (valoresPipes.Length < 19)
-            {
-                throw new Exception(
-                    $"El contenidoFormato del folio {folio} es diferente al esperado, debe ser 18 datos y se tienen {valoresPipes.Length - 1}.");
-            }
-
-            string[] valores = new string[19];
-
-            for (int i = 0; i <= 18; i++)
-            {
-                string valorPipe = valoresPipes[i] ?? string.Empty;
-                string[] llaveValor = valorPipe.Split('=');
-                valores[i] = llaveValor[1];
-            }
-
-            int fechaEjecucion;
-            int? fechaEjecucionNullable = null;
-
-            if (!string.IsNullOrWhiteSpace(valores[13]) &&
-                int.TryParse(valores[13], out fechaEjecucion))
-            {
-                fechaEjecucionNullable = fechaEjecucion;
-            }
-
-            decimal montoEnviar;
-            decimal? montoEnviarNullable = null;
-
-            if (!string.IsNullOrWhiteSpace(valores[18]) &&
-                decimal.TryParse(valores[18], out montoEnviar))
-            {
-                montoEnviarNullable = montoEnviar;
-            }
-
-            return new PaPFXTContenidoFormatoDto
-            {
-                Valor0 = valores[0],
-                NombreCliente = valores[1],
-                Valor2 = valores[2],
-                FolioForexRelacionado = valores[3],
-                Moneda = valores[4],
-                Valor5 = valores[5],
-                BancoBeneficiario = valores[6],
-                CuentaBeneficiario = valores[7],
-                TipoCuenta = valores[8],
-                Valor9 = valores[9],
-                NombreBeneficiario = valores[10],
-                RfcBeneficiario = valores[11],
-                TasaRetencion = valores[12],
-                FechaEjecucion = fechaEjecucionNullable,
-                Valor14 = valores[14],
-                ReferenciaDebito = valores[15],
-                Valor16 = valores[16],
-                Valor17 = valores[17],
-                MontoEnviar = montoEnviarNullable
-            };
-        }
-
-        private static PaPFXTInsertarDetalleTomiDto ConstruirInsertarDetalleTomiDto(
-    string folioUnico,
-    PaPFXTFormatoPapDetalleCmsDto detalleCms,
-    PaPFXTContenidoFormatoDto contenido)
-        {
-            return new PaPFXTInsertarDetalleTomiDto
-            {
-                NfFolioUnico = folioUnico,
-                NfTipo = "FXT",
-                NfFolio = Convert.ToInt32(detalleCms.IdFormato),
-                T24CustomerCode = detalleCms.Cdl.HasValue
-                    ? Convert.ToInt64(detalleCms.Cdl.Value).ToString()
-                    : null,
-                T24DebitAcctNo = detalleCms.IdCuenta?.ToString(),
-                NfEstatus = "PEND",
-                NfUsuarioCaptura = detalleCms.IdUsuarioCaptura,
-                NfUsuarioAutoriza = detalleCms.IdUsuarioAutorizo,
-                NfFechaCaptura = detalleCms.FechaCaptura,
-                NfFechaAutoriza = detalleCms.FechaAutorizacion,
-                T24DebitAmount = detalleCms.MontoOperacion,
-
-                // contenidoFormato posición 1
-                T24ShortName = contenido.NombreCliente,
-
-                // contenidoFormato posición 3
-                NfForexRelacionado = contenido.FolioForexRelacionado,
-
-                // contenidoFormato posición 4
-                T24DebitCurrency = contenido.Moneda,
-
-                // contenidoFormato posición 6
-                NfBancoBenef = contenido.BancoBeneficiario,
-
-                // contenidoFormato posición 7
-                T24BenAcctNo = contenido.CuentaBeneficiario,
-
-                // contenidoFormato posición 8
-                NfTipoCuenta = contenido.TipoCuenta,
-
-                // contenidoFormato posición 10
-                T24BenCustName = TextoSPEI(contenido.NombreBeneficiario),
-
-                // contenidoFormato posición 11
-                NfRfcBeneficiario = TextoSPEI(contenido.RfcBeneficiario),
-
-                // contenidoFormato posición 12
-                NfTasaRetencion = contenido.TasaRetencion,
-
-                // contenidoFormato posición 13
-                NfFechaEjecucion = contenido.FechaEjecucion?.ToString(CultureInfo.InvariantCulture),
-
-                // contenidoFormato posición 15
-                T24DebitTheirRef = TextoSPEI(contenido.ReferenciaDebito),
-
-                // contenidoFormato posición 18
-                NfMontoEnviar = contenido.MontoEnviar,
-
-                IdPlantilla = detalleCms.IdPlantilla,
-                IdFormatoPlantilla = detalleCms.IdFormatoPlantilla,
-                IdFilesBtmum = detalleCms.IdFilesBtmum,
-                NoPagos = Convert.ToInt32(detalleCms.NoPagos),
-                PagosDescripcion = detalleCms.PagosDescripcion,
-                NoPagosProcesados = Convert.ToInt32(detalleCms.NoPagosProcesados),
-                NoPagosDevueltos = Convert.ToInt32(detalleCms.NoPagosDevueltos),
-                IdFormatoPap = detalleCms.IdFormatoPap,
-                Ref1 = detalleCms.Ref1,
-                Ref2 = detalleCms.Ref2,
-                Ref3 = detalleCms.Ref3,
-                Ref4 = detalleCms.Ref4,
-                Ref5 = detalleCms.Ref5
-            };
-        }
-
-        private static PaPFXTInsertarMaestroTomiDto ConstruirInsertarMaestroTomiDto(
-    string folioUnico,
-    PaPFXTFormatoPapMaestroCmsDto maestroCms,
-    PaPFXTContenidoFormatoDto contenido)
-        {
-            decimal montoEnviar = 0m;
-
-            if (contenido.MontoEnviar.HasValue)
-                montoEnviar = contenido.MontoEnviar.Value;
-
-            return new PaPFXTInsertarMaestroTomiDto
-            {
-                NfFolioUnico = folioUnico,
-                NfTipo = "FXT",
-                NfFolio = Convert.ToInt32(maestroCms.IdFormato),
-                T24CustomerCode = maestroCms.Cdl.HasValue
-                    ? Convert.ToInt64(maestroCms.Cdl.Value).ToString()
-                    : null,
-                T24DebitAcctNo = maestroCms.IdCuenta?.ToString(),
-                NfEstatus = "PEND",
-                NfUsuarioCaptura = maestroCms.IdUsuarioCaptura,
-                NfUsuarioAutoriza = maestroCms.IdUsuarioAutorizo,
-                NfFechaCaptura = maestroCms.FechaCaptura,
-                NfFechaAutoriza = maestroCms.FechaAutorizacion,
-                T24DebitAmount = maestroCms.MontoOperacion,
-
-                // contenidoFormato posición 1
-                T24ShortName = contenido.NombreCliente,
-
-                // contenidoFormato posición 3
-                NfForexRelacionado = contenido.FolioForexRelacionado,
-
-                // contenidoFormato posición 4
-                T24DebitCurrency = contenido.Moneda,
-
-                // contenidoFormato posición 6
-                NfBancoBenef = contenido.BancoBeneficiario,
-
-                // contenidoFormato posición 7
-                T24BenAcctNo = contenido.CuentaBeneficiario,
-
-                // contenidoFormato posición 8
-                NfTipoCuenta = contenido.TipoCuenta,
-
-                // contenidoFormato posición 10
-                // En legacy maestro NO aplicaba texto_SPEI aquí.
-                T24BenCustName = contenido.NombreBeneficiario,
-
-                // contenidoFormato posición 11
-                // En legacy maestro NO aplicaba texto_SPEI aquí.
-                NfRfcBeneficiario = contenido.RfcBeneficiario,
-
-                // contenidoFormato posición 12
-                NfTasaRetencion = contenido.TasaRetencion,
-
-                // contenidoFormato posición 13
-                NfFechaEjecucion = contenido.FechaEjecucion?.ToString(CultureInfo.InvariantCulture),
-
-                // contenidoFormato posición 15
-                // En legacy maestro NO aplicaba texto_SPEI aquí.
-                T24DebitTheirRef = contenido.ReferenciaDebito,
-
-                // contenidoFormato posición 18, con fallback legacy a 0.
-                NfMontoEnviar = montoEnviar,
-
-                IdPlantilla = maestroCms.IdPlantilla,
-                IdFormatoPlantilla = maestroCms.IdFormatoPlantilla,
-                IdFilesBtmum = maestroCms.IdFilesBtmum,
-                NoPagos = Convert.ToInt32(maestroCms.NoPagos),
-                PagosDescripcion = maestroCms.PagosDescripcion,
-                NoPagosProcesados = Convert.ToInt32(maestroCms.NoPagosProcesados),
-                NoPagosDevueltos = Convert.ToInt32(maestroCms.NoPagosDevueltos)
-            };
-        }
-
-    }
-
-}
-
-using Aplicacion.DTOs.PaP_SPID;
-using Aplicacion.Interfaces.FirmaElectronica;
-using Aplicacion.Interfaces.PaP_SPID;
-using Aplicacion.Interfaces.SPID;
-using Aplicacion.Modelos;
-using Aplicacion.Servicios.FirmaElectronica;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using static MUFG_T24.Comunes.Comunes;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    /// <summary>
-    /// Representa Pa P SPID.
-    /// </summary>
-    public class PaP_SPID
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly IPaPSpidTomiDao _papSpidDao;
-        private readonly IPaPSpidCmsDao _papSpidCmsDao;
-        private readonly IPaPSpidInsightDao _papSpidInsightDao;
-        private readonly ConexionT24Mw _vwT24;
-        private readonly ComunSPID _comunSPID;
-        private readonly SPID _spid;
-
-        private const string tipoOperacion = "PaP_SPID";
-        private string folioUnico = string.Empty;
-        private string folioPropuesto = string.Empty;
-        /// <summary>
-        /// Inicializa una nueva instancia de la clase PaP_SPID.
-        /// </summary>
-
-        public PaP_SPID(ConfiguracionModelo configuracion, IControlServicio controlServicio, IPaPSpidTomiDao papSpidDao, IPaPSpidCmsDao papSpidCmsDao, IPaPSpidInsightDao papSpidInsightDao, ConexionT24Mw vwT24, ComunSPID comunSPID, SPID spid)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _papSpidDao = papSpidDao;
-            _papSpidCmsDao = papSpidCmsDao;
-            _papSpidInsightDao = papSpidInsightDao;
-            _vwT24 = vwT24;
-            _comunSPID = comunSPID;
-            _spid = spid;
-        }
-
-        /// <summary>
-        /// Procesa la operación PaP_SPID.
-        /// </summary>
-        public async Task<bool> ProcesaOperacion(string folio, CancellationToken ct = default(CancellationToken))
-        {
-            ct.ThrowIfCancellationRequested();
-
-            object[] valoresFormatoMto = new object[41];
-            object[] valoresFormato = new object[51];
-            string mtoFolio;
-            int mtoRegs = 0;
-            string mtoFechaEjecucion;
-            string mtoMoneda;
-            decimal mtoImporte;
-            string detFolioForex;
-            string detFechaEjecucion;
-            string detMoneda;
-            decimal detImporte;
-            bool conForex;
-            bool forexCancelado;
-            string mtoFolioForex;
-            bool conEntradaSalida;
-            bool procesado;
-            bool fechaFutura;
-            bool resultado;
-            int tomiMtoRegs = 0;
-            decimal tomiMtoImporte = 0m;
-
-            // Verificamos la última operación no realizada.
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-
-            if (string.Equals(_configuracion.AliasProceso, string.Empty, StringComparison.Ordinal))
-                return false;
-
-            // Confirmo que se encuentre el certificado y llave para la firma digital.
-            using (var firma = new MetodosFirma(_configuracion))
-            {
-                if (!firma.CertificadoEncontrado())
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de SPID: No se encontro el certificado y/o llave para realizar la firma de la transacción");
-            }
-
-            // Datos del folio en CMS y TOMI.
-            mtoFolio = string.Empty;
-            mtoFechaEjecucion = string.Empty;
-            mtoMoneda = string.Empty;
-            mtoImporte = 0m;
-            mtoFolioForex = string.Empty;
-            detFechaEjecucion = string.Empty;
-            detMoneda = string.Empty;
-            detImporte = 0m;
-            detFolioForex = string.Empty;
-            conForex = false;
-            forexCancelado = false;
-            conEntradaSalida = true;
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexión a base de datos del CMS.");
-
-            // Datos del maestro.
-            PaPSpidFormatoPapCmsDto datosMto = await _papSpidCmsDao.ObtenerMaestroPorFolioDetalle(folio);
-            if (datosMto != null)
-            {
-                valoresFormatoMto[19] = "SPD";
-                valoresFormatoMto[20] = datosMto.id_Formato;
-                valoresFormatoMto[21] = datosMto.cdl;
-                valoresFormatoMto[22] = datosMto.id_Cuenta;
-                valoresFormatoMto[23] = datosMto.FechaCaptura;
-                valoresFormatoMto[24] = datosMto.id_UsuarioCaptura;
-                valoresFormatoMto[25] = datosMto.FechaAutorizacion;
-                valoresFormatoMto[26] = datosMto.id_UsuarioAutorizo;
-                valoresFormatoMto[27] = datosMto.MontoOperacion;
-                valoresFormatoMto[28] = datosMto.id_Plantilla;
-                valoresFormatoMto[29] = datosMto.id_Formato_Plantilla;
-                valoresFormatoMto[30] = datosMto.id_files_btmum;
-                valoresFormatoMto[31] = datosMto.nopagos;
-                valoresFormatoMto[32] = datosMto.pagosdescripcion;
-                valoresFormatoMto[33] = datosMto.nopagosprocesados;
-                valoresFormatoMto[34] = datosMto.nopagosdevueltos;
-
-                string[] valoresPipesMto = (datosMto.ContenidoFormato ?? string.Empty)
-                    .Split(new[] { "|" }, StringSplitOptions.None);
-
-                if (valoresPipesMto.Length - 1 < 18)
-                    throw new Exception($"El contenidoFormato del folio {folio} es diferente al esperado, debe ser 18 datos y se tienen {valoresPipesMto.Length - 1}.");
-
-                for (int idx = 0; idx <= 18; idx++)
-                {
-                    string[] llaveValor = valoresPipesMto[idx].Split(new[] { "=" }, 2, StringSplitOptions.None);
-                    valoresFormatoMto[idx] = llaveValor[1];
-                }
-
-                mtoFolio = Convert.ToString(datosMto.id_Formato);
-                mtoRegs = ConversionHelper.ConvertLongToInt(datosMto.nopagos);
-                mtoImporte = datosMto.MontoOperacion;
-                mtoFolioForex = string.Empty;
-
-                if (valoresFormatoMto[13] != null)
-                    mtoFechaEjecucion = Convert.ToString(valoresFormatoMto[13]);
-
-                if (valoresFormatoMto[4] != null)
-                    mtoMoneda = _vwT24.ValidaMoneda(Convert.ToString(valoresFormatoMto[4]));
-            }
-
-            // Datos del detalle.
-            PaPSpidFormatoPapDetalleCmsDto datosDet = await _papSpidCmsDao.ObtenerDetallePorFolio(folio);
-            if (datosDet != null)
-            {
-                valoresFormato[19] = "SPD";
-                valoresFormato[20] = datosDet.id_Formato;
-                valoresFormato[21] = datosDet.cdl;
-                valoresFormato[22] = datosDet.id_Cuenta;
-                valoresFormato[23] = datosDet.FechaCaptura;
-                valoresFormato[24] = datosDet.id_UsuarioCaptura;
-                valoresFormato[25] = datosDet.FechaAutorizacion;
-                valoresFormato[26] = datosDet.id_UsuarioAutorizo;
-                valoresFormato[27] = datosDet.MontoOperacion;
-                valoresFormato[28] = datosDet.id_Plantilla;
-                valoresFormato[29] = datosDet.id_Formato_Plantilla;
-                valoresFormato[30] = datosDet.id_files_btmum;
-                valoresFormato[31] = datosDet.nopagos;
-                valoresFormato[32] = datosDet.pagosdescripcion;
-                valoresFormato[33] = datosDet.nopagosprocesados;
-                valoresFormato[34] = datosDet.nopagosdevueltos;
-                valoresFormato[35] = datosDet.id_formato_pap;
-                valoresFormato[36] = datosDet.ref1;
-                valoresFormato[37] = datosDet.ref2;
-                valoresFormato[38] = datosDet.ref3;
-                valoresFormato[39] = datosDet.ref4;
-                valoresFormato[40] = datosDet.ref5;
-                valoresFormato[41] = datosDet.ClasificacionOper;
-                valoresFormato[42] = datosDet.RelacionComercial;
-                valoresFormato[43] = datosDet.ReferenciaNumerica;
-                valoresFormato[44] = datosDet.IPOrigen;
-
-                string[] valoresPipes = (datosDet.ContenidoFormato ?? string.Empty)
-                    .Split(new[] { "|" }, StringSplitOptions.None);
-
-                if (valoresPipes.Length - 1 < 18)
-                    throw new Exception($"El contenidoFormato del folio {folio} es diferente al esperado, debe ser 18 datos y se tienen {valoresPipes.Length - 1}.");
-
-                for (int idx = 0; idx <= 18; idx++)
-                {
-                    string[] llaveValor = valoresPipes[idx].Split(new[] { "=" }, 2, StringSplitOptions.None);
-                    valoresFormato[idx] = llaveValor[1];
-                }
-
-                detImporte = datosDet.MontoOperacion;
-                detFolioForex = string.Empty;
-
-                if (valoresFormato[13] != null)
-                    detFechaEjecucion = Convert.ToString(valoresFormato[13]);
-
-                if (valoresFormato[4] != null)
-                    detMoneda = _vwT24.ValidaMoneda(Convert.ToString(valoresFormato[4]));
-            }
-
-            Config.EscribirLog($"INFO|PaP_SPID.procesaOperacion|Veamos que trae la fecha{valoresFormato[13]}-----{mtoFechaEjecucion}");
-
-            int fechaSistema = int.Parse(_configuracion.StrFechaSistema);
-            int intFechaEjecucion = int.Parse(mtoFechaEjecucion);
-            if (intFechaEjecucion < fechaSistema)
-            {
-                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
-                throw new Exception($"Se desea realizar una operación al {mtoFechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-            }
-
-            // Genero el folio único y folio propuesto de T24.
-            folioUnico = await _vwT24.GeneraFolioUnico(
-                tipoOperacion,
-                ConexionT24Mw.CambiarFechaAJulianaT24(mtoFechaEjecucion),
-                folio);
-
-            folioPropuesto = await _vwT24.GeneraFolioPresupuesto(
-                folioUnico,
-                int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(mtoFechaEjecucion)),
-                tipoOperacion);
-
-            if (string.IsNullOrWhiteSpace(folioPropuesto))
-                /// <summary>
-                /// Ejecuta la operaciÃ³n Exception.
-                /// </summary>
-                throw new Exception("Error al obtener el folio propuesto de T24");
-
-            // Fecha Futura?
-            fechaFutura = string.CompareOrdinal(mtoFechaEjecucion, _configuracion.StrFechaSistema) > 0;
-
-            // Validación de maestro y detalle.
-            if (!string.Equals(mtoFolioForex, detFolioForex, StringComparison.Ordinal))
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Forex: Maestro:'{mtoFolioForex}', Detalle:'{detFolioForex}'.");
-
-            if (!string.Equals(mtoFechaEjecucion, detFechaEjecucion, StringComparison.Ordinal))
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Fecha de ejecución: Maestro:'{mtoFechaEjecucion}', Detalle:'{detFechaEjecucion}'.");
-
-            if (!string.Equals(mtoMoneda, detMoneda, StringComparison.Ordinal))
-                throw new Exception($"Deferencia entre el maestro y el detalle de folio de Moneda: Maestro:'{mtoMoneda}', Detalle:'{detMoneda}'.");
-
-            // Fecha de ejecución y tiene un forex asignado?
-            Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|Validando si la operación está asignada a un Forex.");
-
-            if (!string.IsNullOrWhiteSpace(mtoFolioForex))
-            {
-                Config.EscribirLog($"INFO|PaP_SPID.procesaOperacion|Asignado el folio forex: {mtoFolioForex} .");
-                conForex = true;
-
-                if (decimal.TryParse(mtoFolioForex, out _))
-                    throw new Exception($"El Folio del Forex no es válido porque es numérico; se espera una referencia alfanumérica/external ref: {mtoFolioForex}");
-
-                PaPSpidForexStatusDto forexStatus = await _papSpidDao.ObtenerEstatusForex(mtoFolioForex);
+                TefForexStatusTomiDto forexStatus = await _tefDao.ObtenerStatusForexPorExternalRef(folioForex);
                 if (forexStatus != null &&
-                    string.Equals(forexStatus.STATUSOPERACION, "CANCELADO", StringComparison.OrdinalIgnoreCase))
+                    string.Equals(forexStatus.StatusOperacion, "CANCELADO", StringComparison.OrdinalIgnoreCase))
                 {
                     forexCancelado = true;
                     conEntradaSalida = false;
-                    Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|FOREX CANCELADO.");
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|FOREX CANCELADO.");
                 }
             }
 
@@ -2690,9 +90,9 @@ namespace Aplicacion.Servicios.Operaciones
             {
                 string subTipo = string.Empty;
 
-                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
+                Config.EscribirLog("INFO|TEF.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
                 /// <summary>
-                /// Ejecuta la operaciÃ³n IniciarProceso.
+                /// Ejecuta la operaciÃ³n IniciaProceso.
                 /// </summary>
 
                 await _controlServicio.IniciaProceso(new ProcesoDTO
@@ -2714,29 +114,26 @@ namespace Aplicacion.Servicios.Operaciones
                 });
 
                 if (conForex)
-                    subTipo = $"FX:{mtoFolioForex}";
+                    subTipo = $"FX:{folioForex}";
 
-                bool actualizado = await _papSpidDao.ActualizarDatosGeneralesPlanTrabajo(new PaPSpidActualizarPlanTrabajoDto
+                bool actualizado = await _tefDao.ActualizarDatosGeneralesPlanTrabajo(new TefActualizarDatosGeneralesPlanTrabajoDto
                 {
-                    Folio = ConversionHelper.ConvertirLongDirecto(folio, "Folio"),
-                    FolioMaestro = ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"),
+                    Folio = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
                     TipoOperacion = tipoOperacion,
                     FolioUnico = folioUnico,
-                    FechaValor = ConversionHelper.ConvertirIntDirecto(mtoFechaEjecucion, "MtoFechaEjecucion"),
-                    Moneda = mtoMoneda,
-                    ImporteDetalle = detImporte,
-                    ImporteMaestro = mtoImporte,
-                    NumCliente = ConversionHelper.ConvertirIntDirecto(valoresFormato[21], "Cdl"),
+                    FecValor = ConversionHelper.ConvertirDecimalRequerido(fechaEjecucion, "FechaEjecucion"),
+                    CveMoneda = moneda,
+                    Importe = importe,
+                    NumCliente = ConversionHelper.ConvertirNullableInt(valoresFormato[21], "Cdl"),
                     NombreCliente = Convert.ToString(valoresFormato[1]),
                     NumCuenta = Convert.ToString(valoresFormato[22]),
-                    NumeroPagos = mtoRegs,
                     SubtipoOperacion = subTipo
                 });
 
                 if (!actualizado)
                     throw new Exception($"Error actualizando tb_srv_plan_trabajo_maestro para el folio {folio}.");
                 /// <summary>
-                /// Ejecuta la operaciÃ³n TerminarProceso.
+                /// Ejecuta la operaciÃ³n TerminaProceso.
                 /// </summary>
 
                 await _controlServicio.TerminaProceso(new ProcesoDTO
@@ -2773,9 +170,9 @@ namespace Aplicacion.Servicios.Operaciones
             // Lectura del CMS e inserción a TOMI.
             if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
             {
-                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|A insertar datos de CMS a TOMI.");
+                Config.EscribirLog("INFO|TEF.procesaOperacion|A insertar datos de CMS a TOMI.");
                 /// <summary>
-                /// Ejecuta la operaciÃ³n IniciarProceso.
+                /// Ejecuta la operaciÃ³n IniciaProceso.
                 /// </summary>
 
                 await _controlServicio.IniciaProceso(new ProcesoDTO
@@ -2797,31 +194,28 @@ namespace Aplicacion.Servicios.Operaciones
                 });
 
                 procesado = false;
-                resultado = await CMS_A_TOMI(folio, valoresFormato, ct);
+                resultado = await CMS_A_TOMI(folio, valoresFormato);
 
                 if (resultado)
                 {
-                    Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
-
-                    if (!await _comunSPID.GeneraFirmaDigitalSPID("TB_TOMBIN_NF_SPID_PAP_DETALLE", folio, folioPropuesto))
-                        throw new Exception($"Se presentó un error al generar la firma digital del folio: {folio}");
-
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
                     procesado = true;
                 }
                 else
                 {
-                    int regs = await _papSpidDao.ContarDetallePorFolio(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
-                    if (regs > 0)
+                    // Posiblemente se restauró el servicio.
+                    bool existe = await _tefDao.ExisteFormatoTefPorFolio(folio);
+                    if (existe)
                     {
                         procesado = true;
-                        Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
+                        Config.EscribirLog("INFO|TEF.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
                     }
                 }
 
                 if (procesado)
                 {
                     /// <summary>
-                    /// Ejecuta la operaciÃ³n TerminarProceso.
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
                     /// </summary>
                     await _controlServicio.TerminaProceso(new ProcesoDTO
                     {
@@ -2854,9 +248,9 @@ namespace Aplicacion.Servicios.Operaciones
             // Registro de la Entrada/Salida.
             if (string.Equals(_configuracion.AliasProceso, "TOMI_ENTRADAS/SALIDAS", StringComparison.Ordinal))
             {
-                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|A insertar datos de Entrada/Salida en TOMI (registro detalle).");
+                Config.EscribirLog("INFO|TEF.procesaOperacion|A insertar datos de Entrada/Salida en TOMI.");
                 /// <summary>
-                /// Ejecuta la operaciÃ³n IniciarProceso.
+                /// Ejecuta la operaciÃ³n IniciaProceso.
                 /// </summary>
 
                 await _controlServicio.IniciaProceso(new ProcesoDTO
@@ -2880,64 +274,69 @@ namespace Aplicacion.Servicios.Operaciones
                 if (conEntradaSalida)
                 {
                     procesado = false;
+                    resultado = await TOMI_ENTRADA_SALIDA(folio);
 
-                    int regsEntSal = await _papSpidDao.ContarEntradasSalidasPorReferencia(folioUnico);
-                    if (regsEntSal > 0)
+                    if (resultado)
                     {
                         procesado = true;
-                        Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
-                    }
-
-                    if (!procesado)
-                    {
-                        resultado = await TOMI_ENTRADA_SALIDA(folio);
-                        if (resultado)
-                        {
-                            procesado = true;
-                            Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|Se insertó correctamente el folio detalle en base de Entrada/Salida.");
-                        }
-                    }
-
-                    if (procesado)
-                    {
-                        /// <summary>
-                        /// Ejecuta la operaciÃ³n TerminarProceso.
-                        /// </summary>
-                        await _controlServicio.TerminaProceso(new ProcesoDTO
-                        {
-                            Folio = folio,
-                            TipoOperacion = tipoOperacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            PId = _configuracion.Pid.Value
-                        });
-                        /// <summary>
-                        /// Ejecuta la operaciÃ³n RefrescarAliasProceso.
-                        /// </summary>
-                        _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                        {
-                            Folio = folio,
-                            TipoOperacion = tipoOperacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            PId = _configuracion.Pid.Value
-                        });
+                        Config.EscribirLog("INFO|TEF.procesaOperacion|Se insertó correctamente el folio en base de Entrada/Salida.");
                     }
                     else
                     {
-                        throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
+                        // Posiblemente se restauró el servicio.
+                        bool existe = await _tefDao.ExisteEntradaSalidaPorReferencia(folioUnico);
+                        if (existe)
+                        {
+                            procesado = true;
+                            Config.EscribirLog("INFO|TEF.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
+                        }
                     }
+                }
+                else
+                {
+                    procesado = true;
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|La operación no debe generar Entrada/Salida en TOMI).");
+                }
+
+                if (procesado)
+                {
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n RefrescarAliasProceso.
+                    /// </summary>
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
                 }
             }
 
             // Actualización del estatus del CMS y TOMI.
             if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
             {
-                Config.EscribirLog($"INFO|PaP_SPID.procesaOperacion|A actualizar estatus en CMS y TOMI. Buscando sumarizado de los detalles del folioMaestro={mtoFolio}");
+                Config.EscribirLog("INFO|TEF.procesaOperacion|A actualizar estatus en CMS y TOMI.");
                 /// <summary>
-                /// Ejecuta la operaciÃ³n IniciarProceso.
+                /// Ejecuta la operaciÃ³n IniciaProceso.
                 /// </summary>
 
                 await _controlServicio.IniciaProceso(new ProcesoDTO
@@ -2958,132 +357,139 @@ namespace Aplicacion.Servicios.Operaciones
 
                 });
 
-                PaPSpidSumarizadoDetalleDto sumarizado = await _papSpidDao.ObtenerSumarizadoDetalle(ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"));
-                if (sumarizado != null)
+                procesado = true;
+
+                if (conForex && forexCancelado)
                 {
-                    tomiMtoRegs = sumarizado.num_regs;
-                    tomiMtoImporte = sumarizado.imp_monto ?? 0m;
+                    // Rechazado por cancelación del Forex.
+                    await _tefCmsDao.ActualizarEstatusFormato(new TefActualizarEstatusCmsDto
+                    {
+                        IdFormato = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
+                        Mensaje = "Formato rechazado",
+                        Estatus = "RECC",
+                        RazonRechazo = "El forex relacionado ha sido cancelado"
+                    });
+
+                    await _tefDao.ActualizarEstatusTef(new TefActualizarEstatusTomiDto
+                    {
+                        NfFolio = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
+                        NfEstatus = "RECC",
+                        NfRazon = "El forex relacionado ha sido cancelado",
+                        NfUsuarioConfirma = null,
+                        NfFechaConfirma = null
+                    });
+
+                    Config.EscribirLog($"INFO|TEF.procesaOperacion|Forex Rechazado con Anterioridad: {folio}");
+
+                    // En caso de rechazo termino la operación.
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|A cancelar la operación.");
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+
+                    {
+
+                        Folio = folio,
+
+                        TipoOperacion = tipoOperacion,
+
+                        Servicio = _configuracion.NombreServicio,
+
+                        NombreProceso = _configuracion.NombreProceso,
+
+                        AliasProceso = _configuracion.AliasProceso,
+
+                        PId = _configuracion.Pid.Value
+
+                    });
+
+                    await _tefDao.CancelarPlanTrabajoPorForex(new TefCancelarPlanTrabajoPorForexDto
+                    {
+                        Folio = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
+                        TipoOperacion = tipoOperacion,
+                        FecValor = ConversionHelper.ConvertirDecimalRequerido(fechaEjecucion, "FechaEjecucion"),
+                        CveMoneda = moneda,
+                        Importe = importe,
+                        ErrDescripcion = "El forex relacionado ha sido cancelado"
+                    });
+
+                    return true;
                 }
 
-                procesado = false;
-
-                if (mtoRegs == tomiMtoRegs && Math.Round(mtoImporte, 2) == Math.Round(tomiMtoImporte, 2))
+                // Aceptado.
+                if (string.Equals(fechaEjecucion, _configuracion.StrFechaSistema, StringComparison.Ordinal))
                 {
-                    Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|El sumarizado de detalles está completo.");
+                    DateTime fechaConfirmacion = DateTime.Now;
 
-                    int detalleNoPendiente = await _papSpidDao.ContarDetalleNoPendientePorFolio(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
-                    if (detalleNoPendiente > 0)
+                    await _tefCmsDao.ActualizarEstatusFormato(new TefActualizarEstatusCmsDto
                     {
-                        procesado = true;
-                        Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|El folio ya se había marcado como realizado.");
-                    }
+                        IdFormato = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
+                        Mensaje = "Formato aceptado",
+                        Estatus = "APFT",
+                        RazonRechazo = null
+                    });
 
-                    if (!procesado)
+                    await _tefDao.ActualizarEstatusTef(new TefActualizarEstatusTomiDto
                     {
-                        Config.EscribirLog($"INFO|PaP_SPID.procesaOperacion|A tratar de insertar el maestro con folio {mtoFolio}.");
+                        NfFolio = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
+                        NfEstatus = "SCNP",
+                        NfRazon = null,
+                        NfUsuarioConfirma = "OPER CMS",
+                        NfFechaConfirma = new DateTime(
+                            fechaConfirmacion.Year,
+                            fechaConfirmacion.Month,
+                            fechaConfirmacion.Day,
+                            fechaConfirmacion.Hour,
+                            fechaConfirmacion.Minute,
+                            0,
+                            fechaConfirmacion.Kind)
+                    });
 
-                        resultado = await CMS_A_TOMI_MAESTRO(mtoFolio, valoresFormatoMto);
-
-                        if (resultado)
-                        {
-                            Config.EscribirLog($"INFO|PaP_SPID.procesaOperacion|Se insertó correctamente el folio maestro {mtoFolio} en base de TOMI.");
-                            procesado = true;
-                        }
-                        else
-                        {
-                            int regsMaestro = await _papSpidDao.ContarMaestroPorFolio(ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"));
-                            if (regsMaestro > 0)
-                            {
-                                procesado = true;
-                                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|El folio maestro en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                            }
-                        }
-
-                        if (procesado)
-                        {
-                            if (conForex && forexCancelado)
-                            {
-                                await _papSpidCmsDao.ActualizarEstatusRechazadoForex(ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"));
-                                await _papSpidDao.ActualizarEstatusTomiRechazadoForex(ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"));
-
-                                Config.EscribirLog($"INFO|PaP_SPID.procesaOperacion|Forex Rechazado con Anterioridad: {mtoFolio}");
-                                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|A cancelar la operación.");
-
-                                await _papSpidDao.CancelarPlanTrabajoPorForex(
-                                    ConversionHelper.ConvertirLongDirecto(folio, "Folio"),
-                                    ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"),
-                                    tipoOperacion,
-                                    ConversionHelper.ConvertirIntDirecto(mtoFechaEjecucion, "MtoFechaEjecucion"),
-                                    mtoMoneda,
-                                    detImporte,
-                                    mtoImporte);
-                                /// <summary>
-                                /// Ejecuta la operaciÃ³n TerminarProceso.
-                                /// </summary>
-
-                                await _controlServicio.TerminaProceso(new ProcesoDTO
-
-                                {
-
-                                    Folio = folio,
-
-                                    TipoOperacion = tipoOperacion,
-
-                                    Servicio = _configuracion.NombreServicio,
-
-                                    NombreProceso = _configuracion.NombreProceso,
-
-                                    AliasProceso = _configuracion.AliasProceso,
-
-                                    PId = _configuracion.Pid.Value
-
-                                });
-                                return true;
-                            }
-
-                            if (string.Equals(mtoFechaEjecucion, _configuracion.StrFechaSistema, StringComparison.Ordinal))
-                            {
-                                await _papSpidCmsDao.ActualizarEstatusAceptado(ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"));
-                                await _papSpidDao.ActualizarEstatusAceptadoHoy(
-                                    ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"),
-                                    DateTime.ParseExact(
-                                        DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                                        "yyyy/MM/dd HH:mm",
-                                        CultureInfo.InvariantCulture));
-
-                                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|Operación fecha valor hoy.");
-                            }
-                            else if (string.CompareOrdinal(mtoFechaEjecucion, _configuracion.StrFechaSistema) < 0)
-                            {
-                                await _controlServicio.MarcarErrorFechaPasada(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
-                                throw new Exception($"Se desea realizar una operación al {mtoFechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-                            }
-                            else
-                            {
-                                await _papSpidCmsDao.ActualizarEstatusPendienteEjecucion(ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"));
-                                await _papSpidDao.ActualizarEstatusFechaFutura(
-                                    ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"),
-                                    DateTime.ParseExact(
-                                        DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                                        "yyyy/MM/dd HH:mm",
-                                        CultureInfo.InvariantCulture));
-
-                                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|Operación fecha valor fútura.");
-                            }
-                        }
-                    }
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|Operación fecha valor hoy.");
+                }
+                else if (string.CompareOrdinal(fechaEjecucion, _configuracion.StrFechaSistema) < 0)
+                {
+                    await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
+                    throw new Exception($"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
                 }
                 else
                 {
-                    Config.EscribirLog($"AVISO|PaP_SPID.procesaOperacion|Faltan detalles a procesar para marcar el cambio de estatus en el folio Maestro:{mtoFolio}.");
-                    procesado = false;
-                    return true;
+                    DateTime fechaConfirmacion = DateTime.Now;
+
+                    // Fecha futura.
+                    await _tefCmsDao.ActualizarEstatusFormato(new TefActualizarEstatusCmsDto
+                    {
+                        IdFormato = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
+                        Mensaje = "Formato recibido pendiente ejecución",
+                        Estatus = "REPE",
+                        RazonRechazo = null
+                    });
+
+                    await _tefDao.ActualizarEstatusTef(new TefActualizarEstatusTomiDto
+                    {
+                        NfFolio = ConversionHelper.ConvertirLongRequerido(folio, "Folio"),
+                        NfEstatus = "SCNF",
+                        NfRazon = null,
+                        NfUsuarioConfirma = "OPER CMS",
+                        NfFechaConfirma = new DateTime(
+                            fechaConfirmacion.Year,
+                            fechaConfirmacion.Month,
+                            fechaConfirmacion.Day,
+                            fechaConfirmacion.Hour,
+                            fechaConfirmacion.Minute,
+                            0,
+                            fechaConfirmacion.Kind)
+                    });
+
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|Operación fecha valor fútura.");
                 }
 
                 if (procesado)
                 {
                     /// <summary>
-                    /// Ejecuta la operaciÃ³n TerminarProceso.
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
                     /// </summary>
                     await _controlServicio.TerminaProceso(new ProcesoDTO
                     {
@@ -3120,14 +526,17 @@ namespace Aplicacion.Servicios.Operaciones
                 int regsTomi;
                 int regsEntSal = 0;
                 string mensajeError;
+                string folioForexTomi;
+                string fechaEjecucionTomi;
+                string monedaTomi;
                 decimal importeTomi;
                 string fechaEjecucionEntSal;
                 string monedaEntSal;
                 decimal importeEntSal;
 
-                Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|A conciliar operaciones entre CMS y TOMI (maestro y detalles).");
+                Config.EscribirLog("INFO|TEF.procesaOperacion|A conciliar operaciones entre CMS y TOMI.");
                 /// <summary>
-                /// Ejecuta la operaciÃ³n IniciarProceso.
+                /// Ejecuta la operaciÃ³n IniciaProceso.
                 /// </summary>
 
                 await _controlServicio.IniciaProceso(new ProcesoDTO
@@ -3148,64 +557,75 @@ namespace Aplicacion.Servicios.Operaciones
 
                 });
 
+                // Registros en CMS.
                 regsCms = 1;
+
+                // Registros en TOMI.
                 regsTomi = 0;
+                folioForexTomi = string.Empty;
+                fechaEjecucionTomi = string.Empty;
+                monedaTomi = string.Empty;
                 importeTomi = 0m;
 
-                PaPSpidDetalleConciliacionDto datosTomi = await _papSpidDao.ObtenerDetalleConciliacion(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
+                TefConciliacionTomiDto datosTomi = await _tefDao.ObtenerConciliacionTefPorFolio(
+                    folio,
+                    conForex && forexCancelado);
+
                 if (datosTomi != null)
                 {
                     regsTomi = 1;
-                    importeTomi = datosTomi.T24_DEBIT_AMOUNT ?? 0m;
+                    folioForexTomi = datosTomi.NfForexRelacionado ?? string.Empty;
+                    fechaEjecucionTomi = datosTomi.NfFechaEjecucion?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
+                    monedaTomi = _vwT24.ValidaMoneda(datosTomi.T24DebitCurrency);
+                    importeTomi = datosTomi.T24DebitAmount ?? 0m;
                 }
 
-                PaPSpidSumarizadoDetalleDto sumarizadoNoPendiente = await _papSpidDao.ObtenerSumarizadoDetalleNoPendiente(ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"));
-                if (sumarizadoNoPendiente != null)
-                {
-                    tomiMtoRegs = sumarizadoNoPendiente.num_regs;
-                    tomiMtoImporte = sumarizadoNoPendiente.imp_monto ?? 0m;
-                }
-
+                // Entrada/Salida.
                 fechaEjecucionEntSal = string.Empty;
                 monedaEntSal = string.Empty;
                 importeEntSal = 0m;
 
                 if (conEntradaSalida)
                 {
-                    PaPSpidEntradaSalidaConciliacionDto entradaSalida = await _papSpidDao.ObtenerEntradaSalidaConciliacion(folioUnico);
+                    TefConciliacionEntradaSalidaTomiDto entradaSalida =
+                        await _tefDao.ObtenerConciliacionEntradaSalidaPorReferencia(folioUnico);
 
                     if (entradaSalida != null)
                     {
                         regsEntSal = 1;
-                        fechaEjecucionEntSal = entradaSalida.ent_fechaValor?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? string.Empty;
-                        monedaEntSal = _vwT24.ValidaMoneda(entradaSalida.ent_moneda_cuenta);
-                        importeEntSal = entradaSalida.ent_importe ?? 0m;
+                        fechaEjecucionEntSal = entradaSalida.EntFechaValor?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? string.Empty;
+                        monedaEntSal = _vwT24.ValidaMoneda(entradaSalida.EntMonedaCuenta);
+                        importeEntSal = entradaSalida.EntImporte ?? 0m;
                     }
                 }
 
+                // Validación.
                 mensajeError = string.Empty;
 
                 if (regsCms == 1 && regsTomi == 1 && ((conEntradaSalida && regsEntSal == 1) || !conEntradaSalida))
                 {
-                    if (detImporte != importeTomi)
-                        mensajeError += Environment.NewLine + $" - Diferencia en el importe. CMS='{detImporte}', TOMI='{importeTomi}'.";
+                    if (!string.Equals(folioForex, folioForexTomi, StringComparison.Ordinal))
+                        mensajeError += Environment.NewLine + $" - Diferencia en la autorización de FOREX. CMS='{folioForex}', TOMI='{folioForexTomi}'.";
 
-                    if (mtoRegs != tomiMtoRegs)
-                        mensajeError += Environment.NewLine + $" - Diferencia en el total de registros. CMS='{mtoRegs}', TOMI='{tomiMtoRegs}'.";
+                    if (!string.Equals(fechaEjecucion, fechaEjecucionTomi, StringComparison.Ordinal))
+                        mensajeError += Environment.NewLine + $" - Diferencia en la fecha de ejecución. CMS='{fechaEjecucion}', TOMI='{fechaEjecucionTomi}'.";
 
-                    if (Math.Round(mtoImporte, 2) != Math.Round(tomiMtoImporte, 2))
-                        mensajeError += Environment.NewLine + $" - Diferencia en la sumatoría del importe de registros. CMS='{mtoImporte}', TOMI='{tomiMtoImporte}'.";
+                    if (!string.Equals(moneda, monedaTomi, StringComparison.Ordinal))
+                        mensajeError += Environment.NewLine + $" - Diferencia en la monedas. CMS='{moneda}', TOMI='{monedaTomi}'.";
+
+                    if (importe != importeTomi)
+                        mensajeError += Environment.NewLine + $" - Diferencia en el importe. CMS='{importe}', TOMI='{importeTomi}'.";
 
                     if (conEntradaSalida)
                     {
-                        if (!string.Equals(mtoFechaEjecucion, fechaEjecucionEntSal, StringComparison.Ordinal))
-                            mensajeError += Environment.NewLine + $" - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='{mtoFechaEjecucion}', TOMI='{fechaEjecucionEntSal}'.";
+                        if (!string.Equals(fechaEjecucion, fechaEjecucionEntSal, StringComparison.Ordinal))
+                            mensajeError += Environment.NewLine + $" - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='{fechaEjecucion}', TOMI='{fechaEjecucionEntSal}'.";
 
-                        if (!string.Equals(mtoMoneda, monedaEntSal, StringComparison.Ordinal))
-                            mensajeError += Environment.NewLine + $" - Diferencia en la monedas de Entrada/Salida. CMS='{mtoMoneda}', TOMI='{monedaEntSal}'.";
+                        if (!string.Equals(moneda, monedaEntSal, StringComparison.Ordinal))
+                            mensajeError += Environment.NewLine + $" - Diferencia en la monedas de Entrada/Salida. CMS='{moneda}', TOMI='{monedaEntSal}'.";
 
-                        if (detImporte != importeEntSal)
-                            mensajeError += Environment.NewLine + $" - Diferencia en el importe de Entrada/Salida. CMS='{detImporte}', Entrada/Salida='{importeEntSal}'.";
+                        if (importe != importeEntSal)
+                            mensajeError += Environment.NewLine + $" - Diferencia en el importe de Entrada/Salida. CMS='{importe}', Entrada/Salida='{importeEntSal}'.";
                     }
 
                     procesado = true;
@@ -3227,15 +647,9 @@ namespace Aplicacion.Servicios.Operaciones
 
                 if (procesado)
                 {
-                    if (fechaFutura)
-                        await _papSpidDao.ActualizarPlanTrabajoFechaFutura(
-                            ConversionHelper.ConvertirLongDirecto(folio, "Folio"),
-                            ConversionHelper.ConvertirLongDirecto(mtoFolio, "MtoFolio"),
-                            tipoOperacion);
-
-                    Config.EscribirLog("INFO|PaP_SPID.procesaOperacion|La operación está correctamente conciliada.");
+                    Config.EscribirLog("INFO|TEF.procesaOperacion|La operación está correctamente conciliada.");
                     /// <summary>
-                    /// Ejecuta la operaciÃ³n TerminarProceso.
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
                     /// </summary>
 
                     await _controlServicio.TerminaProceso(new ProcesoDTO
@@ -3255,6 +669,7 @@ namespace Aplicacion.Servicios.Operaciones
                         PId = _configuracion.Pid.Value
 
                     });
+
                     _configuracion.AliasProceso = string.Empty;
                 }
                 else
@@ -3267,2621 +682,182 @@ namespace Aplicacion.Servicios.Operaciones
             return true;
         }
 
-        // usp_TOMBIN_INSERT_FORMATO_SPID_PAP_DETALLE
-        private async Task<bool> CMS_A_TOMI(string folio, object[] valoresFormato, CancellationToken ct)
-        {
-            try
-            {
-                DateTime fecha = DateTime.Now.Date;
-                bool fechaValida = false;
-                int diasRetroceso = 0;
-                const int maxDiasRetroceso = 366;
-
-                while (fechaValida == false)
-                {
-                    ct.ThrowIfCancellationRequested();
-
-                    if (diasRetroceso >= maxDiasRetroceso)
-                        throw new Exception($"No se encontró un día hábil dentro de los últimos {maxDiasRetroceso} días para el folio {folio}.");
-
-                    fecha = fecha.AddDays(-1);
-                    diasRetroceso++;
-
-                    fechaValida = await _spid.ValidarDiaHabilSiguiente(fecha, Convert.ToInt64(folio));
-
-                    if (fechaValida || fecha.DayOfWeek == DayOfWeek.Sunday || fecha.DayOfWeek == DayOfWeek.Saturday)
-                        fechaValida = false;
-                    else
-                        fechaValida = true;
-                }
-
-                Config.EscribirLog($"INFO|PaP_SPID.CMS_A_TOMI|Buscando dirección en VistasT24 del folio {folio}");
-                Config.EscribirLog($"INFO|{tipoOperacion}.CMS_A_TOMI|Aperturando conexión a base de datos de VistasT24.");
-
-                PaPSpidInsightCustomerEdoCtaDto datosInsight = await _papSpidInsightDao.ObtenerCustomerEdoCta(Convert.ToString(valoresFormato[21]));
-                if (datosInsight != null &&
-                    !string.IsNullOrWhiteSpace(DameTexto(datosInsight.P1_CODIGO_POSTAL)))
-                {
-                    Config.EscribirLog($"INFO|PaP_SPID.CMS_A_TOMI|Se encontró la dirección en VistasT24 del folio {folio}");
-                    valoresFormato[45] = DameTexto(datosInsight.P1_CALLE) + " " + DameTexto(datosInsight.P1_EXTERIOR) + " " + DameTexto(datosInsight.P1_INTERIOR);
-                    valoresFormato[46] = DameTexto(datosInsight.P1_CODIGO_POSTAL);
-                }
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.CMS_A_TOMI|Cerrando conexión a base de datos de VistasT24.");
-
-                if (string.Equals(Convert.ToString(valoresFormato[45]), string.Empty, StringComparison.Ordinal) ||
-                    string.Equals(Convert.ToString(valoresFormato[46]), string.Empty, StringComparison.Ordinal))
-                {
-                    Config.EscribirLog("INFO|PaP_SPID.CMS_A_TOMI|Sin datos en la dirección");
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error al obtener de insight los datos del domicilio del cliente");
-                }
-
-                bool resultado = await _papSpidDao.InsertarFormatoDetalle(CrearFormatoDto(valoresFormato, true));
-                Config.EscribirLog($"INFO|PaP_SPID.CMS_A_TOMI|Salida={(resultado ? 0 : 1)}.");
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|PaP_SPID.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
-            }
-
-            return false;
-        }
-
-        private async Task<bool> CMS_A_TOMI_MAESTRO(string folioMaestro, object[] valoresFormatoMto)
-        {
-            try
-            {
-                bool resultado = await _papSpidDao.InsertarFormatoMaestro(CrearFormatoDto(valoresFormatoMto, false));
-                Config.EscribirLog($"INFO|PaP_SPID.CMS_A_TOMI_MAESTRO|Salida={(resultado ? 0 : 1)}.");
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|PaP_SPID.CMS_A_TOMI_MAESTRO|Se presenta exception: {ex.Message}. Trace: {ex}");
-            }
-
-            return false;
-        }
-
-        private async Task<bool> TOMI_ENTRADA_SALIDA(string folio)
-        {
-            try
-            {
-                PaPSpidInsertarEntradaSalidaDto dto = null;
-                Config.EscribirLog($"INFO|PaP_SPID.TOMI_ENTRADA_SALIDA|Buscando datos del folio {folio}");
-
-                List<PaPSpidTombinDetalleDto> registros = await _papSpidDao.ObtenerDetallesParaEntradaSalida(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
-
-                foreach (PaPSpidTombinDetalleDto datos in registros)
-                {
-                    dto = new PaPSpidInsertarEntradaSalidaDto
-                    {
-                        Referencia = datos.NF_FOLIO_UNICO,
-                        Num_Cliente = ConversionHelper.ConvertirDecimalDirecto(datos.T24_CUSTOMER_CODE, "T24_CUSTOMER_CODE"),
-                        CDL = ConversionHelper.ConvertirDecimalDirecto(datos.T24_CUSTOMER_CODE, "T24_CUSTOMER_CODE"),
-                        Ordenante = datos.T24_COMPANY_NAME,
-                        Operacion = 218m,
-                        OperacionDesc = "Salida  (TTS)",
-                        Tipo = "D",
-                        TipoDesc = "Doméstica",
-                        Via = 800m,
-                        ViaDesc = "TRF ENVIADA USD SPID",
-                        Importe = datos.T24_DEBIT_AMOUNT ?? 0m,
-                        Saldo = 0m,
-                        Comentarios = datos.T24_DEBIT_THEIR_REF,
-                        Fecha_Captura = ConversionHelper.ParseFechaYyyyMMddExacta(_configuracion.StrFechaSistema),
-                        FechaValor = ConversionHelper.ParseFechaYyyyMMddExacta(Convert.ToString(datos.NF_FECHA_EJECUCION)),
-                        Hora = DateTime.Now.ToLongTimeString(),
-                        Capturista = "JEAI",
-                        Fad = 0m,
-                        Referencia_Control = "A",
-                        Referencia_Control_Cont = 0
-                    };
-
-                    if (string.Equals(datos.NF_FOREX_RELACIONADO, string.Empty, StringComparison.Ordinal))
-                    {
-                        dto.Cuenta = ConversionHelper.ConvertirDecimalDirecto(datos.T24_DEBIT_ACCT_NO, "T24_DEBIT_ACCT_NO");
-                        dto.Nombre = datos.NF_NOMBRE_CUENTA;
-                        dto.CuentaMoneda = _vwT24.ValidaMoneda(datos.NF_MONEDA_CUENTA);
-                    }
-                    else
-                    {
-                        List<OperacionesEntidad> T24_FAD_Account = await _vwT24.ObtieneDatosCuentasFad();
-                        dto.Cuenta = Convert.ToDecimal(T24_FAD_Account.Where(x => x.Moneda == _vwT24.MonedaDefaultMN).FirstOrDefault().Cuenta);
-                        dto.Nombre = "BTMM USD FAD";
-                        dto.CuentaMoneda = "USD";
-                    }
-                }
-
-                if (dto == null)
-                    return false;
-
-                bool resultado = await _papSpidDao.InsertarEntradaSalida(dto);
-                Config.EscribirLog($"INFO|PaP_SPID.TOMI_ENTRADA_SALIDA|Salida={(resultado ? 0 : 1)}.");
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|PaP_SPID.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}.Trace:{ex}");
-            }
-
-            return false;
-        }
-
-        private PaPSpidInsertarFormatoDto CrearFormatoDto(object[] valoresFormato, bool detalle)
-        {
-            return new PaPSpidInsertarFormatoDto
-            {
-                NF_FOLIO_UNICO = folioUnico,
-                NF_TIPO = Convert.ToString(valoresFormato[19]),
-                NF_FOLIO = ConversionHelper.ConvertirLongDirecto(valoresFormato[20], "NF_FOLIO"),
-                T24_CUSTOMER_CODE = Convert.ToString(valoresFormato[21]),
-                T24_DEBIT_ACCT_NO = Convert.ToString(valoresFormato[22]),
-                NF_ESTATUS = "PEND",
-                NF_USUARIO_CAPTURA = Convert.ToString(valoresFormato[24]),
-                NF_USUARIO_AUTORIZA = Convert.ToString(valoresFormato[26]),
-                NF_FECHA_CAPTURA = ConversionHelper.ConvertirDateTimeDirecto(valoresFormato[23], "NF_FECHA_CAPTURA"),
-                NF_FECHA_AUTORIZA = ConversionHelper.ConvertirNullableDateTimeDirecto(valoresFormato[25]),
-                T24_DEBIT_AMOUNT = ConversionHelper.ConvertirDecimalDirecto(valoresFormato[27], "T24_DEBIT_AMOUNT"),
-                T24_SHORT_NAME = Convert.ToString(valoresFormato[1]),
-                NF_FOREX_RELACIONADO = Convert.ToString(valoresFormato[3]),
-                T24_DEBIT_CURRENCY = Convert.ToString(valoresFormato[4]),
-                NF_BANCO_BENEF = Convert.ToString(valoresFormato[6]),
-                T24_BEN_ACCT_NO = Convert.ToString(valoresFormato[7]),
-                NF_TIPO_CUENTA = Convert.ToString(valoresFormato[8]),
-                T24_BEN_CUST_NAME = detalle ? TextoSPEI(valoresFormato[10]) : Convert.ToString(valoresFormato[10]),
-                NF_RFC_BENEFICIARIO = detalle ? TextoSPEI(valoresFormato[11]) : Convert.ToString(valoresFormato[11]),
-                NF_TASA_RETENCION = Convert.ToString(valoresFormato[12]),
-                NF_FECHA_EJECUCION = ConversionHelper.ConvertirIntDirecto(valoresFormato[13], "NF_FECHA_EJECUCION"),
-                T24_DEBIT_THEIR_REF = detalle ? TextoSPEI(valoresFormato[15]) : Convert.ToString(valoresFormato[15]),
-                NF_MONTO_ENVIAR = detalle ? ConversionHelper.ConvertirDecimalDirecto(valoresFormato[18], "NF_MONTO_ENVIAR") : ConversionHelper.ConvertirDecimalOrZeroDirecto(valoresFormato[18]),
-                ID_PLANTILLA = Convert.ToString(valoresFormato[28]),
-                ID_FORMATO_PLANTILLA = ConversionHelper.ConvertirNullableLongDirecto(valoresFormato[29]),
-                ID_FILES_BTMUM = ConversionHelper.ConvertirLongDirecto(valoresFormato[30], "ID_FILES_BTMUM"),
-                NO_PAGOS = ConversionHelper.ConvertirIntDirecto(valoresFormato[31], "NO_PAGOS"),
-                PAGOSDESCRIPCION = Convert.ToString(valoresFormato[32]),
-                NOPAGOSPROCESADOS = ConversionHelper.ConvertirIntDirecto(valoresFormato[33], "NOPAGOSPROCESADOS"),
-                NOPAGOSDEVUELTOS = ConversionHelper.ConvertirIntDirecto(valoresFormato[34], "NOPAGOSDEVUELTOS"),
-                ID_FORMATO_PAP = detalle ? ConversionHelper.ConvertirNullableLongDirecto(valoresFormato[35]) : null,
-                REF1 = detalle ? Convert.ToString(valoresFormato[36]) : null,
-                REF2 = detalle ? Convert.ToString(valoresFormato[37]) : null,
-                REF3 = detalle ? Convert.ToString(valoresFormato[38]) : null,
-                REF4 = detalle ? Convert.ToString(valoresFormato[39]) : null,
-                REF5 = detalle ? Convert.ToString(valoresFormato[40]) : null,
-                NF_ADDRESS = detalle ? Convert.ToString(valoresFormato[45]) : null,
-                NF_ZIP_CODE = detalle ? Convert.ToString(valoresFormato[46]) : null,
-                NF_CLASIFICACION_OPERACION = detalle ? Convert.ToString(valoresFormato[41]) : null,
-                NF_RELACION_COMERCIAL = detalle ? Convert.ToString(valoresFormato[42]) : null,
-                NF_NUMERIC_REFERENCE = detalle ? Convert.ToString(valoresFormato[43]) : null,
-                NF_DIRECCION_IP = detalle ? Convert.ToString(valoresFormato[44]) : null
-            };
-        }
-
-    }
-}
-
-using Aplicacion.DTOs.PaP;
-using Aplicacion.Interfaces.FirmaElectronica;
-using Aplicacion.Interfaces.PaP;
-using Aplicacion.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Globalization;
-using System.Threading.Tasks;
-using static MUFG_T24.Comunes.Comunes;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    /// <summary>
-    /// Representa Pa P TEF.
-    /// </summary>
-    public class PaP_TEF
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly IPaPTEFDao _PaPTEFDao;
-        private readonly IPaPTEFCmsDao _PaPTEFCmsDao;
-        private readonly ConexionT24Mw _vwT24;
-        private readonly IComunFXD _comunFXD;
-        private readonly Comunes _comunes;
-
-        private const string tipoOperacion = "PaP_TEF";
-        private string folioUnico = string.Empty;
-        private string folioPropuesto = string.Empty;
         /// <summary>
-        /// Inicializa una nueva instancia de la clase PaP_TEF.
+        /// Inserta registro en la base de datos de TOMI con datos provenientes de CMS.
         /// </summary>
-
-        public PaP_TEF(ConfiguracionModelo configuracion, IControlServicio controlServicio, IPaPTEFDao paPTEFDao, IPaPTEFCmsDao paPTEFCmsDao, ConexionT24Mw vwT24, IComunFXD comunFXD, Comunes comunes)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _PaPTEFDao = paPTEFDao;
-            _PaPTEFCmsDao = paPTEFCmsDao;
-            _vwT24 = vwT24;
-            _comunFXD = comunFXD;
-            _comunes = comunes;
-        }
-        /// <summary>
-        /// Ejecuta la operaciÃ³n public.
-        /// </summary>
-
-        public async Task<bool> ProcesaOperacion(string folio)
-        {
-            object[] laValoresFormatoMto = new object[46];
-            object[] laValoresFormato = new object[46];
-
-            string lsMto_Folio;
-            int liMto_Regs;
-            string lsMto_FechaEjecucion;
-            string lsMto_Moneda;
-            decimal ldMto_Importe;
-
-            string lsDet_FolioForex;
-            string lsDet_FechaEjecucion;
-            string lsDet_Moneda;
-            decimal ldDet_Importe;
-
-            bool lbConForex;
-            bool lbForexCancelado;
-            string lsMto_FolioForex;
-            bool lbConEntradaSalida;
-
-            bool lbProcesado;
-            bool lbResultado;
-            bool lbFechaFutura;
-
-            int liTOMI_Mto_Regs;
-            decimal ldTOMI_Mto_Importe;
-
-            // Verificamos la última operación no realizada
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-
-            if (_configuracion.AliasProceso == string.Empty)
-            {
-                return false;
-            }
-
-            // Datos del folio en CMS y TOMI
-            lsMto_Folio = string.Empty;
-            lsMto_FechaEjecucion = string.Empty;
-            lsMto_Moneda = string.Empty;
-            ldMto_Importe = 0;
-            lsMto_FolioForex = string.Empty;
-
-            lsDet_FechaEjecucion = string.Empty;
-            lsDet_Moneda = string.Empty;
-            ldDet_Importe = 0;
-            lsDet_FolioForex = string.Empty;
-
-            lbConForex = false;
-            lbForexCancelado = false;
-            lbConEntradaSalida = true;
-
-            liMto_Regs = 0;
-            liTOMI_Mto_Regs = 0;
-            ldTOMI_Mto_Importe = 0;
-
-            Config.EscribirLog("INFO|" + tipoOperacion + ".procesaOperacion|Aperturando conexión a base de datos del CMS.");
-
-            PaPTefMaestroCmsDto maestroCms = await _PaPTEFCmsDao.ObtenerMaestroPapTefPorDetalle(folio);
-
-            if (maestroCms != null)
-            {
-                /// <summary>
-                /// Ejecuta la operaciÃ³n CargarValoresFormatoMaestro.
-                /// </summary>
-                CargarValoresFormatoMaestro(maestroCms, laValoresFormatoMto, folio);
-
-                lsMto_Folio = Convert.ToString(maestroCms.IdFormato, CultureInfo.InvariantCulture);
-                liMto_Regs = Convert.ToInt32(maestroCms.NoPagos);
-                ldMto_Importe = maestroCms.MontoOperacion;
-
-                // Folio forex
-                lsMto_FolioForex = string.Empty; // No hay forex en PaP
-
-                // Fecha ejecución
-                if (laValoresFormatoMto[13] != null && laValoresFormatoMto[13] != DBNull.Value)
-                {
-                    lsMto_FechaEjecucion = Convert.ToString(laValoresFormatoMto[13], CultureInfo.InvariantCulture);
-                }
-
-                // Moneda
-                if (laValoresFormatoMto[4] != null && laValoresFormatoMto[4] != DBNull.Value)
-                {
-                    lsMto_Moneda = _vwT24.ValidaMoneda(
-                        Convert.ToString(laValoresFormatoMto[4], CultureInfo.InvariantCulture));
-                }
-            }
-
-            PaPTefDetalleCmsDto detalleCms = await _PaPTEFCmsDao.ObtenerDetallePapTefPorFolio(folio);
-
-            if (detalleCms != null)
-            {
-                /// <summary>
-                /// Ejecuta la operaciÃ³n CargarValoresFormatoDetalle.
-                /// </summary>
-                CargarValoresFormatoDetalle(detalleCms, laValoresFormato, folio);
-
-                // Importe
-                ldDet_Importe = detalleCms.MontoOperacion;
-
-                // Folio forex
-                lsDet_FolioForex = string.Empty; // No hay Forex en PaP
-
-                // Fecha ejecución
-                if (laValoresFormato[13] != null && laValoresFormato[13] != DBNull.Value)
-                {
-                    lsDet_FechaEjecucion = Convert.ToString(laValoresFormato[13], CultureInfo.InvariantCulture);
-                }
-
-                // Moneda
-                if (laValoresFormato[4] != null && laValoresFormato[4] != DBNull.Value)
-                {
-                    lsDet_Moneda = _vwT24.ValidaMoneda(
-                        Convert.ToString(laValoresFormato[4], CultureInfo.InvariantCulture));
-                }
-            }
-
-            Config.EscribirLog(
-                "INFO|PaP_TEF.procesaOperacion|Veamos que trae la fecha" +
-                Convert.ToString(laValoresFormato[13], CultureInfo.InvariantCulture) +
-                "-----" +
-                lsMto_FechaEjecucion);
-
-            int fechaSistema = int.Parse(_configuracion.StrFechaSistema, CultureInfo.InvariantCulture);
-            int intFechaEjecucion = int.Parse(lsMto_FechaEjecucion, CultureInfo.InvariantCulture);
-            if (intFechaEjecucion < fechaSistema)
-            {
-                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
-                throw new Exception(
-                    "Se desea realizar una operación al " +
-                    lsMto_FechaEjecucion +
-                    " cuando la fecha del sistema es " +
-                    _configuracion.StrFechaSistema +
-                    ".");
-            }
-
-            // Genero el folio unico
-            folioUnico = await _vwT24.GeneraFolioUnico(
-                tipoOperacion,
-                ConexionT24Mw.CambiarFechaAJulianaT24(lsMto_FechaEjecucion),
-                folio);
-
-            lbFechaFutura = string.CompareOrdinal(lsMto_FechaEjecucion, _configuracion.StrFechaSistema) > 0;
-
-            // =========================================================================================
-            // Validación de maestro y detalle
-            // =========================================================================================
-            if (lsMto_FolioForex != lsDet_FolioForex)
-            {
-                throw new Exception(
-                    "Deferencia entre el maestro y el detalle de folio de Forex: Maestro:'" +
-                    lsMto_FolioForex +
-                    "', Detalle:'" +
-                    lsDet_FolioForex +
-                    "'.");
-            }
-
-            if (lsMto_FechaEjecucion != lsDet_FechaEjecucion)
-            {
-                throw new Exception(
-                    "Deferencia entre el maestro y el detalle de folio de Fecha de ejecución: Maestro:'" +
-                    lsMto_FechaEjecucion +
-                    "', Detalle:'" +
-                    lsDet_FechaEjecucion +
-                    "'.");
-            }
-
-            if (lsMto_Moneda != lsDet_Moneda)
-            {
-                throw new Exception(
-                    "Deferencia entre el maestro y el detalle de folio de Moneda: Maestro:'" +
-                    lsMto_Moneda +
-                    "', Detalle:'" +
-                    lsDet_Moneda +
-                    "'.");
-            }
-
-            // =========================================================================================
-            // Fecha de ejecución y tiene un forex asignado?
-            // =========================================================================================
-            Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Validando si la operación está asignada a un Forex.");
-
-            if (lsMto_FolioForex != string.Empty)
-            {
-                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Asignado el folio forex: " + lsMto_FolioForex + " .");
-                lbConForex = true;
-
-                if (ConversionHelper.EsDoubleInvariant(lsMto_FolioForex))
-                {
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("El Folio del Forex no es valido: " + lsMto_FolioForex);
-                }
-
-                PaPTEFForexStatusDto forexStatus = await _PaPTEFDao.ObtenerEstatusForex(lsMto_FolioForex);
-
-                if (forexStatus != null && forexStatus.StatusOperacion == "CANCELADO")
-                {
-                    lbForexCancelado = true;
-                    lbConEntradaSalida = false;
-                    Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|FOREX CANCELADO.");
-                }
-            }
-
-            // =========================================================================================
-            // Lectura y actualización de los datos del maestro
-            // =========================================================================================
-            if (_configuracion.AliasProceso == "DATOS_GRAL")
-            {
-                string lsSubTipo;
-
-                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                lsSubTipo = string.Empty;
-
-                if (lbConForex)
-                {
-                    lsSubTipo = "FX:" + lsMto_FolioForex;
-                }
-
-                var datosGenerales = new PaPTEFActualizarDatosGeneralesPlanTrabajoDto
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    FolioUnico = folioUnico,
-                    FechaEjecucion = lsMto_FechaEjecucion,
-                    Moneda = lsMto_Moneda,
-                    ImporteDetalle = ldDet_Importe,
-                    ImporteMaestro = ldMto_Importe,
-                    NumCliente = Convert.ToString(laValoresFormato[21], CultureInfo.InvariantCulture),
-                    NombreCliente = Convert.ToString(laValoresFormato[1], CultureInfo.InvariantCulture),
-                    NumCuenta = Convert.ToString(laValoresFormato[22], CultureInfo.InvariantCulture),
-                    SubtipoOperacion = lsSubTipo,
-                    FolioMaestro = lsMto_Folio,
-                    DesAgregado = "NumPagos=" + liMto_Regs.ToString(CultureInfo.InvariantCulture)
-                };
-
-                await _PaPTEFDao.ActualizarDatosGeneralesPlanTrabajo(datosGenerales);
-
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-            }
-
-            // =========================================================================================
-            // Lectura del CMS e inserción a TOMI
-            // =========================================================================================
-            if (_configuracion.AliasProceso == "CMS_A_TOMI")
-            {
-                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|A insertar datos de CMS a TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                lbProcesado = false;
-
-                lbResultado = await CMS_A_TOMI(folio, laValoresFormato);
-
-                if (lbResultado)
-                {
-                    Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
-                    lbProcesado = true;
-                }
-                else
-                {
-                    int numRegs = await _PaPTEFDao.ContarDetallePapTomiPorFolio(folio);
-
-                    if (numRegs > 0)
-                    {
-                        lbProcesado = true;
-                        Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                    }
-                }
-
-                if (lbProcesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de registro CMS_A_TOMI con folio: " + folio);
-                }
-            }
-
-            // =========================================================================================
-            // Registro de la Entrada/Salida
-            // =========================================================================================
-            if (_configuracion.AliasProceso == "TOMI_ENTRADAS/SALIDAS")
-            {
-                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|A insertar datos de Entrada/Salida en TOMI (registro detalle).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                if (lbConEntradaSalida)
-                {
-                    lbProcesado = false;
-
-                    int numRegsEntradaSalida = await _PaPTEFDao.ContarEntradaSalidaPorReferencia(folioUnico);
-
-                    if (numRegsEntradaSalida > 0)
-                    {
-                        lbProcesado = true;
-                        Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
-                    }
-
-                    if (!lbProcesado)
-                    {
-                        lbResultado = await TOMI_ENTRADA_SALIDA(folio);
-
-                        if (lbResultado)
-                        {
-                            lbProcesado = true;
-                            Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Se insertó correctamente el folio detalle en base de Entrada/Salida.");
-                        }
-                    }
-
-                    if (lbProcesado)
-                    {
-                        await _controlServicio.TerminaProceso(new ProcesoDTO
-                        {
-                            Folio = folio,
-                            TipoOperacion = tipoOperacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            PId = _configuracion.Pid.Value
-                        });
-
-                        _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                        {
-                            Folio = folio,
-                            TipoOperacion = tipoOperacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            PId = _configuracion.Pid.Value
-                        });
-                    }
-                    else
-                    {
-                        /// <summary>
-                        /// Ejecuta la operaciÃ³n Exception.
-                        /// </summary>
-                        throw new Exception("Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: " + folio);
-                    }
-                }
-            }
-
-            // =========================================================================================
-            // Actualización del estatus del CMS y TOMI
-            // =========================================================================================
-            if (_configuracion.AliasProceso == "CAMBIO_ESTATUS")
-            {
-                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|A actualizar estatus en CMS y TOMI. Buscando sumarizado de los detalles del folioMaestro=" + lsMto_Folio);
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                PaPTEFSumarizadoDetalleTomiDto sumarizado =
-                    await _PaPTEFDao.ObtenerSumarizadoDetallePorMaestro(lsMto_Folio);
-
-                if (sumarizado != null)
-                {
-                    liTOMI_Mto_Regs = sumarizado.num_regs;
-                    if (!sumarizado.imp_monto.HasValue)
-                        throw new Exception($"No se tiene información de imp_monto para el folio maestro {lsMto_Folio} en CAMBIO_ESTATUS.");
-
-                    ldTOMI_Mto_Importe = sumarizado.imp_monto.Value;
-                }
-
-                lbProcesado = false;
-
-                if (liMto_Regs == liTOMI_Mto_Regs &&
-                    Math.Round(ldMto_Importe, 2) == Math.Round(ldTOMI_Mto_Importe, 2))
-                {
-                    Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|El sumarizado de detalles está completo.");
-
-                    int detallesProcesados = await _PaPTEFDao.ContarDetallePapTomiProcesadoPorFolio(folio);
-
-                    if (detallesProcesados > 0)
-                    {
-                        lbProcesado = true;
-                        Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|El folio ya se había marcado como realizado.");
-                    }
-
-                    if (!lbProcesado)
-                    {
-                        Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|A tratar de insertar el maestro con folio " + lsMto_Folio + ".");
-
-                        lbResultado = await CMS_A_TOMI_MAESTRO(lsMto_Folio, laValoresFormatoMto);
-
-                        if (lbResultado)
-                        {
-                            Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Se insertó correctamente el folio maestro " + lsMto_Folio + " en base de TOMI.");
-                            lbProcesado = true;
-                        }
-                        else
-                        {
-                            int maestrosTomi = await _PaPTEFDao.ContarMaestroPapTomiPorFolio(lsMto_Folio);
-
-                            if (maestrosTomi > 0)
-                            {
-                                lbProcesado = true;
-                                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|El folio maestro en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                            }
-                        }
-
-                        if (lbProcesado)
-                        {
-                            if (lbConForex && lbForexCancelado)
-                            {
-                                await _PaPTEFCmsDao.ActualizarCmsRechazadoPorForexCancelado(lsMto_Folio);
-
-                                await _PaPTEFDao.ActualizarTomiRechazadoPorForexCancelado(lsMto_Folio);
-
-                                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Forex Rechazado con Anterioridad: " + lsMto_Folio);
-
-                                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|A cancelar la operación.");
-
-                                await _PaPTEFDao.CancelarPlanTrabajoDetallePorForex(
-                                    new PaPTEFCancelarPlanTrabajoForexDto
-                                    {
-                                        Folio = folio,
-                                        TipoOperacion = tipoOperacion,
-                                        FechaEjecucion = lsMto_FechaEjecucion,
-                                        Moneda = lsMto_Moneda,
-                                        Importe = ldDet_Importe
-                                    });
-
-                                string folioMaestroPlanTrabajo = await _vwT24.ObtenerFolioMaestro(folio, tipoOperacion);
-
-                                await _PaPTEFDao.CancelarPlanTrabajoMaestroPorForex(
-                                    new PaPTEFCancelarPlanTrabajoMaestroForexDto
-                                    {
-                                        FolioMaestro = folioMaestroPlanTrabajo,
-                                        TipoOperacion = tipoOperacion,
-                                        FechaEjecucion = lsMto_FechaEjecucion,
-                                        Moneda = lsMto_Moneda,
-                                        Importe = ldMto_Importe
-                                    });
-
-                                await _controlServicio.TerminaProceso(new ProcesoDTO
-                                {
-                                    Folio = folio,
-                                    TipoOperacion = tipoOperacion,
-                                    Servicio = _configuracion.NombreServicio,
-                                    NombreProceso = _configuracion.NombreProceso,
-                                    AliasProceso = _configuracion.AliasProceso,
-                                    PId = _configuracion.Pid.Value
-                                });
-
-                                return true;
-                            }
-
-                            if (lsMto_FechaEjecucion == _configuracion.StrFechaSistema)
-                            {
-                                await _PaPTEFCmsDao.ActualizarCmsAceptadoHoy(lsMto_Folio);
-
-                                await _PaPTEFDao.ActualizarTomiAceptadoHoy(
-                                    lsMto_Folio,
-                                    DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture));
-
-                                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Operación fecha valor hoy.");
-                            }
-                            else if (string.CompareOrdinal(lsMto_FechaEjecucion, _configuracion.StrFechaSistema) < 0)
-                            {
-                                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
-                                throw new Exception(
-                                    "Se desea realizar una operación al " +
-                                    lsMto_FechaEjecucion +
-                                    " cuando la fecha del sistema es " +
-                                    _configuracion.StrFechaSistema +
-                                    ".");
-                            }
-                            else
-                            {
-                                await _PaPTEFCmsDao.ActualizarCmsPendienteEjecucion(lsMto_Folio);
-
-                                await _PaPTEFDao.ActualizarTomiFechaFutura(
-                                    lsMto_Folio,
-                                    DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture));
-
-                                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|Operación fecha valor fútura.");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    Config.EscribirLog("AVISO|PaP_TEF.procesaOperacion|Faltan detalles a procesar para marcar el cambio de estatus en el folio Maestro:" + lsMto_Folio + ".");
-                    lbProcesado = false;
-                    return true;
-                }
-
-                if (lbProcesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de registro CAMBIO_ESTATUS con folio: " + folio);
-                }
-            }
-
-            // =========================================================================================
-            // Conciliación CMS / TOMI / Entrada-Salida
-            // =========================================================================================
-            if (_configuracion.AliasProceso == "CONCILIAR")
-            {
-                int liRegsCMS;
-                int liRegsTOMI;
-                int liRegsEntSal;
-
-                string lsMsjError;
-                decimal ldImporteTOMI;
-
-                string lsFechaEjecucionEntSal;
-                string lsMonedaEntSal;
-                decimal ldImporteEntSal;
-
-                Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|A conciliar operaciones entre CMS y TOMI (maestro y detalles).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                // Registros en CMS
-                liRegsCMS = 1;
-
-                // Registros en TOMI
-                liRegsTOMI = 0;
-                ldImporteTOMI = 0;
-
-                PaPTEFDetalleTomiConciliacionDto detalleTomi =
-                    await _PaPTEFDao.ObtenerDetalleTomiParaConciliacion(folio);
-
-                if (detalleTomi != null)
-                {
-                    liRegsTOMI = 1;
-                    ldImporteTOMI = detalleTomi.T24DebitAmount;
-                }
-
-                liTOMI_Mto_Regs = 0;
-                ldTOMI_Mto_Importe = 0;
-
-                PaPTEFSumarizadoDetalleTomiDto sumarizadoProcesado =
-                    await _PaPTEFDao.ObtenerSumarizadoDetalleProcesadoPorMaestro(lsMto_Folio);
-
-                if (sumarizadoProcesado != null)
-                {
-                    liTOMI_Mto_Regs = sumarizadoProcesado.num_regs;
-                    if (!sumarizadoProcesado.imp_monto.HasValue)
-                        throw new Exception($"No se tiene información de imp_monto para el folio maestro {lsMto_Folio} en CONCILIAR.");
-
-                    ldTOMI_Mto_Importe = sumarizadoProcesado.imp_monto.Value;
-                }
-
-                // Entrada/Salida
-                lsFechaEjecucionEntSal = string.Empty;
-                lsMonedaEntSal = string.Empty;
-                ldImporteEntSal = 0;
-                liRegsEntSal = 0;
-
-                if (lbConEntradaSalida)
-                {
-                    PaPTEFEntradaSalidaConciliacionDto entradaSalida =
-                        await _PaPTEFDao.ObtenerEntradaSalidaParaConciliacion(folioUnico);
-
-                    if (entradaSalida != null)
-                    {
-                        liRegsEntSal = 1;
-                        lsFechaEjecucionEntSal = entradaSalida.EntFechaValor.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-                        lsMonedaEntSal = _vwT24.ValidaMoneda(entradaSalida.EntMonedaCuenta);
-                        ldImporteEntSal = entradaSalida.EntImporte;
-                    }
-                }
-
-                // Validación
-                lsMsjError = string.Empty;
-
-                if (liRegsCMS == 1 &&
-                    liRegsTOMI == 1 &&
-                    ((lbConEntradaSalida && liRegsEntSal == 1) || !lbConEntradaSalida))
-                {
-                    if (ldDet_Importe != ldImporteTOMI)
-                    {
-                        lsMsjError += Environment.NewLine +
-                                      " - Diferencia en el importe. CMS='" +
-                                      ldDet_Importe +
-                                      "', TOMI='" +
-                                      ldImporteTOMI +
-                                      "'.";
-                    }
-
-                    if (liMto_Regs != liTOMI_Mto_Regs)
-                    {
-                        lsMsjError += Environment.NewLine +
-                                      " - Diferencia en el total de registros. CMS='" +
-                                      liMto_Regs +
-                                      "', TOMI='" +
-                                      liTOMI_Mto_Regs +
-                                      "'.";
-                    }
-
-                    if (Math.Round(ldMto_Importe, 2) != Math.Round(ldTOMI_Mto_Importe, 2))
-                    {
-                        lsMsjError += Environment.NewLine +
-                                      " - Diferencia en la sumatoría del importe de registros. CMS='" +
-                                      ldMto_Importe +
-                                      "', TOMI='" +
-                                      ldTOMI_Mto_Importe +
-                                      "'.";
-                    }
-
-                    if (lbConEntradaSalida)
-                    {
-                        if (lsMto_FechaEjecucion != lsFechaEjecucionEntSal)
-                        {
-                            lsMsjError += Environment.NewLine +
-                                          " - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='" +
-                                          lsMto_FechaEjecucion +
-                                          "', TOMI='" +
-                                          lsFechaEjecucionEntSal +
-                                          "'.";
-                        }
-
-                        if (lsMto_Moneda != lsMonedaEntSal)
-                        {
-                            lsMsjError += Environment.NewLine +
-                                          " - Diferencia en la monedas de Entrada/Salida. CMS='" +
-                                          lsMto_Moneda +
-                                          "', TOMI='" +
-                                          lsMonedaEntSal +
-                                          "'.";
-                        }
-
-                        if (ldDet_Importe != ldImporteEntSal)
-                        {
-                            lsMsjError += Environment.NewLine +
-                                          " - Diferencia en el importe de Entrada/Salida. CMS='" +
-                                          ldDet_Importe +
-                                          "', Entrada/Salida='" +
-                                          ldImporteEntSal +
-                                          "'.";
-                        }
-                    }
-
-                    lbProcesado = true;
-                }
-                else
-                {
-                    lbProcesado = false;
-                    lsMsjError += Environment.NewLine + " - No se ha registrado la operación en TOMI.";
-                }
-
-                if (lsMsjError != string.Empty)
-                {
-                    lbProcesado = false;
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception(lsMsjError);
-                }
-
-                if (lbProcesado)
-                {
-                    Config.EscribirLog("INFO|PaP_TEF.procesaOperacion|La operación está correctamente conciliada.");
-
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = string.Empty;
-                }
-                else
-                {
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de registro CONCILIAR con folio: " + folio);
-                }
-            }
-
-            Config.EscribirLog("INFO|" + tipoOperacion + ".procesaOperacion|Cerrando conexión a base de datos del CMS.");
-
-            return true;
-        }
-
         private async Task<bool> CMS_A_TOMI(string folio, object[] valoresFormato)
         {
             try
             {
-                var datos = new PaPTefInsertarDetalleTomiDto
+                TefInsertarFormatoTomiDto dto = new TefInsertarFormatoTomiDto
                 {
                     NfFolioUnico = folioUnico,
                     NfTipo = Convert.ToString(valoresFormato[19]),
-                    NfFolio = Convert.ToInt64(valoresFormato[20]),
+                    NfFolio = ConversionHelper.ConvertirLongRequerido(valoresFormato[20], "NF_FOLIO"),
                     T24CustomerCode = Convert.ToString(valoresFormato[21]),
                     T24DebitAcctNo = Convert.ToString(valoresFormato[22]),
                     NfEstatus = "PEND",
                     NfUsuarioCaptura = Convert.ToString(valoresFormato[24]),
                     NfUsuarioAutoriza = Convert.ToString(valoresFormato[26]),
-                    NfFechaCaptura = Convert.ToDateTime(valoresFormato[23]),
-                    NfFechaAutoriza = ConversionHelper.ConvertirNullableDateTimeDirect(valoresFormato[25]),
-                    T24DebitAmount = Convert.ToDecimal(valoresFormato[27]),
-
-                    T24ShortName = Convert.ToString(valoresFormato[1]),
+                    NfFechaCaptura = Convert.ToDateTime(valoresFormato[23], CultureInfo.InvariantCulture),
+                    NfFechaAutoriza = ConversionHelper.ConvertirNullableDateTime(valoresFormato[25]),
+                    T24DebitAmount = ConversionHelper.ConvertirDecimalRequerido(valoresFormato[27], "T24_DEBIT_AMOUNT"),
+                    T24ShortName = ConversionHelper.Mid(Convert.ToString(valoresFormato[1]), 1, 35),
                     NfForexRelacionado = Convert.ToString(valoresFormato[3]),
                     T24DebitCurrency = Convert.ToString(valoresFormato[4]),
                     NfBancoBenef = Convert.ToString(valoresFormato[6]),
                     T24BenAcctNo = Convert.ToString(valoresFormato[7]),
                     NfTipoCuenta = Convert.ToString(valoresFormato[8]),
-
-                    T24BenCustName = TextoTEF(valoresFormato[10]),
-
-                    NfRfcBeneficiario = TextoTEF(valoresFormato[11]),
-
+                    T24BenCustName = Convert.ToString(valoresFormato[10]),
+                    NfRfcBeneficiario = Convert.ToString(valoresFormato[11]),
                     NfTasaRetencion = Convert.ToString(valoresFormato[12]),
-                    NfFechaEjecucion = Convert.ToInt32(valoresFormato[42]),
 
-                    T24DebitTheirRef = TextoTEF(valoresFormato[15]),
+                    NfFechaEjecucion = ConversionHelper.ConvertirIntRequerido(valoresFormato[33], "NF_FECHA_EJECUCION"),
 
-                    NfMontoEnviar = Convert.ToDecimal(valoresFormato[18]),
-
+                    T24DebitTheirRef = Convert.ToString(valoresFormato[15]),
+                    NfMontoEnviar = ConversionHelper.ConvertirDecimalRequerido(valoresFormato[18], "NF_MONTO_ENVIAR"),
                     IdPlantilla = Convert.ToString(valoresFormato[28]),
-                    IdFormatoPlantilla = Convert.ToInt64(valoresFormato[29]),
-                    IdFilesBtmum = Convert.ToInt64(valoresFormato[30]),
-                    NoPagos = Convert.ToInt32(valoresFormato[31]),
-                    PagosDescripcion = Convert.ToString(valoresFormato[32]),
-                    NoPagosProcesados = Convert.ToInt32(valoresFormato[33]),
-                    NoPagosDevueltos = Convert.ToInt32(valoresFormato[34]),
-                    IdFormatoPap = Convert.ToInt64(valoresFormato[35]),
-
-                    Ref1 = Convert.ToString(valoresFormato[36]),
-                    Ref2 = Convert.ToString(valoresFormato[37]),
-                    Ref3 = Convert.ToString(valoresFormato[38]),
-                    Ref4 = Convert.ToString(valoresFormato[39]),
-                    Ref5 = Convert.ToString(valoresFormato[40]),
-
-                    NfCodigoOperacion = valoresFormato[43].ToString(),
-                    NfTipoOperacion = valoresFormato[44].ToString(),
-                    NfFechaAplicacion = Convert.ToInt32(valoresFormato[41]),
-                    NfFechaCargo = Convert.ToInt32(valoresFormato[42])
+                    IdFormatoPlantilla = ConversionHelper.ConvertirNullableLong(valoresFormato[29], "ID_FORMATO_PLANTILLA"),
+                    NfCodigoOperacion = Convert.ToString(valoresFormato[30]),
+                    NfTipoOperacion = Convert.ToString(valoresFormato[31]),
+                    NfFechaAplicacion = ConversionHelper.ConvertirIntRequerido(valoresFormato[32], "NF_FECHA_APLICACION"),
+                    NfFechaCargo = ConversionHelper.ConvertirIntRequerido(valoresFormato[33], "NF_FECHA_CARGO")
                 };
 
-                bool resultado =
-                    await _PaPTEFDao.InsertarFormatoTefPapDetalle(datos);
+                bool insertado = await _tefDao.InsertarFormatoTef(dto);
 
-                Config.EscribirLog("INFO|PaP_TEF.CMS_A_TOMI|Salida=" + resultado + ".");
+                Config.EscribirLog($"INFO|TEF.CMS_A_TOMI|Salida={(insertado ? 0 : 1)}.");
 
-                return resultado;
+                return insertado;
             }
             catch (Exception ex)
             {
-                Config.EscribirLog(
-                    "ERROR|PaP_TEF.CMS_A_TOMI|Se presenta exception: " +
-                    ex.Message +
-                    ". Trace: " +
-                    ex);
+                Config.EscribirLog($"ERROR|TEF.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
             }
 
             return false;
         }
 
-        private async Task<bool> CMS_A_TOMI_MAESTRO(
-            string folioMaestro,
-            object[] valoresFormatoMto)
-        {
-            try
-            {
-                var datos = new PaPTefInsertarMaestroTomiDto
-                {
-                    NfFolioUnico = folioUnico,
-                    NfTipo = Convert.ToString(valoresFormatoMto[19]),
-                    NfFolio = Convert.ToDouble(valoresFormatoMto[20]),
-                    T24CustomerCode = Convert.ToString(valoresFormatoMto[21]),
-                    T24DebitAcctNo = Convert.ToString(valoresFormatoMto[22]),
-                    NfEstatus = "PEND",
-                    NfUsuarioCaptura = Convert.ToString(valoresFormatoMto[24]),
-                    NfUsuarioAutoriza = Convert.ToString(valoresFormatoMto[26]),
-                    NfFechaCaptura = Convert.ToDateTime(valoresFormatoMto[23]),
-                    NfFechaAutoriza = ConversionHelper.ConvertirNullableDateTimeDirect(valoresFormatoMto[25]),
-                    T24DebitAmount = Convert.ToDecimal(valoresFormatoMto[27]),
-
-                    T24ShortName = Convert.ToString(valoresFormatoMto[1]),
-                    NfForexRelacionado = Convert.ToString(valoresFormatoMto[3]),
-                    T24DebitCurrency = Convert.ToString(valoresFormatoMto[4]),
-                    NfBancoBenef = Convert.ToString(valoresFormatoMto[6]),
-                    T24BenAcctNo = Convert.ToString(valoresFormatoMto[7]),
-                    NfTipoCuenta = Convert.ToString(valoresFormatoMto[8]),
-
-                    T24BenCustName = Convert.ToString(valoresFormatoMto[10]),
-
-                    NfRfcBeneficiario = Convert.ToString(valoresFormatoMto[11]),
-
-                    NfTasaRetencion = Convert.ToString(valoresFormatoMto[12]),
-                    NfFechaEjecucion = Convert.ToInt32(valoresFormatoMto[42]),
-
-                    T24DebitTheirRef = Convert.ToString(valoresFormatoMto[15]),
-
-                    NfMontoEnviar = ConversionHelper.ObtenerMontoEnviarMaestroDecimal(valoresFormatoMto[18]),
-
-                    IdPlantilla = Convert.ToString(valoresFormatoMto[28]),
-                    IdFormatoPlantilla = Convert.ToDouble(valoresFormatoMto[29]),
-                    IdFilesBtmum = Convert.ToDouble(valoresFormatoMto[30]),
-                    NoPagos = Convert.ToDouble(valoresFormatoMto[31]),
-                    PagosDescripcion = Convert.ToString(valoresFormatoMto[32]),
-                    NoPagosProcesados = Convert.ToDouble(valoresFormatoMto[33]),
-                    NoPagosDevueltos = Convert.ToDouble(valoresFormatoMto[34]),
-
-                    NfCodigoOperacion = Convert.ToDouble(valoresFormatoMto[43]),
-                    NfTipoOperacion = Convert.ToDouble(valoresFormatoMto[44]),
-                    NfFechaAplicacion = Convert.ToInt32(valoresFormatoMto[41]),
-                    NfFechaCargo = Convert.ToInt32(valoresFormatoMto[42])
-                };
-
-                bool resultado =
-                    await _PaPTEFDao.InsertarFormatoTefPapMaestro(datos);
-
-                Config.EscribirLog(
-                    "INFO|PaP_TEF.CMS_A_TOMI_MAESTRO|Salida=" +
-                    resultado +
-                    ".");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog(
-                    "ERROR|PaP_TEF.CMS_A_TOMI_MAESTRO|Se presenta exception: " +
-                    ex.Message +
-                    ". Trace: " +
-                    ex);
-            }
-
-            return false;
-        }
-
+        /// <summary>
+        /// Inserta registro de Entradas/Salidas en TOMI.
+        /// </summary>
         private async Task<bool> TOMI_ENTRADA_SALIDA(string folio)
         {
             try
             {
-                PaPTefDetalleTomiEntradaSalidaDto detalle =
-                    await _PaPTEFDao.ObtenerDetalleTomiParaEntradaSalida(folio);
-
-                if (detalle == null)
-                {
-                    throw new Exception(
-                        "No se encontraron datos en TB_TOMBIN_NF_TEF_PAP_DETALLE para el folio: " +
-                        folio);
-                }
-
-                var datos = new PaPTefInsertarEntradaSalidaTomiDto
-                {
-                    Referencia = detalle.NfFolioUnico,
-                    NumCliente = Convert.ToInt32(detalle.T24CustomerCode),
-                    Cdl = Convert.ToDouble(detalle.T24CustomerCode),
-                    Ordenante = detalle.T24CompanyName,
-
-                    Operacion = 218,
-                    OperacionDesc = "Salida  (TTS)",
-                    Tipo = "D",
-                    TipoDesc = "Doméstica",
-
-                    Cuenta = Convert.ToDouble(detalle.T24DebitAcctNo),
-                    Nombre = detalle.NfNombreCuenta,
-                    CuentaMoneda = detalle.NfMonedaCuenta,
-
-                    Via = 800,
-                    ViaDesc = "TRF ENVIADA MXN SPEUA",
-
-                    Importe = detalle.T24DebitAmount.Value,
-                    Saldo = 0m,
-                    Comentarios = detalle.T24DebitTheirRef,
-
-                    FechaCaptura = _comunes.ConvertirTextoAFecha(_configuracion.StrFechaSistema).Value,
-                    FechaValor = _comunes.ConvertirTextoAFecha(detalle.NfFechaEjecucion).Value,
-
-                    Hora = DateTime.Now.ToLongTimeString(),
-                    Capturista = "JEAI",
-                    Fad = 0,
-                    ReferenciaControl = "A",
-                    ReferenciaControlCont = 0
-                };
-
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|gsFechaSistema=" + _configuracion.StrFechaSistema);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|gsFechaSistema=" + datos.FechaCaptura);
-
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Referencia=" + datos.Referencia);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Num_Cliente=" + datos.NumCliente);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|CDL=" + datos.Cdl);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Ordenante=" + datos.Ordenante);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Operacion=" + datos.Operacion);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|OperacionDesc=" + datos.OperacionDesc);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Tipo=" + datos.Tipo);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|TipoDesc=" + datos.TipoDesc);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Cuenta=" + datos.Cuenta);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Nombre=" + datos.Nombre);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|CuentaMoneda=" + datos.CuentaMoneda);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Via=" + datos.Via);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|ViaDesc=" + datos.ViaDesc);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Importe=" + datos.Importe);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Saldo=" + datos.Saldo);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Comentarios=" + datos.Comentarios);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Fecha_Captura=" + datos.FechaCaptura);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|FechaValor=" + datos.FechaValor);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Hora=" + datos.Hora);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Capturista=" + datos.Capturista);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Fad=" + datos.Fad);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Referencia_Control=" + datos.ReferenciaControl);
-                Config.EscribirLog("INFO|PaP_TEF.TOMI_ENTRADA_SALIDA|Referencia_Control_Cont=" + datos.ReferenciaControlCont);
-
-                bool resultado =
-                    await _PaPTEFDao.InsertarSrvEntradasSalidas(datos);
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog(
-                    "ERROR|PaP_TEF.TOMI_ENTRADA_SALIDA|Se presenta exception: " +
-                    ex.Message +
-                    ".Trace:" +
-                    ex);
-            }
-
-            return false;
-        }
-        /// <summary>
-        /// Ejecuta la operaciÃ³n public.
-        /// </summary>
-
-        private static void CargarContenidoFormato(
-            string contenidoFormato,
-            object[] valores,
-            string folio)
-        {
-            string[] valoresPipes = (contenidoFormato ?? string.Empty)
-                .Split(new[] { '|' }, StringSplitOptions.None);
-
-            if (valoresPipes.Length - 1 < 18)
-            {
-                throw new Exception(
-                    "El contenidoFormato del folio " +
-                    folio +
-                    " es diferente al esperado, debe ser 18 datos y se tienen " +
-                    (valoresPipes.Length - 1) +
-                    ".");
-            }
-
-            for (int i = 0; i <= 18; i++)
-            {
-                string[] llaveValor = valoresPipes[i]
-                    .Split(new[] { '=' }, StringSplitOptions.None);
-                valores[i] = llaveValor[1];
-            }
-        }
-
-        private static void CargarValoresFormatoMaestro(
-        PaPTefMaestroCmsDto maestro,
-        object[] valoresFormatoMto,
-        string folio)
-        {
-            if (maestro == null)
-            {
-                return;
-            }
-
-            valoresFormatoMto[19] = "TEF";
-            valoresFormatoMto[20] = maestro.IdFormato;
-            valoresFormatoMto[21] = maestro.Cdl;
-            valoresFormatoMto[22] = maestro.IdCuenta;
-            valoresFormatoMto[23] = maestro.FechaCaptura;
-            valoresFormatoMto[24] = maestro.IdUsuarioCaptura;
-            valoresFormatoMto[25] = maestro.FechaAutorizacion;
-            valoresFormatoMto[26] = maestro.IdUsuarioAutorizo;
-            valoresFormatoMto[27] = maestro.MontoOperacion;
-            valoresFormatoMto[28] = maestro.IdPlantilla;
-            valoresFormatoMto[29] = maestro.IdFormatoPlantilla;
-            valoresFormatoMto[30] = maestro.IdFilesBtmum;
-            valoresFormatoMto[31] = maestro.NoPagos;
-            valoresFormatoMto[32] = maestro.PagosDescripcion;
-            valoresFormatoMto[33] = maestro.NoPagosProcesados;
-            valoresFormatoMto[34] = maestro.NoPagosDevueltos;
-            valoresFormatoMto[41] = maestro.FechaAplicacion;
-            valoresFormatoMto[42] = maestro.FechaCargo;
-            valoresFormatoMto[43] = maestro.CodigoOperacion;
-            valoresFormatoMto[44] = maestro.TipoOperacion;
-
-            CargarContenidoFormato(
-                maestro.ContenidoFormato,
-                valoresFormatoMto,
-                folio);
-        }
-
-        private static void CargarValoresFormatoDetalle(
-        PaPTefDetalleCmsDto detalle,
-        object[] valoresFormato,
-        string folio)
-        {
-            if (detalle == null)
-            {
-                return;
-            }
-
-            valoresFormato[19] = "TEF";
-            valoresFormato[20] = detalle.IdFormato;
-            valoresFormato[21] = detalle.Cdl;
-            valoresFormato[22] = detalle.IdCuenta;
-            valoresFormato[23] = detalle.FechaCaptura;
-            valoresFormato[24] = detalle.IdUsuarioCaptura;
-            valoresFormato[25] = detalle.FechaAutorizacion;
-            valoresFormato[26] = detalle.IdUsuarioAutorizo;
-            valoresFormato[27] = detalle.MontoOperacion;
-            valoresFormato[28] = detalle.IdPlantilla;
-            valoresFormato[29] = detalle.IdFormatoPlantilla;
-            valoresFormato[30] = detalle.IdFilesBtmum;
-            valoresFormato[31] = detalle.NoPagos;
-            valoresFormato[32] = detalle.PagosDescripcion;
-            valoresFormato[33] = detalle.NoPagosProcesados;
-            valoresFormato[34] = detalle.NoPagosDevueltos;
-            valoresFormato[35] = detalle.IdFormatoPap;
-            valoresFormato[36] = detalle.Ref1;
-            valoresFormato[37] = detalle.Ref2;
-            valoresFormato[38] = detalle.Ref3;
-            valoresFormato[39] = detalle.Ref4;
-            valoresFormato[40] = detalle.Ref5;
-            valoresFormato[41] = detalle.FechaAplicacion;
-            valoresFormato[42] = detalle.FechaCargo;
-            valoresFormato[43] = detalle.CodigoOperacion;
-            valoresFormato[44] = detalle.TipoOperacion;
-
-            CargarContenidoFormato(
-                detalle.ContenidoFormato,
-                valoresFormato,
-                folio);
-        }
-
-
-    }
-}
-
-using Aplicacion.DTOs.SAT;
-using Aplicacion.Interfaces.SAT;
-using Aplicacion.Modelos;
-using Aplicacion.Modelos.SAT;
-using MUFG_T24.Comunes;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    public class SAT
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly ISATCmsDao _satCmsDao;
-        private readonly ISATTomiDao _satTomiDao;
-        private readonly ConexionT24Mw _vwT24;
-
-        private const string tipoOperacion = "SAT";
-        private string folioUnico = string.Empty;
-
-        public SAT(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            ISATCmsDao satCmsDao,
-            ISATTomiDao satTomiDao,
-            ConexionT24Mw vwT24)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _satCmsDao = satCmsDao;
-            _satTomiDao = satTomiDao;
-            _vwT24 = vwT24;
-        }
-
-        public async Task<bool> ProcesOperacion(string lsFolio)
-        {
-            string subTipo = string.Empty;
-            string fechaEjecucion = _configuracion.StrFechaSistema;
-            string moneda = _vwT24.MonedaDefaultMN;
-            decimal importe = 0;
-            string numCliente = string.Empty;
-            string nombreCliente = string.Empty;
-            string numCuenta = string.Empty;
-            int idFormato = 0;
-
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = lsFolio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-
-            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
-                return false;
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexión a base de datos del CMS.");
-
-            SAT_DTO datosCms = await _satCmsDao.ObtenerFormatoSatPorFolio(lsFolio);
-            if (datosCms != null)
-            {
-                idFormato = Convert.ToInt32(datosCms.TipoFormato);
-
-                switch (idFormato)
-                {
-                    case 5:
-                        subTipo = "EJE - Del Ejercicio";
-                        break;
-                    case 6:
-                        subTipo = "PRV - Provisionales";
-                        break;
-                    case 9:
-                        subTipo = "SAT";
-                        break;
-                    case 10:
-                        subTipo = "DPA - Derecho Producto Aprovechamiento";
-                        break;
-                    case 13:
-                        subTipo = "DRE - Depósito Referenciado";
-                        break;
-                }
-
-                importe = datosCms.MontoOperacion;
-                numCliente = datosCms.Cdl.ToString();
-                numCuenta = datosCms.Id_cuenta.ToString();
-            }
-
-            Config.EscribirLog($"INFO|SAT.procesaOperacion|Numero Cliente:{numCliente}");
-
-            SAT_HdClientes_DTO cliente = await _satTomiDao.ObtenerNombreClientePorCdl(numCliente);
-            if (cliente != null)
-                nombreCliente = cliente.Satm02nom;
-
-            folioUnico = await _vwT24.GeneraFolioUnico(
-                tipoOperacion,
-                ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
-                lsFolio);
-
-            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
-            {
-                Config.EscribirLog("INFO|SAT.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = lsFolio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                await _satTomiDao.ActualizarPlanTrabajoMaestroLectura(
-                    lsFolio,
-                    tipoOperacion,
-                    folioUnico,
-                    subTipo,
-                    fechaEjecucion,
-                    moneda,
-                    importe,
-                    numCliente,
-                    nombreCliente,
-                    numCuenta);
-
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-
-                {
-
-                    Folio = lsFolio,
-
-                    TipoOperacion = tipoOperacion,
-
-                    Servicio = _configuracion.NombreServicio,
-
-                    NombreProceso = _configuracion.NombreProceso,
-
-                    AliasProceso = _configuracion.AliasProceso,
-
-                    PId = _configuracion.Pid.Value
-
-                });
-
-
-                _configuracion.AliasProceso =
-
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-
-                    {
-
-                        Folio = lsFolio,
-
-                        TipoOperacion = tipoOperacion,
-
-                        Servicio = _configuracion.NombreServicio,
-
-                        NombreProceso = _configuracion.NombreProceso,
-
-                        AliasProceso = _configuracion.AliasProceso,
-
-                        PId = _configuracion.Pid.Value
-
-                    });
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
-            {
-                bool procesado = false;
-                bool resultado = false;
-                int resultadoValidacion = 0;
-                SAT_DatosRegresoModelo datosRegreso = null;
-
-                Config.EscribirLog("INFO|SAT.procesaOperacion|A insertar datos de CMS a TOMI.");
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = lsFolio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                if (idFormato == 5 || idFormato == 6 || idFormato == 9 || idFormato == 10)
-                    Config.EscribirLog("INFO|SAT.procesaOperacion|A calcular y crear el sello digital de la operación.");
-
-                datosRegreso = await _satTomiDao.ProcesarCmsATomi(lsFolio, idFormato, folioUnico);
-
-                if (datosRegreso != null && datosRegreso.Resultado)
-                {
-                    resultado = true;
-                }
-                else
-                {
-                    int numRegs = await _satTomiDao.ContarTombinCmsSatPorFolio(lsFolio);
-                    if (numRegs > 0)
-                    {
-                        resultado = true;
-                        if (datosRegreso == null)
-                        {
-                            datosRegreso = new SAT_DatosRegresoModelo
-                            {
-                                Resultado = true,
-                                ResultadoValidacion = 0,
-                                ValoresRegreso = new SAT_ValoresFormato_Modelo()
-                            };
-                        }
-                        else
-                        {
-                            datosRegreso.Resultado = true;
-                            datosRegreso.ResultadoValidacion = 0;
-                            if (datosRegreso.ValoresRegreso == null)
-                                datosRegreso.ValoresRegreso = new SAT_ValoresFormato_Modelo();
-                        }
-                        Config.EscribirLog("INFO|SAT.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                    }
-                }
-
-                if (resultado)
-                {
-                    resultadoValidacion = datosRegreso?.ResultadoValidacion ?? 0;
-
-                    if (resultadoValidacion == 1)
-                    {
-                        await _satCmsDao.ActualizarFormatoRechazado(lsFolio);
-                        await _satTomiDao.ActualizarTombinFormatoRechazado(lsFolio);
-
-                        Config.EscribirLog("INFO|SAT.procesaOperacion|A cancelar la operación.");
-                        await _satTomiDao.CancelarPlanTrabajoInvalida(lsFolio, tipoOperacion, fechaEjecucion, moneda, importe);
-                    }
-                    else if (resultadoValidacion == 0)
-                    {
-                        if (idFormato == 5 || idFormato == 6 || idFormato == 9 || idFormato == 10)
-                        {
-                            string columna10017 = string.Empty;
-                            string columna40002 = string.Empty;
-                            string columna20005 = string.Empty;
-
-                            string[] xmlDetalle = (datosRegreso.ValoresRegreso?.ArchivoSat ?? string.Empty).Split('|');
-                            foreach (string item in xmlDetalle)
-                            {
-                                string[] matriz = item.Split('=');
-                                if (matriz.Length < 2)
-                                    continue;
-
-                                if (matriz[0] == "10017") columna10017 = matriz[1];
-                                if (matriz[0] == "40002") columna40002 = matriz[1];
-                                if (matriz[0] == "20005") columna20005 = matriz[1];
-                            }
-
-                            if (decimal.TryParse(columna10017, out decimal montoDeclaracion) && montoDeclaracion == 0)
-                            {
-                                await _satCmsDao.ActualizarFormatoAceptadoConSello(
-                                    lsFolio,
-                                    datosRegreso.ValoresRegreso?.CadenaOriginal ?? string.Empty,
-                                    datosRegreso.ValoresRegreso?.SelloDigital ?? string.Empty,
-                                    datosRegreso.ValoresRegreso?.LLavePago ?? string.Empty);
-
-                                await _satTomiDao.ActualizarTombinFormatoProcesado(lsFolio);
-
-                                await _controlServicio.TerminaProceso(new ProcesoDTO
-                                {
-                                    Folio = lsFolio,
-                                    TipoOperacion = tipoOperacion,
-                                    Servicio = _configuracion.NombreServicio,
-                                    NombreProceso = _configuracion.NombreProceso,
-                                    AliasProceso = _configuracion.AliasProceso,
-                                    PId = _configuracion.Pid.Value
-                                });
-                                await _satTomiDao.MarcarPlanTrabajoProcesadaYDetalleTerminado(lsFolio, tipoOperacion);
-                                return true;
-                            }
-                            else
-                            {
-                                bool mismaFecha = string.Equals(columna40002, columna20005, StringComparison.Ordinal);
-                                await _satCmsDao.ActualizarFormatoPendienteDebito(
-                                    lsFolio,
-                                    mismaFecha ? "APFT" : "REPE",
-                                    datosRegreso.ValoresRegreso?.LLavePago);
-
-                                if (mismaFecha)
-                                    await _satTomiDao.ActualizarTombinFormatoConp(lsFolio);
-                                else
-                                    await _satTomiDao.ActualizarTombinFormatoConf(lsFolio);
-                            }
-                        }
-                        else if (idFormato == 13)
-                        {
-                            bool mismaFecha = string.Equals(
-                                datosRegreso.ValoresRegreso?.FechaPresentacion,
-                                datosRegreso.ValoresRegreso?.FechaRecaudacion,
-                                StringComparison.Ordinal);
-
-                            await _satCmsDao.ActualizarFormatoPendienteDebito(
-                                lsFolio,
-                                mismaFecha ? "APFT" : "REPE",
-                                null);
-
-                            if (mismaFecha)
-                                await _satTomiDao.ActualizarTombinFormatoConp(lsFolio);
-                            else
-                                await _satTomiDao.ActualizarTombinFormatoConf(lsFolio);
-                        }
-                    }
-                }
-
-                if (resultado)
-                {
-                    procesado = true;
-                    Config.EscribirLog("INFO|SAT.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
-                }
-
-                if (!procesado)
-                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {lsFolio}");
-
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-
-                {
-
-                    Folio = lsFolio,
-
-                    TipoOperacion = tipoOperacion,
-
-                    Servicio = _configuracion.NombreServicio,
-
-                    NombreProceso = _configuracion.NombreProceso,
-
-                    AliasProceso = _configuracion.AliasProceso,
-
-                    PId = _configuracion.Pid.Value
-
-                });
-
-
-                _configuracion.AliasProceso =
-
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-
-                    {
-
-                        Folio = lsFolio,
-
-                        TipoOperacion = tipoOperacion,
-
-                        Servicio = _configuracion.NombreServicio,
-
-                        NombreProceso = _configuracion.NombreProceso,
-
-                        AliasProceso = _configuracion.AliasProceso,
-
-                        PId = _configuracion.Pid.Value
-
-                    });
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
-            {
-                Config.EscribirLog("INFO|SAT.procesaOperacion|A actualizar estatus en CMS y TOMI.");
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = lsFolio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-                Config.EscribirLog("INFO|SAT.procesaOperacion|Operación fecha valor hoy.");
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = lsFolio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = lsFolio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
-            {
-                string mensajeError = string.Empty;
-
-                Config.EscribirLog("INFO|SAT.procesaOperacion|A conciliar operaciones entre CMS y TOMI.");
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = lsFolio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                int regsCms = 1;
-                int regsTomi = 0;
-                decimal importeTomi = 0;
-                string fechaTomi = string.Empty;
-
-                SAT_Tombin_CMS_Modelo datosTomi = await _satTomiDao.ObtenerDatosConciliacion(lsFolio);
-                if (datosTomi != null)
-                {
-                    regsTomi = 1;
-                    importeTomi = datosTomi.T24_DEBIT_AMOUNT;
-                    fechaTomi = datosTomi.NF_FECHA_EJECUCION;
-                }
-
-                if (regsCms == 1 && regsTomi == 1)
-                {
-                    if (importe != importeTomi)
-                        mensajeError += $" - Diferencia en el importe. CMS='{importe}', TOMI='{importeTomi}'.";
-                }
-                else
-                {
-                    mensajeError += " - No se ha registrado la operación en TOMI.";
-                }
-
-                if (!string.IsNullOrEmpty(mensajeError))
-                    throw new Exception(mensajeError);
-
-                if (!string.IsNullOrEmpty(fechaTomi) && !string.Equals(fechaTomi, _configuracion.StrFechaSistema, StringComparison.Ordinal))
-                {
-                    Config.EscribirLog($"INFO|SAT.procesaOperacion|Se actualiza la fecha de la operación al '{fechaTomi}'.");
-                    await _satTomiDao.MarcarPlanTrabajoFechaFutura(lsFolio, tipoOperacion, fechaTomi);
-                }
-
-                Config.EscribirLog("INFO|SAT.procesaOperacion|La operación está correctamente conciliada.");
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = lsFolio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-                _configuracion.AliasProceso = string.Empty;
-            }
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Cerrando conexión a base de datos del CMS.");
-            return true;
-        }
-    }
-}
-
-using Aplicacion.DTOs.SER;
-using Aplicacion.Interfaces.SER;
-using Aplicacion.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    /// <summary>
-    /// Representa SER.
-    /// </summary>
-    public class SER
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly ISERTomiDao _tomiDao;
-        private readonly ISERCmsDao _cmsDao;
-        private readonly ConexionT24Mw _vwT24;
-
-        private const string tipoOperacion = "SER";
-
-        private string folioUnico = string.Empty;
-        /// <summary>
-        /// Inicializa una nueva instancia de la clase SER.
-        /// </summary>
-
-        public SER(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            ISERTomiDao tomiDao,
-            ISERCmsDao cmsDao,
-            ConexionT24Mw vwT24)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _tomiDao = tomiDao;
-            _cmsDao = cmsDao;
-            _vwT24 = vwT24;
-        }
-        /// <summary>
-        /// Ejecuta la operaciÃ³n public.
-        /// </summary>
-
-        public async Task<bool> procesaOperacion(string folio)
-        {
-            string fechaEjecucion = string.Empty;
-            string moneda = string.Empty;
-            decimal importe = 0;
-
-            bool fechaFutura;
-            bool conEntradaSalida = true;
-            bool procesado;
-            bool resultado;
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Iniciando");
-
-            _configuracion.AliasProceso =
-                await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
-                return false;
-
-            long folioNumerico = Convert.ToInt64(folio);
-
-            var formatoCms = await _cmsDao.ObtenerFormatoCmsPorFolio(folioNumerico.ToString());
-
-            if (formatoCms == null)
-                formatoCms = new SerFormatoCmsDto();
-
-            object[] valoresFormato = CargarValoresFormato(formatoCms, folio);
-
-            fechaEjecucion = ConversionHelper.Texto(valoresFormato[13]);
-
-            if (!string.IsNullOrWhiteSpace(ConversionHelper.Texto(valoresFormato[4])))
-                moneda = _vwT24.ValidaMoneda(ConversionHelper.Texto(valoresFormato[4]));
-
-            importe = formatoCms.OperatingAmount;
-            /// <summary>
-            /// Ejecuta la operaciÃ³n ValidarMontosOperacion.
-            /// </summary>
-
-            ValidarMontosOperacion(valoresFormato, importe);
-
-            Config.EscribirLog(
-                $"INFO|{tipoOperacion}.procesaOperacion|Veamos que trae la fecha{valoresFormato[13]}-----{fechaEjecucion}");
-
-            int fechaSistema = int.Parse(_configuracion.StrFechaSistema, CultureInfo.InvariantCulture);
-            int intFechaEjecucion = int.Parse(fechaEjecucion, CultureInfo.InvariantCulture);
-            if (intFechaEjecucion < fechaSistema)
-            {
-                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
-                throw new Exception(
-                    $"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-            }
-
-            folioUnico = await _vwT24.GeneraFolioUnico(
-                tipoOperacion,
-                ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
-                folio);
-
-            fechaFutura = fechaEjecucion.CompareTo(_configuracion.StrFechaSistema) > 0;
-
-            // DATOS_GRAL
-            if (_configuracion.AliasProceso == "DATOS_GRAL")
-            {
-                string subtipo = string.Empty;
-
-                Config.EscribirLog(
-                    $"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                var dto = new SerActualizarPlanTrabajoMaestroDto
-                {
-                    Folio = folioNumerico,
-                    FolioUnico = folioUnico,
-                    FechaValor = ConversionHelper.ConvertirNullableIntConDecimal(fechaEjecucion),
-                    CveMoneda = moneda,
-                    Importe = importe,
-                    NumCliente = ConversionHelper.ConvertirNullableIntConDecimal(valoresFormato[29]),
-                    NombreCliente = ConversionHelper.Texto(valoresFormato[1]),
-                    NumCuenta = ConversionHelper.Texto(valoresFormato[30]),
-                    SubtipoOperacion = subtipo
-                };
-
-                resultado = await _tomiDao.ActualizarPlanTrabajoMaestroLectura(dto);
-
-                if (!resultado)
-                    throw new Exception($"Error en procesamiento de registro DATOS_GRAL con folio: {folio}");
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            // CMS_A_TOMI
-            if (_configuracion.AliasProceso == "CMS_A_TOMI")
-            {
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A insertar datos de CMS a TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                procesado = false;
-
-                resultado = await CMS_A_TOMI(folio, valoresFormato);
-
-                if (resultado)
-                {
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
-                    procesado = true;
-                }
-                else
-                {
-                    int count = await _tomiDao.ContarSerPayPorFolio(folioNumerico.ToString());
-
-                    if (count > 0)
-                    {
-                        procesado = true;
-
-                        Config.EscribirLog(
-                            $"INFO|{tipoOperacion}.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                    }
-                }
-
-                if (!procesado)
-                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {folio}");
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            // TOMI_ENTRADAS/SALIDAS
-            if (_configuracion.AliasProceso == "TOMI_ENTRADAS/SALIDAS")
-            {
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A insertar datos de Entrada/Salida en TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                if (conEntradaSalida)
-                {
-                    procesado = false;
-
-                    resultado = await TOMI_ENTRADA_SALIDA(folio);
-
-                    if (resultado)
-                    {
-                        procesado = true;
-
-                        Config.EscribirLog(
-                            $"INFO|{tipoOperacion}.procesaOperacion|Se insertó correctamente el folio en base de Entrada/Salida.");
-                    }
-                    else
-                    {
-                        int count = await _tomiDao.ContarEntradaSalidaPorReferencia(folioUnico);
-
-                        if (count > 0)
-                        {
-                            procesado = true;
-
-                            Config.EscribirLog(
-                                $"INFO|{tipoOperacion}.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
-                        }
-                    }
-                }
-                else
-                {
-                    procesado = true;
-
-                    Config.EscribirLog(
-                        $"INFO|{tipoOperacion}.procesaOperacion|La operación no debe generar Entrada/Salida en TOMI.");
-                }
-
-                if (!procesado)
-                    throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            // CAMBIO_ESTATUS
-            if (_configuracion.AliasProceso == "CAMBIO_ESTATUS")
-            {
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A actualizar estatus en CMS y TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                procesado = true;
-
-                if (fechaEjecucion == _configuracion.StrFechaSistema)
-                {
-                    await _cmsDao.ActualizarFormatoCmsAceptado(folioNumerico.ToString());
-
-                    await _tomiDao.ActualizarSerPayAceptado(
-                        folioNumerico.ToString(),
-                        DateTime.Now);
-
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Operación fecha valor hoy.");
-                }
-                else if (fechaEjecucion.CompareTo(_configuracion.StrFechaSistema) < 0)
-                {
-                    await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio, CultureInfo.InvariantCulture));
-                    throw new Exception(
-                        $"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-                }
-                else
-                {
-                    await _cmsDao.ActualizarFormatoCmsPendienteEjecucion(folioNumerico.ToString());
-
-                    DateTime fechaConfirma = DateTime.ParseExact(
-                        DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                        "yyyy/MM/dd HH:mm",
-                        CultureInfo.InvariantCulture);
-
-                    await _tomiDao.ActualizarSerPayFechaFutura(
-                        folioNumerico.ToString(),
-                        fechaConfirma);
-
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Operación fecha valor fútura.");
-                }
-
-                if (!procesado)
-                    throw new Exception($"Error en procesamiento de registro CAMBIO_ESTATUS con folio: {folio}");
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            // CONCILIAR
-            if (_configuracion.AliasProceso == "CONCILIAR")
-            {
-                string error = string.Empty;
-
-                int regsCms = 1;
-                int regsTomi = 0;
-                int regsEntSal = 0;
-
-                string fechaEjecucionTomi = string.Empty;
-                string monedaTomi = string.Empty;
-                decimal importeTomi = 0;
-
-                string fechaEjecucionEntSal = string.Empty;
-                string monedaEntSal = string.Empty;
-                decimal importeEntSal = 0;
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|A conciliar operaciones entre CMS y TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                var datosTomi = await _tomiDao.ObtenerSerPayConciliacionPorFolio(folioNumerico.ToString());
-
-                if (datosTomi != null)
-                {
-                    regsTomi = 1;
-
-                    fechaEjecucionTomi =
-                        datosTomi.NfFechaEjecucion.HasValue
-                            ? datosTomi.NfFechaEjecucion.Value.ToString("0")
-                            : string.Empty;
-
-                    monedaTomi =
-                        !string.IsNullOrWhiteSpace(datosTomi.T24Currency)
-                            ? _vwT24.ValidaMoneda(datosTomi.T24Currency)
-                            : string.Empty;
-
-                    importeTomi = datosTomi.T24Amount ?? 0;
-                }
-
-                if (conEntradaSalida)
-                {
-                    var datosEntSal =
-                        await _tomiDao.ObtenerEntradaSalidaConciliacionPorReferencia(folioUnico);
-
-                    if (datosEntSal != null)
-                    {
-                        regsEntSal = 1;
-
-                        fechaEjecucionEntSal =
-                            datosEntSal.EntFechaValor.HasValue
-                                ? datosEntSal.EntFechaValor.Value.ToString("yyyyMMdd")
-                                : string.Empty;
-
-                        monedaEntSal =
-                            !string.IsNullOrWhiteSpace(datosEntSal.EntMonedaCuenta)
-                                ? _vwT24.ValidaMoneda(datosEntSal.EntMonedaCuenta)
-                                : string.Empty;
-
-                        importeEntSal = datosEntSal.EntImporte;
-                    }
-                }
-
-                if (regsCms == 1 &&
-                    regsTomi == 1 &&
-                    ((conEntradaSalida && regsEntSal == 1) || !conEntradaSalida))
-                {
-                    if (fechaEjecucion != fechaEjecucionTomi)
-                        error += Environment.NewLine + $" - Diferencia en la fecha de ejecución. CMS='{fechaEjecucion}', TOMI='{fechaEjecucionTomi}'.";
-
-                    if (moneda != monedaTomi)
-                        error += Environment.NewLine + $" - Diferencia en la monedas. CMS='{moneda}', TOMI='{monedaTomi}'.";
-
-                    if (importe != importeTomi)
-                        error += Environment.NewLine + $" - Diferencia en el importe. CMS='{importe}', TOMI='{importeTomi}'.";
-
-                    if (conEntradaSalida)
-                    {
-                        if (fechaEjecucion != fechaEjecucionEntSal)
-                            error += Environment.NewLine + $" - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='{fechaEjecucion}', TOMI='{fechaEjecucionEntSal}'.";
-
-                        if (moneda != monedaEntSal)
-                            error += Environment.NewLine + $" - Diferencia en la monedas de Entrada/Salida. CMS='{moneda}', TOMI='{monedaEntSal}'.";
-
-                        if (importe != importeEntSal)
-                            error += Environment.NewLine + $" - Diferencia en el importe de Entrada/Salida. CMS='{importe}', Entrada/Salida='{importeEntSal}'.";
-                    }
-
-                    procesado = true;
-                }
-                else
-                {
-                    procesado = false;
-                    error += Environment.NewLine + " - No se ha registrado la operación en TOMI.";
-                }
-
-                if (!string.IsNullOrEmpty(error))
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception(error);
-
-                if (!procesado)
-                    throw new Exception($"Error en procesamiento de registro CONCILIAR con folio: {folio}");
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación está correctamente conciliada.");
-
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso = string.Empty;
-            }
-
-            return true;
-        }
-
-        private async Task<bool> CMS_A_TOMI(string folio, object[] valoresFormato)
-        {
-            try
-            {
-                var dto = new SerInsertarSerPayDto
-                {
-                    NfTipo = ConversionHelper.Texto(valoresFormato[27]),
-                    NfFolio = Convert.ToInt64(valoresFormato[28]),
-
-                    T24CustomerCode = ConversionHelper.Texto(valoresFormato[29]),
-                    T24ShortName = ConversionHelper.Texto(valoresFormato[1]),
-
-                    NfEstatus = "PEND",
-
-                    NfUsuarioCaptura = ConversionHelper.Texto(valoresFormato[32]),
-                    NfUsuarioAutoriza = ConversionHelper.Texto(valoresFormato[34]),
-
-                    NfFechaCaptura = ConversionHelper.TryParseNullableDateTime(valoresFormato[31]),
-                    NfFechaAutoriza = ConversionHelper.TryParseNullableDateTime(valoresFormato[33]),
-
-                    NfFechaEjecucion = ConversionHelper.ConvertirNullableIntConDecimal(valoresFormato[13]),
-
-                    T24BenCustName = ConversionHelper.Texto(valoresFormato[10]),
-                    T24NoAgreement = ConversionHelper.Texto(valoresFormato[19]),
-                    T24Currency = ConversionHelper.Texto(valoresFormato[4]),
-                    T24Reference = ConversionHelper.Texto(valoresFormato[20]),
-
-                    T24Amount = ConversionHelper.TryParseNullableDecimal(valoresFormato[35]),
-
-                    T24Concept = ConversionHelper.Texto(valoresFormato[15]),
-                    T24AcctNo = ConversionHelper.Texto(valoresFormato[30]),
-
-                    NfMontoEnviar = ConversionHelper.TryParseNullableDecimal(valoresFormato[18]),
-                    NfFolioUnico = folioUnico,
-
-                    IdFormatoPlantilla = ConversionHelper.ConvertirNullableLongConDecimal(valoresFormato[37]),
-
-                    NfTipoCuenta = ConversionHelper.Texto(valoresFormato[8]),
-
-                    IdPlantilla = ConversionHelper.Texto(valoresFormato[36])
-                };
-
-                bool resultado = await _tomiDao.InsertarSerPayDesdeCms(dto);
-
-                Config.EscribirLog($"INFO|{tipoOperacion}.CMS_A_TOMI|Resultado={resultado}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog(
-                    $"ERROR|{tipoOperacion}.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
-
-                throw;
-            }
-        }
-
-        private async Task<bool> TOMI_ENTRADA_SALIDA(string folio)
-        {
-            try
-            {
-                long folioNumerico = Convert.ToInt64(folio);
-
-                var serPay = await _tomiDao.ObtenerSerPayParaEntradaSalida(folioNumerico.ToString());
-
-                if (serPay == null)
+                TefEntradaSalidaOrigenTomiDto datos = await _tefDao.ObtenerEntradaSalidaOrigenPorFolio(folio);
+                if (datos is null)
                     return false;
 
-                var dto = new SerInsertarEntradaSalidaDto
+                TefInsertarEntradaSalidaTomiDto dto = new TefInsertarEntradaSalidaTomiDto
                 {
-                    Referencia = serPay.NfFolioUnico,
-
-                    NumCliente = ConversionHelper.ConvertirDecimalOrDefault(serPay.T24CustomerCode),
-                    Cdl = ConversionHelper.ConvertirDecimalOrDefault(serPay.T24CustomerCode),
-
-                    Ordenante = ConversionHelper.Texto(serPay.T24CompanyName),
-
-                    Operacion = 218,
-                    OperacionDesc = "Salida  (TTS)",
-
-                    Tipo = "D",
-                    TipoDesc = "Doméstica",
-
-                    Cuenta = ConversionHelper.TryParseNullableDecimal(serPay.T24AcctNo),
-                    Nombre = ConversionHelper.Texto(serPay.NfNombreCuenta),
-                    CuentaMoneda = _vwT24.ValidaMoneda(serPay.NfMonedaCuenta),
-
-                    Via = 800,
-                    ViaDesc = "TRF ENVIADA MXN SER",
-
-                    Importe = serPay.T24Amount ?? 0,
-                    Saldo = 0,
-
-                    Comentarios = ConversionHelper.Texto(serPay.T24Concept),
-
-                    FechaCaptura = ConversionHelper.TextoToFechaTryParsePartes(_configuracion.StrFechaSistema),
-                    FechaValor = ConversionHelper.TextoToFechaTryParsePartes(
-                        serPay.NfFechaEjecucion.HasValue
-                            ? serPay.NfFechaEjecucion.Value.ToString("0")
-                            : string.Empty),
-
-                    Hora = DateTime.Now.ToLongTimeString(),
-                    Capturista = "JEAI",
-
-                    Fad = 0,
-
-                    ReferenciaControl = "A",
-                    ReferenciaControlCont = 0
+                    EntReferencia = datos.NfFolioUnico,
+                    EntCliente = ConversionHelper.ConvertirDecimalRequerido(datos.T24CustomerCode, "T24_CUSTOMER_CODE"),
+                    EntCdl = ConversionHelper.ConvertirDecimalRequerido(datos.T24CustomerCode, "T24_CUSTOMER_CODE"),
+                    EntOrdenante = datos.T24CompanyName,
+                    EntOperacion = 218m,
+                    EntOperacionDesc = "Salida  (TTS)",
+                    EntTipo = "D",
+                    EntTipoDesc = "TEF Doméstica",
+                    EntViaPago = 60m,
+                    EntViaPagoDesc = "TRF ENVIADA MXN TEF",
+                    EntImporte = datos.T24DebitAmount ?? 0m,
+                    EntSaldo = 0m,
+                    EntComentarios = datos.T24DebitTheirRef,
+                    EntFechaCaptura = ConversionHelper.TextoToFechaNullable(_configuracion.StrFechaSistema),
+                    EntFechaValor = ConversionHelper.TextoToFechaNullable(datos.NfFechaEjecucion?.ToString(CultureInfo.InvariantCulture)),
+                    EntHora = DateTime.Now.ToLongTimeString(),
+                    EntCaptura = "JEAI",
+                    EntFad = 0m,
+                    EntReferenciaControl = "A",
+                    EntReferenciaControlCont = 0
                 };
 
-                bool resultado = await _tomiDao.InsertarEntradaSalida(dto);
+                if (string.IsNullOrEmpty(datos.NfForexRelacionado))
+                {
+                    dto.EntCuenta = ConversionHelper.ConvertirDecimalRequerido(datos.T24DebitAcctNo, "T24_DEBIT_ACCT_NO");
+                    dto.EntNombreCuenta = datos.NfNombreCuenta;
+                    dto.EntMonedaCuenta = _vwT24.ValidaMoneda(datos.NfMonedaCuenta);
+                }
+                else
+                {
+                    var cuentasFad = await _vwT24.ObtieneDatosCuentasFad();  // catálogo FAD 
+                    string cuentaFadEsperada = cuentasFad
+                        ?.Find(x => string.Equals(x.Moneda, _vwT24.MonedaDefaultMN, StringComparison.Ordinal))
+                        ?.Cuenta;
 
-                Config.EscribirLog($"INFO|{tipoOperacion}.TOMI_ENTRADA_SALIDA|Resultado={resultado}.");
+                    dto.EntCuenta = ConversionHelper.ConvertirDecimalRequerido(cuentaFadEsperada, "T24_FAD_Account");
+                    dto.EntNombreCuenta = "BTMM MXN FAD";
+                    dto.EntMonedaCuenta = _vwT24.MonedaDefaultMN;
+                }
 
-                return resultado;
+                bool insertado = await _tefDao.InsertarEntradaSalida(dto);
+
+                Config.EscribirLog($"INFO|TEF.TOMI_ENTRADA_SALIDA|Salida={(insertado ? 0 : 1)}.");
+
+                return insertado;
             }
             catch (Exception ex)
             {
-                Config.EscribirLog(
-                    $"ERROR|{tipoOperacion}.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}. Trace: {ex}");
-
-                throw;
+                Config.EscribirLog($"ERROR|TEF.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}.Trace:{ex}");
             }
+
+            return false;
         }
 
-        private object[] CargarValoresFormato(SerFormatoCmsDto formatoCms, string folio)
+        /// <summary>
+        /// Compara dos montos decimales para determinar si son iguales.
+        /// </summary>
+        /// <param name="valorA"></param>
+        /// <param name="valorB"></param>
+        /// <returns></returns>
+        private static bool CompararMontos(object valorA, object valorB)
         {
-            object[] valoresFormato = new object[38];
+            decimal montoA = ConversionHelper.ConvertirDecimalRequerido(valorA, "MontoA");
+            decimal montoB = ConversionHelper.ConvertirDecimalRequerido(valorB, "MontoB");
 
-            valoresFormato[27] = tipoOperacion;
-            valoresFormato[28] = formatoCms.IdFormat;
-            valoresFormato[29] = formatoCms.Cdl;
-            valoresFormato[30] = formatoCms.IdAccount;
-            valoresFormato[31] = formatoCms.CaptureDate;
-            valoresFormato[32] = formatoCms.IdUserCapture;
-            valoresFormato[33] = formatoCms.AuthorizationDate;
-            valoresFormato[34] = formatoCms.IdAuthorizationUser;
-            valoresFormato[35] = formatoCms.OperatingAmount;
-            valoresFormato[36] = formatoCms.IdTemplate;
-            valoresFormato[37] = formatoCms.IdTemplateFormat;
-
-            string[] valoresPipes =
-                ConversionHelper.Texto(formatoCms.ContentFormat)
-                    .Split(new[] { '|' }, StringSplitOptions.None);
-
-            if (valoresPipes.Length < 28)
-            {
-                throw new Exception(
-                    $"El contenidoFormato del folio {folio} es diferente al esperado, debe ser 27 datos y se tienen {valoresPipes.Length - 1}.");
-            }
-
-            for (int i = 0; i <= 26; i++)
-            {
-                string[] llaveValor =
-                    valoresPipes[i].Split(new[] { '=' }, 2, StringSplitOptions.None);
-
-                valoresFormato[i] = llaveValor[1];
-            }
-
-            return valoresFormato;
+            return montoA == montoB;
         }
 
-        private void ValidarMontosOperacion(object[] valoresFormato, decimal operatingAmount)
-        {
-            decimal montoCapturado = ConversionHelper.ConvertirDecimalOrDefault(valoresFormato[5]);
-            decimal montoEnviado = ConversionHelper.ConvertirDecimalOrDefault(valoresFormato[18]);
-            decimal montoOperacion = operatingAmount;
-
-            if (montoCapturado != montoEnviado || montoCapturado != montoOperacion)
-            {
-                throw new Exception(
-                    $"Hay diferencias entre los montos de la operación: MontoOperacion={montoOperacion}, MontoCapturado={montoCapturado}, MontoEnviado={montoEnviado}.");
-            }
-        }
     }
 }
 
-using Aplicacion.DTOs.SPID;
-using Aplicacion.Interfaces.FirmaElectronica;
-using Aplicacion.Interfaces.SPID;
+using Aplicacion.Interfaces.TEF;
 using Aplicacion.Modelos;
-using Aplicacion.Modelos.SPID;
-using Aplicacion.Servicios.FirmaElectronica;
 using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
 using MUFG_T24.Interfaces_utilidades;
 using MUFG_T24.Modelos;
 using MUFG_T24.Repositorios;
 using System;
 using System.Globalization;
-using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace Aplicacion.Servicios.Operaciones
 {
-    /// <summary>
-    /// Representa SPID.
-    /// </summary>
-    public class SPID
+    public class TEFGPH
     {
         private readonly ConfiguracionModelo _configuracion;
         private readonly IControlServicio _controlServicio;
-        private readonly ISPIDCmsDao _spidCmsDao;
-        private readonly ISPIDTomiDao _spidTomiDao;
-        private readonly ISpidVistasT24Dao _spidVistasT24Dao;
+        private readonly ITEFGphDao _tefGphDao;
         private readonly ConexionT24Mw _vwT24;
-        private readonly IComunSPID _comunSPID;
 
-        private const string tipoOperacion = "SPID";
+        private const string tipoOperacion = "TEF_GPH";
         private string folioUnico = string.Empty;
-        private string folioPropuesto = string.Empty;
-        /// <summary>
-        /// Inicializa una nueva instancia de la clase SPID.
-        /// </summary>
 
-        public SPID(
+        public TEFGPH(
             ConfiguracionModelo configuracion,
             IControlServicio controlServicio,
-            ISPIDCmsDao spidCmsDao,
-            ISPIDTomiDao spidTomiDao,
-            ISpidVistasT24Dao spidVistasT24Dao,
-            ConexionT24Mw vwT24,
-            IComunSPID comunSPID)
+            ITEFGphDao tefGphDao,
+            ConexionT24Mw vwT24)
         {
             _configuracion = configuracion;
             _controlServicio = controlServicio;
-            _spidCmsDao = spidCmsDao;
-            _spidTomiDao = spidTomiDao;
-            _spidVistasT24Dao = spidVistasT24Dao;
+            _tefGphDao = tefGphDao;
             _vwT24 = vwT24;
-            _comunSPID = comunSPID;
         }
-        /// <summary>
-        /// Ejecuta la operaciÃ³n public.
-        /// </summary>
 
-        public async Task<bool> ProcesaOperacion(string folio, CancellationToken ct = default(CancellationToken))
+        public async Task<bool> ProcesaOperacion(string folio)
         {
-            ct.ThrowIfCancellationRequested();
-
             _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
             {
                 Folio = folio,
@@ -5893,630 +869,14 @@ namespace Aplicacion.Servicios.Operaciones
             });
             if (string.IsNullOrEmpty(_configuracion.AliasProceso))
                 return false;
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Confirmando que el certificado se encuentre.");
-            using (var firma = new MetodosFirma(_configuracion))
-            {
-                if (!firma.CertificadoEncontrado())
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de SPID: No se encontro el certificado y/o llave para realizar la firma de la transacci├│n");
-            }
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexi├│n a base de datos del CMS.");
-
-            SPID_Formato_DTO formato = await _spidCmsDao.ObtenerFormatoPorFolio(folio);
-            if (formato == null)
-                throw new Exception($"No se encontr├│ formato SPID para folio {folio}");
-
-            string[] valoresPipes = (formato.ContenidoFormato ?? string.Empty).Split('|');
-            if (valoresPipes.Length - 1 < 18)
-                throw new Exception($"El contenidoFormato del folio {folio} es diferente al esperado, debe ser 18 datos y se tienen {valoresPipes.Length - 1}.");
-
-            object[] valoresFormato = new object[37];
-            for (int i = 0; i <= 18; i++)
-            {
-                string[] llaveValor = valoresPipes[i].Split('=');
-                if (llaveValor.Length < 2)
-                    throw new Exception($"El contenidoFormato del folio {folio} contiene un dato inv├ílido en la posici├│n {i}: '{valoresPipes[i]}'.");
-                valoresFormato[i] = llaveValor[1];
-            }
-
-            valoresFormato[19] = "SPD";
-            valoresFormato[20] = formato.Id_Formato;
-            valoresFormato[21] = formato.Cdl;
-            valoresFormato[22] = formato.Id_Cuenta;
-            valoresFormato[23] = formato.FechaCaptura;
-            valoresFormato[24] = formato.Id_UsuarioCaptura;
-            valoresFormato[25] = formato.Fecha_Autoriza;
-            valoresFormato[26] = formato.Id_UsuarioAutorizo;
-            valoresFormato[27] = formato.MontoOperacion;
-            valoresFormato[28] = formato.Id_Plantilla;
-            valoresFormato[29] = formato.Id_Formato_Plantilla;
-            valoresFormato[30] = formato.ClasificacionOper;
-            valoresFormato[31] = formato.RelacionComercial;
-            valoresFormato[32] = formato.ReferenciaNumerica;
-            valoresFormato[33] = formato.IPOrigen;
-
-            string folioForex = Convert.ToString(valoresFormato[3]);
-            string fechaEjecucion = Convert.ToString(valoresFormato[13]);
-            string moneda = _vwT24.ValidaMoneda(Convert.ToString(valoresFormato[4]));
-            decimal importe = formato.MontoOperacion;
-
-            if (!decimal.TryParse(Convert.ToString(valoresFormato[5]), out decimal montoCapturado))
-                montoCapturado = 0;
-            if (!decimal.TryParse(Convert.ToString(valoresFormato[18]), out decimal montoEnviado))
-                montoEnviado = 0;
-
-            if (montoCapturado != montoEnviado || montoCapturado != importe)
-                throw new Exception($"Hay diferencias entre los montos de la operaci├│n: MontoOperacion={importe}, MontoCapturado={montoCapturado}, MontoEnviado={montoEnviado}.");
-
-            if (string.CompareOrdinal(fechaEjecucion, _configuracion.StrFechaSistema) < 0)
-            {
-                await _controlServicio.MarcarErrorFechaPasada(ConversionHelper.ParseLongOrDefault(folio));
-                throw new Exception($"Se desea realizar una operaci├│n al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-            }
-
-            folioUnico = await _vwT24.GeneraFolioUnico(tipoOperacion, ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion), folio);
-            folioPropuesto = await _vwT24.GeneraFolioPresupuesto(
-                folioUnico,
-                ConversionHelper.ParseIntOrDefault(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion)),
-                tipoOperacion);
-
-            if (string.IsNullOrWhiteSpace(folioPropuesto))
-                /// <summary>
-                /// Ejecuta la operaciÃ³n Exception.
-                /// </summary>
-                throw new Exception("Error al obtener el folio propuesto de T24");
-
-            bool conForex = false;
-            bool forexCancelado = false;
-            bool conEntradaSalida = true;
-
-            if (!string.IsNullOrWhiteSpace(folioForex))
-            {
-                conForex = true;
-                if (decimal.TryParse(folioForex, out _))
-                    throw new Exception($"El Folio del Forex no es válido porque es numérico; se espera una referencia alfanumérica/external ref: {folioForex}");
-
-                SPID_ForexBancosFax_DTO statusForex = await _spidTomiDao.ObtenerStatusForexPorExternalRef(folioForex);
-                if (statusForex != null && string.Equals(statusForex.STATUSOPERACION, "CANCELADO", StringComparison.OrdinalIgnoreCase))
-                {
-                    forexCancelado = true;
-                    conEntradaSalida = false;
-                }
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
-            {
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                string subTipo = conForex ? $"FX:{folioForex}" : string.Empty;
-                await _spidTomiDao.ActualizarPlanTrabajoMaestroLectura(
-                    folio,
-                    tipoOperacion,
-                    folioUnico,
-                    fechaEjecucion,
-                    moneda,
-                    importe,
-                    Convert.ToString(valoresFormato[21]),
-                    Convert.ToString(valoresFormato[1]),
-                    Convert.ToString(valoresFormato[22]),
-                    subTipo);
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
-            {
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                SPID_InsertarFormatoModelo modelo = MapearInsertarFormato(valoresFormato);
-                modelo.NF_FOLIO_UNICO = folioUnico;
-
-                (string direccion, string codigoPostal) = await ObtenerDireccionInsight(Convert.ToString(valoresFormato[21]), folio, ct);
-                modelo.NF_ADDRESS = direccion;
-                modelo.NF_ZIP_CODE = codigoPostal;
-
-                bool procesado = await _spidTomiDao.InsertarFormatoDesdeCms(modelo);
-                if (!procesado)
-                {
-                    int numRegs = await _spidTomiDao.ContarTombinNfPorFolio(folio);
-                    procesado = numRegs > 0;
-                }
-
-                if (procesado)
-                {
-                    bool firma = await _comunSPID.GeneraFirmaDigitalSPID("tb_tombin_nf_spid", folio, folioPropuesto, null, null);
-                    if (!firma)
-                        throw new Exception($"Se present├│ un error al generar la firma digital del folio: {folio}");
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso =
-                        await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                        {
-                            Folio = folio,
-                            TipoOperacion = tipoOperacion,
-                            Servicio = _configuracion.NombreServicio,
-                            NombreProceso = _configuracion.NombreProceso,
-                            AliasProceso = _configuracion.AliasProceso,
-                            PId = _configuracion.Pid.Value
-                        });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {folio}");
-                }
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "TOMI_ENTRADAS/SALIDAS", StringComparison.Ordinal))
-            {
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                bool procesado;
-                if (conEntradaSalida)
-                {
-                    SPID_Tombin_NF_DTO tombin = await _spidTomiDao.ObtenerTombinNfPorFolio(folio);
-                    procesado = false;
-                    if (tombin != null)
-                    {
-                        bool conForexRelacionado = !string.IsNullOrWhiteSpace(tombin.NF_FOREX_RELACIONADO);
-
-                        decimal? cuenta = ConversionHelper.ParseNullableDecimalInvariant(tombin.T24_DEBIT_ACCT_NO);
-                        string nombreCuenta = tombin.NF_NOMBRE_CUENTA;
-                        string monedaCuenta = _vwT24.ValidaMoneda(tombin.NF_MONEDA_CUENTA);
-
-                        if (conForexRelacionado)
-                        {
-                            var cuentasFad = await _vwT24.ObtieneDatosCuentasFad();
-                            var cuentaFad = cuentasFad?.FirstOrDefault(x => x.Moneda == _vwT24.MonedaDefaultMN);
-                            if (cuentaFad == null || !decimal.TryParse(cuentaFad.Cuenta, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal cuentaFadDecimal))
-                                /// <summary>
-                                /// Ejecuta la operaciÃ³n Exception.
-                                /// </summary>
-                                throw new Exception("No fue posible obtener la cuenta FAD para la operaci├│n con Forex relacionado.");
-
-                            cuenta = cuentaFadDecimal;
-                            nombreCuenta = "BTMM USD FAD";
-                            monedaCuenta = "USD";
-                        }
-
-                        var es = new SPID_InsertarEntradasSalidasModelo
-                        {
-                            Referencia = tombin.NF_FOLIO_UNICO,
-                            Num_Cliente = ConversionHelper.ParseNullableDecimalInvariant(tombin.T24_CUSTOMER_CODE),
-                            CDL = ConversionHelper.ParseNullableDecimalInvariant(tombin.T24_CUSTOMER_CODE),
-                            Ordenante = tombin.T24_COMPANY_NAME,
-                            Operacion = 218,
-                            OperacionDesc = "Salida  (TTS)",
-                            Tipo = "D",
-                            TipoDesc = "Dom├⌐stica",
-                            Cuenta = cuenta,
-                            Nombre = nombreCuenta,
-                            CuentaMoneda = monedaCuenta,
-                            Via = 800,
-                            ViaDesc = "TRF ENVIADA USD SPID",
-                            Importe = tombin.T24_DEBIT_AMOUNT,
-                            Saldo = 0,
-                            Comentarios = tombin.T24_DEBIT_THEIR_REF,
-                            Fecha_Captura = ConversionHelper.TextoToFechaYmdOnly(_configuracion.StrFechaSistema),
-                            FechaValor = ConversionHelper.TextoToFechaYmdOnly(tombin.NF_FECHA_EJECUCION.ToString()),
-                            Hora = DateTime.Now.ToLongTimeString(),
-                            Capturista = "JEAI",
-                            Fad = 0,
-                            Referencia_Control = "A",
-                            Referencia_Control_Cont = 0
-                        };
-
-                        procesado = await _spidTomiDao.InsertarEntradaSalida(es);
-                    }
-
-                    if (!procesado)
-                    {
-                        int numRegs = await _spidTomiDao.ContarEntradaSalidaPorReferencia(folioUnico);
-                        procesado = numRegs > 0;
-                    }
-                }
-                else
-                {
-                    procesado = true;
-                }
-
-                if (!procesado)
-                    throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
-            {
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                if (conForex && forexCancelado)
-                {
-                    await _spidCmsDao.ActualizarFormato(folio, "Formato rechazado", "RECC", "El forex relacionado ha sido cancelado");
-                    await _spidTomiDao.ActualizarTombinNfEstatus(folio, "RECC", "El forex relacionado ha sido cancelado");
-
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                    await _spidTomiDao.CancelarPlanTrabajoPorForex(folio, tipoOperacion, fechaEjecucion, moneda, importe);
-                    return true;
-                }
-
-                if (string.Equals(fechaEjecucion, _configuracion.StrFechaSistema, StringComparison.Ordinal))
-                {
-                    await _spidCmsDao.ActualizarFormato(folio, "Formato aceptado", "APFT", string.Empty);
-                    await _spidTomiDao.ActualizarTombinNfEstatus(folio, "SCNP", string.Empty);
-                }
-                else if (string.CompareOrdinal(fechaEjecucion, _configuracion.StrFechaSistema) < 0)
-                {
-                    await _controlServicio.MarcarErrorFechaPasada(ConversionHelper.ParseLongOrDefault(folio));
-                    throw new Exception($"Se desea realizar una operaci├│n al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-                }
-                else
-                {
-                    await _spidCmsDao.ActualizarFormato(folio, "Formato recibido pendiente ejecuci├│n", "REPE", string.Empty);
-                    await _spidTomiDao.ActualizarTombinNfEstatus(folio, "SCNF", string.Empty);
-                }
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso =
-                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-            }
-
-            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
-            {
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                int regsCms = 1;
-                int regsTomi = 0;
-                int regsEs = 0;
-                string errores = string.Empty;
-
-                SPID_Tombin_NF_DTO tomi = await _spidTomiDao.ObtenerConciliacionNf(folio, conForex && forexCancelado);
-                if (tomi != null)
-                    regsTomi = 1;
-
-                SPID_Tombin_ES_DTO es = null;
-                if (conEntradaSalida)
-                {
-                    es = await _spidTomiDao.ObtenerConciliacionEs(folioUnico);
-                    if (es != null)
-                        regsEs = 1;
-                }
-
-                if (regsCms == 1 && regsTomi == 1 && ((conEntradaSalida && regsEs == 1) || !conEntradaSalida))
-                {
-                    if (!string.Equals(folioForex ?? string.Empty, tomi.NF_FOREX_RELACIONADO ?? string.Empty, StringComparison.Ordinal))
-                        errores += Environment.NewLine + $" - Diferencia en la autorizaci├│n de FOREX. CMS='{folioForex}', TOMI='{tomi.NF_FOREX_RELACIONADO}'.";
-                    if (!string.Equals(fechaEjecucion, tomi.NF_FECHA_EJECUCION.ToString(), StringComparison.Ordinal))
-                        errores += Environment.NewLine + $" - Diferencia en la fecha de ejecuci├│n. CMS='{fechaEjecucion}', TOMI='{tomi.NF_FECHA_EJECUCION}'.";
-                    if (!string.Equals(moneda, _vwT24.ValidaMoneda(tomi.T24_DEBIT_CURRENCY), StringComparison.Ordinal))
-                        errores += Environment.NewLine + $" - Diferencia en la monedas. CMS='{moneda}', TOMI='{tomi.T24_DEBIT_CURRENCY}'.";
-                    if (importe != tomi.T24_DEBIT_AMOUNT)
-                        errores += Environment.NewLine + $" - Diferencia en el importe. CMS='{importe}', TOMI='{tomi.T24_DEBIT_AMOUNT}'.";
-
-                    if (conEntradaSalida)
-                    {
-                        if (!string.Equals(fechaEjecucion, es.Ent_fechaValor, StringComparison.Ordinal))
-                            errores += Environment.NewLine + $" - Diferencia en la fecha de ejecuci├│n de Entrada/Salida. CMS='{fechaEjecucion}', TOMI='{es.Ent_fechaValor}'.";
-                        if (!string.Equals(moneda, _vwT24.ValidaMoneda(es.Ent_moneda_cuenta), StringComparison.Ordinal))
-                            errores += Environment.NewLine + $" - Diferencia en la monedas de Entrada/Salida. CMS='{moneda}', TOMI='{es.Ent_moneda_cuenta}'.";
-                        if (importe != (es.Ent_importe ?? 0))
-                            errores += Environment.NewLine + $" - Diferencia en el importe de Entrada/Salida. CMS='{importe}', Entrada/Salida='{es.Ent_importe}'.";
-                    }
-                }
-                else
-                {
-                    errores += Environment.NewLine + " - No se ha registrado la operaci├│n en TOMI.";
-                }
-
-                if (!string.IsNullOrWhiteSpace(errores))
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception(errores);
-
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-                _configuracion.AliasProceso = string.Empty;
-            }
-
-            return true;
-        }
-        /// <summary>
-        /// Ejecuta la operaciÃ³n public.
-        /// </summary>
-
-        public async Task<bool> ValidarDiaHabilSiguiente(DateTime dtFecha, long lFolio)
-        {
-            return await _spidTomiDao.ExisteDiaNoHabil(dtFecha);
-        }
-
-        private async Task<(string Direccion, string CodigoPostal)> ObtenerDireccionInsight(string cdl, string folio, CancellationToken ct)
-        {
-            DateTime fecha = DateTime.Now.Date;
-            bool fechaValida = false;
-            int diasRetroceso = 0;
-            const int maxDiasRetroceso = 366;
-
-            while (!fechaValida)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                if (diasRetroceso >= maxDiasRetroceso)
-                    throw new Exception($"No se encontró un día hábil dentro de los últimos {maxDiasRetroceso} días para el folio {folio}.");
-
-                fecha = fecha.AddDays(-1);
-                diasRetroceso++;
-
-                bool esNoHabil = await ValidarDiaHabilSiguiente(fecha, ConversionHelper.ParseLongOrDefault(folio));
-                if (esNoHabil || fecha.DayOfWeek == DayOfWeek.Saturday || fecha.DayOfWeek == DayOfWeek.Sunday)
-                    fechaValida = false;
-                else
-                    fechaValida = true;
-            }
-
-            string bsDate = fecha.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-            var insight = await _spidVistasT24Dao.ObtenerDireccionSpidPorCdl(cdl, bsDate);
-            if (insight == null)
-                /// <summary>
-                /// Ejecuta la operaciÃ³n Exception.
-                /// </summary>
-                throw new Exception("Error al obtener de insight los datos del domicilio del cliente");
-
-            string direccion = $"{insight.P1_CALLE} {insight.P1_EXTERIOR} {insight.P1_INTERIOR}".Trim();
-            string cp = insight.P1_CODIGO_POSTAL ?? string.Empty;
-
-            if (string.IsNullOrWhiteSpace(direccion) || string.IsNullOrWhiteSpace(cp))
-                /// <summary>
-                /// Ejecuta la operaciÃ³n Exception.
-                /// </summary>
-                throw new Exception("Error al obtener de insight los datos del domicilio del cliente");
-            /// <summary>
-            /// Ejecuta la operaciÃ³n return.
-            /// </summary>
-
-            return (direccion, cp);
-        }
-
-        private SPID_InsertarFormatoModelo MapearInsertarFormato(object[] v)
-        {
-            return new SPID_InsertarFormatoModelo
-            {
-                NF_TIPO = Convert.ToString(v[19]),
-                NF_FOLIO = ConversionHelper.ParseLongOrDefault(Convert.ToString(v[20])),
-                T24_CUSTOMER_CODE = Convert.ToString(v[21]),
-                T24_DEBIT_ACCT_NO = Convert.ToString(v[22]),
-                NF_ESTATUS = "PEND",
-                NF_USUARIO_CAPTURA = Convert.ToString(v[24]),
-                NF_USUARIO_AUTORIZA = Convert.ToString(v[26]),
-                NF_FECHA_CAPTURA = v[23] as DateTime? ?? ConversionHelper.TryParseNullableDateTime(v[23]),
-                NF_FECHA_AUTORIZA = v[25] as DateTime? ?? ConversionHelper.TryParseNullableDateTime(v[25]),
-                T24_DEBIT_AMOUNT = ConversionHelper.ParseNullableDecimalInvariant(v[27]),
-                T24_SHORT_NAME = Convert.ToString(v[1]),
-                NF_FOREX_RELACIONADO = Convert.ToString(v[3]),
-                T24_DEBIT_CURRENCY = Convert.ToString(v[4]),
-                NF_BANCO_BENEF = Convert.ToString(v[6]),
-                T24_BEN_ACCT_NO = Convert.ToString(v[7]),
-                NF_TIPO_CUENTA = Convert.ToString(v[8]),
-                T24_BEN_CUST_NAME = Convert.ToString(v[10]),
-                NF_RFC_BENEFICIARIO = Convert.ToString(v[11]),
-                NF_TASA_RETENCION = Convert.ToString(v[12]),
-                NF_FECHA_EJECUCION = ConversionHelper.ParseIntOrDefault(Convert.ToString(v[13])),
-                T24_DEBIT_THEIR_REF = Convert.ToString(v[15]),
-                NF_MONTO_ENVIAR = ConversionHelper.ParseNullableDecimalInvariant(v[18]),
-                ID_PLANTILLA = Convert.ToString(v[28]),
-                ID_FORMATO_PLANTILLA = ConversionHelper.ParseLongOrDefault(Convert.ToString(v[29])),
-                NF_CLASIFICACION_OPERACION = Convert.ToString(v[30]),
-                NF_RELACION_COMERCIAL = Convert.ToString(v[31]),
-                NF_NUMERIC_REFERENCE = Convert.ToString(v[32]),
-                NF_DIRECCION_IP = Convert.ToString(v[33])
-            };
-        }
-    }
-}
-
-using Aplicacion.DTOs.SPID_GPH;
-using Aplicacion.Interfaces.FirmaElectronica;
-using Aplicacion.Interfaces.SPID;
-using Aplicacion.Modelos;
-using Aplicacion.Servicios.FirmaElectronica;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Globalization;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    /// <summary>
-    /// Representa SPIDGPH.
-    /// </summary>
-    public class SPIDGPH
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly ISPIDGphDao _spidGphDao;
-        private readonly ISpidVistasT24Dao _spidVistasT24Dao;
-        private readonly ConexionT24Mw _vwT24;
-        private readonly IComunSPID _comunSpid;
-
-        private const string tipoOperacion = "SPID_GPH";
-
-        private string folioUnico = string.Empty;
-        private string folioPropuesto = string.Empty;
-        /// <summary>
-        /// Inicializa una nueva instancia de la clase SPIDGPH.
-        /// </summary>
-
-        public SPIDGPH(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            ISPIDGphDao spidGphDao,
-            ISpidVistasT24Dao spidVistasT24Dao,
-            ConexionT24Mw vwT24,
-            IComunSPID comunSpid)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _spidGphDao = spidGphDao;
-            _spidVistasT24Dao = spidVistasT24Dao;
-            _vwT24 = vwT24;
-            _comunSpid = comunSpid;
-        }
-        /// <summary>
-        /// Ejecuta la operaciÃ³n public.
-        /// </summary>
-
-        public async Task<bool> ProcesOperacion(string folio, CancellationToken ct = default(CancellationToken))
-        {
-            ct.ThrowIfCancellationRequested();
-
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
-                return false;
-
-            using (var firma = new MetodosFirma(_configuracion))
-            {
-                if (!firma.CertificadoEncontrado())
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de SPID: No se encontrÃ³ el certificado y/o llave para realizar la firma de la transacciÃ³n");
-            }
 
             Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}.");
 
             if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
             {
+                bool procesado = false;
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
                 await _controlServicio.IniciaProceso(new ProcesoDTO
                 {
                     Folio = folio,
@@ -6527,17 +887,13 @@ namespace Aplicacion.Servicios.Operaciones
                     PId = _configuracion.Pid.Value
                 });
 
-                var datos = await _spidGphDao.ObtenerDatosBasicosPorFolio(folio);
+                var datos = await _tefGphDao.ObtenerDatosBasicosPorFolio(folio);
                 string fechaEjecucion = string.Empty;
-                string cuenta = string.Empty;
-                string cdl = string.Empty;
 
                 if (datos != null)
                 {
                     folioUnico = datos.NfFolioUnico ?? string.Empty;
                     fechaEjecucion = datos.NfFechaEjecucion?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-                    cuenta = datos.T24DebitAcctNo ?? string.Empty;
-                    cdl = datos.T24CustomerCode ?? string.Empty;
                 }
 
                 if (string.IsNullOrWhiteSpace(folioUnico))
@@ -6550,298 +906,20 @@ namespace Aplicacion.Servicios.Operaciones
                         folio);
 
                     Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Creamos folio_unico='{folioUnico}'.");
-                    await _spidGphDao.ActualizarFolioUnico(folio, folioUnico);
+                    await _tefGphDao.ActualizarFolioUnico(folio, folioUnico);
                 }
                 else
                 {
                     Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo folio_unico='{folioUnico}'.");
                 }
 
-                folioPropuesto = await _vwT24.GeneraFolioPresupuesto(
-                    folioUnico,
-                    ConversionHelper.ParseIntOrDefault(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion)),
-                    tipoOperacion);
-
-                if (string.IsNullOrWhiteSpace(folioPropuesto))
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error al obtener el folio propuesto de T24");
-
-                await _spidGphDao.ActualizarPlanTrabajoMaestroLectura(folio, tipoOperacion, folioUnico);
-
-                bool direccionOk = await ActualizarDireccion(cdl, folio, ct);
-                if (!direccionOk)
-                    throw new Exception($"Error al obtener los datos de Insight, con folio: {folio}");
-
-                var validacionCuenta = await EsCuentaSpidValida(cuenta);
-                bool cuentaValida = validacionCuenta.EsValida;
-                string errorDetencion = validacionCuenta.ErrorDetencion;
-                if (!cuentaValida)
-                {
-                    await _spidGphDao.MarcarErrorCuentaInvalida(folio, tipoOperacion, errorDetencion);
-                }
-
-                bool firmaOk = await _comunSpid.GeneraFirmaDigitalSPID("tb_tombin_nf_spid_gph", folio, folioPropuesto, null, null);
-                if (!firmaOk)
-                    throw new Exception($"Se presentÃ³ un error al generar la firma digital del: {folio}");
-
-                if (cuentaValida)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                    return true;
-                }
-
-                return false;
-            }
-
-            return false;
-        }
-
-        private async Task<bool> ActualizarDireccion(string cdl, string folio, CancellationToken ct)
-        {
-            try
-            {
-                DateTime fecha = DateTime.Now.Date;
-                bool fechaValida = false;
-                int diasRetroceso = 0;
-                const int maxDiasRetroceso = 366;
-
-                while (!fechaValida)
-                {
-                    ct.ThrowIfCancellationRequested();
-
-                    if (diasRetroceso >= maxDiasRetroceso)
-                        throw new Exception($"No se encontró un día hábil dentro de los últimos {maxDiasRetroceso} días para el folio {folio}.");
-
-                    fecha = fecha.AddDays(-1);
-                    diasRetroceso++;
-
-                    bool esNoHabil = await _spidGphDao.ExisteDiaNoHabil(fecha);
-                    if (esNoHabil || fecha.DayOfWeek == DayOfWeek.Sunday || fecha.DayOfWeek == DayOfWeek.Saturday)
-                    {
-                        fechaValida = false;
-                    }
-                    else
-                    {
-                        fechaValida = true;
-                    }
-                }
-
-                string bsDate = fecha.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-                SpidGphInsightDireccionDto insight = await _spidVistasT24Dao.ObtenerDireccionSpidGphPorCdl(cdl, bsDate);
-                if (insight == null)
-                    return false;
-
-                string direccion = (insight.P1CALLE ?? string.Empty) + " " +
-                                   (insight.P1EXTERIOR ?? string.Empty) + " " +
-                                   (insight.P1INTERIOR ?? string.Empty);
-                direccion = direccion.Trim();
-
-                string cp = insight.P1CODIGOPOSTAL ?? string.Empty;
-
-                if (string.IsNullOrWhiteSpace(direccion))
-                    return false;
-
-                return await _spidGphDao.ActualizarDireccion(folio, direccion, cp);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|{tipoOperacion}.ActualizarDireccion|Error al obtener los datos de Insight. - {ex}");
-                throw;
-            }
-        }
-
-        private async Task<(bool EsValida, string ErrorDetencion)> EsCuentaSpidValida(string cuenta)
-        {
-            try
-            {
-                string mensaje = string.Empty;
-                EsClienteSpidValidoResultado resultado =
-                    await _vwT24.EsCuentaSpidValida(cuenta, mensaje, string.Empty);
-
-                return (resultado.EsClienteValido,
-                    resultado.EsClienteValido
-                        ? string.Empty
-                        : (resultado.Mensaje ?? "No se pudo validar la cuenta SPID en T24."));
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|{tipoOperacion}.procesaOperacion|Error técnico al validar EsCuentaSpidValida: {ex}");
-                throw;
-            }
-        }
-    }
-}
-
-using Aplicacion.DTOs.SPID_GPH;
-using Aplicacion.Interfaces.FirmaElectronica;
-using Aplicacion.Interfaces.SPID;
-using Aplicacion.Modelos;
-using Aplicacion.Servicios.FirmaElectronica;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
-using System;
-using System.Globalization;
-using System.Threading.Tasks;
-
-namespace Aplicacion.Servicios.Operaciones
-{
-    /// <summary>
-    /// Representa SPIDLocal.
-    /// </summary>
-    public class SPIDLocal
-    {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly ISPIDLocalDao _spidLocalDao;
-        private readonly ConexionT24Mw _vwT24;
-        private readonly IComunSPID _comunSPID;
-
-        private const string tipoOperacion = "SPID_Local";
-
-        private string folioUnico = string.Empty;
-        private string folioPropuesto = string.Empty;
-        /// <summary>
-        /// Inicializa una nueva instancia de la clase SPIDLocal.
-        /// </summary>
-
-        public SPIDLocal(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            ISPIDLocalDao spidLocalDao,
-            ConexionT24Mw vwT24,
-            IComunSPID comunSPID)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _spidLocalDao = spidLocalDao;
-            _vwT24 = vwT24;
-            _comunSPID = comunSPID;
-        }
-        /// <summary>
-        /// Ejecuta la operaciÃ³n public.
-        /// </summary>
-
-        public async Task<bool> ProcesOperacion(string folio)
-        {
-            long folioNumerico = ConversionHelper.ConvertirLongRequerido(folio, nameof(folio));
-
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-
-            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
-                return false;
-
-            using (var firma = new MetodosFirma(_configuracion))
-            {
-                if (!firma.CertificadoEncontrado())
-                {
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de SPID: No se encontro el certificado y/o llave para realizar la firma de la transacciÃ³n");
-                }
-            }
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}.");
-
-            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
-            {
-                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                bool procesado;
-                var datos = await _spidLocalDao.ObtenerDatosBasicosPorFolio(folioNumerico);
-
-                folioUnico = datos?.NfFolioUnico ?? string.Empty;
-                string fechaEjecucion = datos?.NfFechaEjecucion?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-                string cuenta = datos?.NfDebitAcctNo ?? string.Empty;
-
-                if (string.IsNullOrWhiteSpace(folioUnico))
-                {
-                    folioUnico = await _vwT24.GeneraFolioUnico(
-                        tipoOperacion,
-                        ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
-                        folio);
-
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Creamos folio_unico='{folioUnico}'.");
-
-                    await _spidLocalDao.ActualizarFolioUnico(folioNumerico, folioUnico);
-                }
-                else
-                {
-                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo folio_unico='{folioUnico}'.");
-                }
-
-                folioPropuesto = await _vwT24.GeneraFolioPresupuesto(
-                    folioUnico,
-                    int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion), CultureInfo.InvariantCulture),
-                    tipoOperacion);
-
-                if (string.IsNullOrWhiteSpace(folioPropuesto))
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error al obtener el folio propuesto de T24");
-
-                await _spidLocalDao.ActualizarPlanTrabajoMaestroLectura(
-                    folioNumerico,
+                await _tefGphDao.ActualizarPlanTrabajoMaestroLectura(
+                    folio,
                     tipoOperacion,
                     folioUnico,
-                ConversionHelper.ConvertirIntRequerido(fechaEjecucion, nameof(fechaEjecucion)));
+                    _vwT24.MonedaDefaultMN);
 
-                var validacionCuenta = await ValidarCuentaSpid(cuenta);
-                procesado = validacionCuenta.EsValida;
-                if (!validacionCuenta.EsValida)
-                {
-                    await _spidLocalDao.MarcarErrorCuentaInvalida(folioNumerico, tipoOperacion, validacionCuenta.ErrorDescripcion);
-                }
-
-                if (!await _comunSPID.GeneraFirmaDigitalSPID("tb_tombin_nf_spid_local", folio, folioPropuesto, null, null))
-                {
-                    throw new Exception($"Se presentÃ³ un error al generar la firma digital del: {folio}");
-                }
+                procesado = true;
 
                 if (procesado)
                 {
@@ -6854,7 +932,6 @@ namespace Aplicacion.Servicios.Operaciones
                         AliasProceso = _configuracion.AliasProceso,
                         PId = _configuracion.Pid.Value
                     });
-
                     _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
                     {
                         Folio = folio,
@@ -6867,100 +944,196 @@ namespace Aplicacion.Servicios.Operaciones
                     return true;
                 }
 
-                return false;
+                throw new Exception($"Error en procesamiento de registro DATOS_GRAL con folio: {folio}");
             }
 
             return false;
         }
-
-        private async Task<ValidacionCuentaSpidResultado> ValidarCuentaSpid(string cuenta)
-        {
-            try
-            {
-                string mensaje = string.Empty;
-                EsClienteSpidValidoResultado resultado =
-                    await _vwT24.EsCuentaSpidValida(cuenta, mensaje, string.Empty);
-
-                return new ValidacionCuentaSpidResultado
-                {
-                    EsValida = resultado.EsClienteValido,
-                    ErrorDescripcion = resultado.EsClienteValido
-                        ? string.Empty
-                        : (resultado.Mensaje ?? "No existe la cuenta en el sistema T24")
-                };
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"AVISO|{tipoOperacion}.procesaOperacion|No se pudo validar EsCuentaSpidValida: {ex.Message}");
-            }
-
-            return new ValidacionCuentaSpidResultado
-            {
-                EsValida = false,
-                ErrorDescripcion = "No existe la cuenta en el sistema T24"
-            };
-        }
-
     }
 }
 
-using Aplicacion.DTOs.SPID_H2H;
-using Aplicacion.Interfaces.FirmaElectronica;
-using Aplicacion.Interfaces.SPID;
-using Aplicacion.Interfaces.SPID_H2H;
+using Aplicacion.Interfaces.TEF;
 using Aplicacion.Modelos;
-using Aplicacion.Servicios.FirmaElectronica;
 using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
 using MUFG_T24.Interfaces_utilidades;
 using MUFG_T24.Modelos;
 using MUFG_T24.Repositorios;
 using System;
-using System.Threading;
+using System.Globalization;
 using System.Threading.Tasks;
-using static MUFG_T24.Comunes.Comunes;
 
 namespace Aplicacion.Servicios.Operaciones
 {
     /// <summary>
-    /// Representa SPID H2 H.
+    /// Representa TEFLocal.
     /// </summary>
-    public class SPID_H2H
+    public class TEFLocal
     {
         private readonly ConfiguracionModelo _configuracion;
         private readonly IControlServicio _controlServicio;
-        private readonly ISpidH2hTomiDao _spidH2hDao;
-        private readonly ISpidH2hVistasT24Dao _spidH2hVistasT24Dao;
+        private readonly ITEFLocalDao _tefLocalDao;
         private readonly ConexionT24Mw _vwT24;
-        private readonly ComunSPID _comunSPID;
 
-        private const string tipoOperacion = "SPID_H2H";
+        private const string tipoOperacion = "TEF_Local";
+        private string folioUnico = string.Empty;
+        /// <summary>
+        /// Inicializa una nueva instancia de la clase TEFLocal.
+        /// </summary>
+
+        public TEFLocal(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            ITEFLocalDao tefLocalDao,
+            ConexionT24Mw vwT24)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _tefLocalDao = tefLocalDao;
+            _vwT24 = vwT24;
+        }
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+
+        public async Task<bool> ProcesaOperacion(string folio)
+        {
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
+                return false;
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}.");
+
+            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
+            {
+                Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                var datos = await _tefLocalDao.ObtenerDatosBasicosPorFolio(folio);
+                string fechaEjecucion = string.Empty;
+
+                if (datos != null)
+                {
+                    folioUnico = datos.NfFolioUnico ?? string.Empty;
+                    fechaEjecucion = datos.NfFechaEjecucion?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(folioUnico))
+                {
+                    folioUnico = await _vwT24.GeneraFolioUnico(
+                        tipoOperacion,
+                        ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion),
+                        folio);
+
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Creamos folio_unico='{folioUnico}'.");
+                    await _tefLocalDao.ActualizarFolioUnico(folio, folioUnico);
+                }
+                else
+                {
+                    Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo folio_unico='{folioUnico}'.");
+                }
+
+                await _tefLocalDao.ActualizarPlanTrabajoMaestroLectura(
+                    folio,
+                    tipoOperacion,
+                    folioUnico,
+                    _vwT24.MonedaDefaultMN);
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+                _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+                return true;
+            }
+
+            return false;
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    using Aplicacion.DTOs.TEF_H2H;
+    using Aplicacion.Interfaces.TEF_H2H;
+    using Aplicacion.Modelos;
+    using MUFG_T24.Comunes;
+    using MUFG_T24.Comunes.Helpers;
+    using MUFG_T24.Interfaces_utilidades;
+    using MUFG_T24.Modelos;
+    using MUFG_T24.Repositorios;
+    using System;
+    using System.Threading.Tasks;
+    /// <summary>
+    /// Representa TEF H2 H.
+    /// </summary>
+
+    public class TEF_H2H
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly ITefH2hTomiDao _tefH2hDao;
+        private readonly ConexionT24Mw _vwT24;
+
+        private const string tipoOperacion = "TEF_H2H";
         private string folio_unico = string.Empty;
-        private string lsFolioPropuesto = string.Empty;
 
         /// <summary>
         /// Constructor.
         /// </summary>
-        public SPID_H2H(ConfiguracionModelo configuracion, IControlServicio controlServicio, ISpidH2hTomiDao spidH2hDao, ISpidH2hVistasT24Dao spidH2hVistasT24Dao, ConexionT24Mw vwT24, ComunSPID comunSPID)
+        public TEF_H2H(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            ITefH2hTomiDao tefH2hDao,
+            ConexionT24Mw vwT24)
         {
             _configuracion = configuracion;
             _controlServicio = controlServicio;
-            _spidH2hDao = spidH2hDao;
-            _spidH2hVistasT24Dao = spidH2hVistasT24Dao;
+            _tefH2hDao = tefH2hDao;
             _vwT24 = vwT24;
-            _comunSPID = comunSPID;
         }
-        
-        /// <summary>
-        /// Procesa la operación SPID_H2H.
-        /// </summary>
-        public async Task<bool> procesaOperacion(string folio, CancellationToken ct = default(CancellationToken))
-        {
-            ct.ThrowIfCancellationRequested();
 
-            string lsFechaEjecucion;
-            bool lbProcesado;
-            string strCDL;
+        /// <summary>
+        /// Procesa la operación TEF_H2H.
+        /// </summary>
+        public async Task<bool> procesaOperacion(string folio)
+        {
+            string fechaEjecucion;
+            bool procesado;
 
             // Verificamos la última operación no realizada.
             _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
@@ -6976,31 +1149,16 @@ namespace Aplicacion.Servicios.Operaciones
             if (string.Equals(_configuracion.AliasProceso, string.Empty, StringComparison.Ordinal))
                 return false;
 
-            // Confirmo que se encuentre el certificado y llave para la firma digital de lo contrario no se inicia el proceso.
-            using (var firma = new MetodosFirma(_configuracion))
-            {
-                if (!firma.CertificadoEncontrado())
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error en procesamiento de SPID: No se encontro el certificado y/o llave para realizar la firma de la transacción");
-            }
-
-// Inicio.
+            // Inicio.
             Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}.");
 
             // Lectura y actualización de los datos del maestro.
             if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
             {
-                string lsCuenta;
-                string lsDatosCliente;
-                string lsErrorDetencion;
-                bool lbCuentaSPID_Valida;
-
                 Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Actualizando los datos del plan de trabajo maestro (estatus, etc).");
-/// <summary>
-/// Ejecuta la operaciÃ³n IniciaProceso.
-/// </summary>
+                /// <summary>
+                /// Ejecuta la operaciÃ³n IniciaProceso.
+                /// </summary>
 
                 await _controlServicio.IniciaProceso(new ProcesoDTO
 
@@ -7020,20 +1178,16 @@ namespace Aplicacion.Servicios.Operaciones
 
                 });
 
-                lbProcesado = false;
+                procesado = false;
 
                 // Datos de la operación.
-                lsFechaEjecucion = string.Empty;
-                lsCuenta = string.Empty;
-                strCDL = string.Empty;
+                fechaEjecucion = string.Empty;
 
-                SpidH2hDatosOperacionDto datosOperacion = await _spidH2hDao.ObtenerDatosOperacion(ConversionHelper.ParseLongRequerido(folio, "Folio"));
+                TefH2hDatosOperacionDto datosOperacion = await _tefH2hDao.ObtenerDatosOperacion(ConversionHelper.ParseLongRequerido(folio, "Folio"));
                 if (datosOperacion != null)
                 {
                     folio_unico = datosOperacion.FolioUnico ?? string.Empty;
-                    lsFechaEjecucion = datosOperacion.FechaEjecucion?.ToString() ?? string.Empty;
-                    lsCuenta = datosOperacion.DebitAcctNo ?? string.Empty;
-                    strCDL = datosOperacion.CustomerCode ?? string.Empty;
+                    fechaEjecucion = datosOperacion.FechaEjecucion?.ToString() ?? string.Empty;
                 }
 
                 // Hay folio_unico?
@@ -7049,57 +1203,19 @@ namespace Aplicacion.Servicios.Operaciones
                     Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo folio_unico='{folio_unico}'.");
                 }
 
-                // Genero folio propuesto de T24.
-                lsFolioPropuesto = await _vwT24.GeneraFolioPresupuesto(
-                    folio_unico,
-                    int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(lsFechaEjecucion)),
-                    tipoOperacion);
-
-                if (string.Equals((lsFolioPropuesto ?? string.Empty).Trim(), string.Empty, StringComparison.Ordinal))
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception("Error al obtener el folio propuesto de T24");
-
                 // Actualizo el maestro general.
-                bool actualizado = await _spidH2hDao.ActualizarPlanTrabajoMaestro(new SpidH2hActualizarPlanTrabajoMaestroDto
+                await _tefH2hDao.ActualizarPlanTrabajoMaestro(new TefH2hActualizarPlanTrabajoMaestroDto
                 {
                     Folio = ConversionHelper.ParseLongRequerido(folio, "Folio"),
                     TipoOperacion = tipoOperacion,
                     FolioUnico = folio_unico,
-                    FechaEjecucion = datosOperacion?.FechaEjecucion
+                    FechaEjecucion = datosOperacion?.FechaEjecucion,
+                    MonedaDefaultMN = _vwT24.MonedaDefaultMN
                 });
 
-                if (!actualizado)
-                    throw new Exception($"Error actualizando tb_srv_plan_trabajo_maestro para el folio {folio}.");
+                procesado = true;
 
-                if (!await ActualizarDireccion(strCDL, ConversionHelper.ParseLongRequerido(folio, "Folio"), ct))
-                    throw new Exception($"No se encontraron datos de Insight para el folio {folio}");
-
-                // Validamos si es un cliente SPID para operar.
-                lsDatosCliente = string.Empty;
-                lsErrorDetencion = string.Empty;
-                EsClienteSpidValidoResultado resltado = await _vwT24.EsCuentaSpidValida(lsCuenta, lsErrorDetencion);
-                lbCuentaSPID_Valida = resltado.EsClienteValido;
-                lsErrorDetencion = resltado?.Mensaje ?? string.Empty;
-
-                if (!lbCuentaSPID_Valida)
-                {
-                    await _spidH2hDao.MarcarPlanTrabajoConError(new SpidH2hMarcarPlanTrabajoConErrorDto
-                    {
-                    Folio = ConversionHelper.ParseLongRequerido(folio, "Folio"),
-                        TipoOperacion = tipoOperacion,
-                        ErrorDescripcion = lsErrorDetencion
-                    });
-                }
-
-                lbProcesado = lbCuentaSPID_Valida;
-
-                // Proceso para Generar la firma digital.
-                if (!await _comunSPID.GeneraFirmaDigitalSPID("tb_tombin_nf_spid_h2h", folio, lsFolioPropuesto))
-                    throw new Exception($"Se presentó un error al generar la firma digital del: {folio}");
-
-                if (lbProcesado)
+                if (procesado)
                 {
                     // Actualizo el estatus.
                     /// <summary>
@@ -7115,10 +1231,6 @@ namespace Aplicacion.Servicios.Operaciones
                         PId = _configuracion.Pid.Value
                     });
 
-                    // Verificamos la última operación no realizada (debe ser a 'T24_REGISTRO').
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n RefrescarAliasProceso.
-                    /// </summary>
                     _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
                     {
                         Folio = folio,
@@ -7133,116 +1245,2466 @@ namespace Aplicacion.Servicios.Operaciones
                 }
                 else
                 {
-                    return false;
+                    throw new Exception($"Error en procesamiento de registro DATOS_GRAL con folio: {folio}");
                 }
             }
 
             return false;
         }
 
-        private async Task<bool> ActualizarDireccion(string CDL, long Folio, CancellationToken ct)
+    }
+
+}
+
+using Aplicacion.DTOs.TMD;
+using Aplicacion.Interfaces.TMD;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.TMD;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Globalization;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    /// <summary>
+    /// Representa TMD.
+    /// </summary>
+    public class TMD
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly ITMDCmsDao _tmdCmsDao;
+        private readonly ITMDTomiDao _tmdTomiDao;
+        private readonly ConexionT24Mw _vwT24;
+
+        private const string tipoOperacion = "TMD";
+        private string folioUnico = string.Empty;
+        /// <summary>
+        /// Inicializa una nueva instancia de la clase TMD.
+        /// </summary>
+
+        public TMD(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            ITMDCmsDao tmdCmsDao,
+            ITMDTomiDao tmdTomiDao,
+            ConexionT24Mw vwT24)
         {
-            string strDireccion = string.Empty;
-            string strCP = string.Empty;
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _tmdCmsDao = tmdCmsDao;
+            _tmdTomiDao = tmdTomiDao;
+            _vwT24 = vwT24;
+        }
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
 
-            try
+        public async Task<bool> ProcesaOperacion(string lsFolio)
+        {
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
             {
-                DateTime fecha = DateTime.Now.Date;
-                bool blnFecha = false;
-                int diasRetroceso = 0;
-                const int maxDiasRetroceso = 366;
+                Folio = lsFolio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+            if (string.IsNullOrEmpty(_configuracion.AliasProceso))
+                return false;
 
-                while (!blnFecha)
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexiÃ³n a base de datos del CMS.");
+
+            TMD_Formato_DTO formato = await _tmdCmsDao.ObtenerFormatoPorFolio(lsFolio);
+            if (formato == null)
+                formato = new TMD_Formato_DTO();
+
+            string[] laValoresFormato = ParseContenidoFormato(formato.ContenidoFormato, lsFolio);
+
+            string lsFolioForex = ValueAt(laValoresFormato, 15);
+            string lsFechaEjecucion = ValueAt(laValoresFormato, 6);
+            string lsMoneda = _vwT24.ValidaMoneda(ValueAt(laValoresFormato, 3));
+            decimal ldImporte = formato.MontoOperacion;
+
+            string lsTmdEspecial = formato.Id_tasa_especial ?? string.Empty;
+            bool lbConTmd = false;
+            string lsEstatusTmd = string.Empty;
+
+            Config.EscribirLog("INFO|TMD.procesaOperacion|Validando si la operaciÃ³n es un time deposit especial.");
+            if (!string.IsNullOrWhiteSpace(lsTmdEspecial) && long.TryParse(lsTmdEspecial, out _))
+            {
+                lbConTmd = true;
+                Config.EscribirLog($"INFO|TMD.procesaOperacion|Asignado el id_AutorizaciÃ³n TMD: {lsTmdEspecial} .");
+                var solicitud = await _tmdTomiDao.ObtenerSolicitudEspecialPorId(lsTmdEspecial);
+                lsEstatusTmd = solicitud?.EstatusOperacion ?? string.Empty;
+            }
+
+            if (lbConTmd && !string.IsNullOrWhiteSpace(lsEstatusTmd))
+            {
+                switch (lsEstatusTmd)
                 {
-                    ct.ThrowIfCancellationRequested();
-
-                    if (diasRetroceso >= maxDiasRetroceso)
-                        throw new Exception($"No se encontró un día hábil dentro de los últimos {maxDiasRetroceso} días para el folio {Folio}.");
-
-                    fecha = fecha.AddDays(-1);
-                    diasRetroceso++;
-
-                    blnFecha = await ValidarDiaHabilSiguiente(fecha, Folio);
-
-                    if (blnFecha || fecha.DayOfWeek == DayOfWeek.Saturday || fecha.DayOfWeek == DayOfWeek.Sunday)
-                        blnFecha = false;
-                    else
-                        blnFecha = true;
+                    case "AUTORIZADO":
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|TIME DEPOSIT AUTORIZADO.");
+                        break;
+                    case "CANCELADO":
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|TIME DEPOSIT CANCELADO.");
+                        break;
+                    default:
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|TIME DEPOSIT PENDIENTE DE AUTORIZACIÃ“N.");
+                        throw new Exception($"El Time Deposit con autorizaciÃ³n {lsTmdEspecial} no ha sido autorizado.");
                 }
+            }
 
-                Config.EscribirLog($"INFO|{tipoOperacion}.ActualizarDireccion|Consultando dirección en VistasT24.");
+            if (string.CompareOrdinal(lsFechaEjecucion, _configuracion.StrFechaSistema) < 0)
+            {
+                await _controlServicio.MarcarErrorFechaPasada(ConversionHelper.ParseLongOrDefault(lsFolio));
+                throw new Exception($"Se desea realizar una operaciÃ³n al {lsFechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+            }
 
-                string customerCode = (Convert.ToString(CDL) ?? string.Empty).TrimStart('0');
-                SpidH2hCustomerEdoCtaDto datosInsight = await _spidH2hVistasT24Dao.ObtenerCustomerEdoCta(customerCode, fecha);
-                if (datosInsight != null)
+            folioUnico = await _vwT24.GeneraFolioUnico(
+                tipoOperacion,
+                ConexionT24Mw.CambiarFechaAJulianaT24(lsFechaEjecucion),
+                lsFolio);
+
+            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
+            {
+                Config.EscribirLog("INFO|TMD.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
+                await _controlServicio.IniciaProceso(new ProcesoDTO
                 {
-                    Config.EscribirLog($"INFO|{tipoOperacion}.ActualizarDireccion|Se encontró la dirección en Insight del folio {Folio}");
-                    strDireccion = DameTexto(datosInsight.P1_CALLE) + " " + DameTexto(datosInsight.P1_EXTERIOR) + " " + DameTexto(datosInsight.P1_INTERIOR);
-                    strCP = DameTexto(datosInsight.P1_CODIGO_POSTAL);
-                }
-
-                if (string.Equals((strDireccion ?? string.Empty).Trim(), string.Empty, StringComparison.Ordinal))
-                {
-                    Config.EscribirLog($"ERROR|{tipoOperacion}.ActualizarDireccion|No se encontraron datos de Insight.");
-                    return false;
-                }
-
-                bool actualizado = await _spidH2hDao.ActualizarDireccion(new SpidH2hActualizarDireccionDto
-                {
-                    Folio = Folio,
-                    Address = strDireccion,
-                    ZipCode = strCP
+                    Folio = lsFolio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
                 });
 
-                if (!actualizado)
-                    return false;
+                string lsSubTipo = lbConTmd ? $"TMD:{lsTmdEspecial}" : string.Empty;
 
-                Config.EscribirLog($"INFO|{tipoOperacion}.ActualizarDireccion|Se actualizaron los datos de direccion de la operacion {Folio}");
+                await _tmdTomiDao.ActualizarPlanTrabajoMaestroLectura(
+                    lsFolio,
+                    tipoOperacion,
+                    folioUnico,
+                    lsFechaEjecucion,
+                    lsMoneda,
+                    ldImporte,
+                    formato.Cdl.ToString(CultureInfo.InvariantCulture),
+                    ValueAt(laValoresFormato, 1),
+                    ValueAt(laValoresFormato, 2),
+                    lsSubTipo);
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+                {
+                    Folio = lsFolio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                _configuracion.AliasProceso =
+                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = lsFolio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
             }
-            catch (OperationCanceledException)
+
+            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
             {
-                throw;
+                Config.EscribirLog("INFO|TMD.procesaOperacion|A insertar datos de CMS a TOMI.");
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = lsFolio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                var modelo = new TMD_InsertarFormatoModelo
+                {
+                    NF_FOLIO_UNICO = folioUnico,
+                    NF_TIPO = "TMD",
+                    NF_FOLIO = formato.Id_Formato,
+                    T24_CUSTOMER_ID = formato.Cdl.ToString(CultureInfo.InvariantCulture),
+                    T24_DRAWDOWN_ACCOUNT = ValueAt(laValoresFormato, 2),
+                    NF_ESTATUS = "PEND",
+                    NF_USUARIO_CAPTURA = formato.Id_UsuarioCaptura,
+                    NF_USUARIO_AUTORIZA = formato.Id_UsuarioAutorizo,
+                    NF_FECHA_CAPTURA = formato.FechaCaptura,
+                    NF_FECHA_AUTORIZA = formato.FechaAutorizacion,
+                    T24_DRAWDOWN_NET_AMT = ConversionHelper.ParseDecimalOrDefault(ValueAt(laValoresFormato, 4)),
+                    NF_FOREX_RELACIONADO = lsFolioForex,
+                    T24_CURRENCY = ValueAt(laValoresFormato, 3),
+                    T24_VALUE_DATE = ConversionHelper.ParseIntOrDefault(ValueAt(laValoresFormato, 6)),
+                    T24_FIN_MAT_DATE = ConversionHelper.ParseIntOrDefault(ValueAt(laValoresFormato, 5)),
+                    T24_INTEREST_RATE = ConversionHelper.ParseDoubleOrDefault(ValueAt(laValoresFormato, 8)),
+                    T24_INTEREST_SPREAD = ConversionHelper.ParseDoubleOrDefault(ValueAt(laValoresFormato, 9))
+                };
+
+                bool lbResultado = await _tmdTomiDao.InsertarFormatoTmd(modelo);
+                bool lbProcesado = lbResultado;
+
+                if (lbResultado)
+                {
+                    Config.EscribirLog("INFO|TMD.procesaOperacion|Se insertÃ³ correctamente el folio en base de TOMI.");
+
+                    if (lbConTmd)
+                        await _tmdTomiDao.MarcarSolicitudEspecialProcesada(lsTmdEspecial);
+                }
+                else
+                {
+                    int regs = await _tmdTomiDao.ContarTombinNfPorFolio(lsFolio);
+                    if (regs > 0)
+                    {
+                        lbProcesado = true;
+                        Config.EscribirLog("INFO|TMD.procesaOperacion|El folio en procesamiento ya se habÃ­a insertado en base TOMI pero no se marcÃ³ el proceso como realizado.");
+                    }
+                }
+
+                if (lbProcesado)
+                {
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = lsFolio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso =
+                        await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                        {
+                            Folio = lsFolio,
+                            TipoOperacion = tipoOperacion,
+                            Servicio = _configuracion.NombreServicio,
+                            NombreProceso = _configuracion.NombreProceso,
+                            AliasProceso = _configuracion.AliasProceso,
+                            PId = _configuracion.Pid.Value
+                        });
+                }
+                else
+                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {lsFolio}");
             }
-            catch (Exception ex)
+
+            if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
             {
-                Config.EscribirLog($"ERROR|{tipoOperacion}.ActualizarDireccion|Error al obtener los datos de Insight. - {ex}");
-                throw;
+                Config.EscribirLog("INFO|TMD.procesaOperacion|A actualizar estatus en CMS y TOMI.");
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = lsFolio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                string mensaje;
+                string estatusCms;
+                string estatusTomi;
+
+                if (string.CompareOrdinal(lsFechaEjecucion, _configuracion.StrFechaSistema) < 0)
+                {
+                    await _controlServicio.MarcarErrorFechaPasada(ConversionHelper.ParseLongOrDefault(lsFolio));
+                    throw new Exception($"Se desea realizar una operaciÃ³n al {lsFechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+                }
+
+                if (string.Equals(lsFechaEjecucion, _configuracion.StrFechaSistema, StringComparison.Ordinal))
+                {
+                    mensaje = "Formato aceptado";
+                    estatusCms = "APFT";
+                    estatusTomi = "SCNP";
+                    Config.EscribirLog("INFO|TMD.procesaOperacion|OperaciÃ³n fecha valor hoy.");
+                }
+                else
+                {
+                    mensaje = "Formato recibido pendiente ejecuciÃ³n";
+                    estatusCms = "REPE";
+                    estatusTomi = "SCNF";
+                    Config.EscribirLog("INFO|TMD.procesaOperacion|OperaciÃ³n fecha valor fÃºtura.");
+                }
+
+                await _tmdCmsDao.ActualizarFormatoEstado(lsFolio, mensaje, estatusCms);
+                await _tmdTomiDao.ActualizarNfEstatus(lsFolio, estatusTomi, "OPER CMS");
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+                {
+                    Folio = lsFolio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                _configuracion.AliasProceso =
+                    await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = lsFolio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+            }
+
+            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
+            {
+                Config.EscribirLog("INFO|TMD.procesaOperacion|A conciliar operaciones entre CMS y TOMI.");
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = lsFolio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                bool forexCancelado = false;
+                TMD_Tombin_Modelo tomi = await _tmdTomiDao.ObtenerDatosConciliacion(lsFolio, forexCancelado);
+
+                var errores = new StringBuilder();
+                if (tomi != null)
+                {
+                    if (!string.Equals(lsFolioForex ?? string.Empty, tomi.NF_FOREX_RELACIONADO ?? string.Empty, StringComparison.Ordinal))
+                        errores.AppendLine($" - Diferencia en la autorizaciÃ³n de FOREX. CMS='{lsFolioForex}', TOMI='{tomi.NF_FOREX_RELACIONADO}'.");
+                    if (ConversionHelper.ParseIntOrDefault(lsFechaEjecucion) != tomi.NF_FECHA_EJECUCION)
+                        errores.AppendLine($" - Diferencia en la fecha de ejecuciÃ³n. CMS='{lsFechaEjecucion}', TOMI='{tomi.NF_FECHA_EJECUCION}'.");
+                    if (!string.Equals(lsMoneda, _vwT24.ValidaMoneda(tomi.T24_CURRENCY), StringComparison.Ordinal))
+                        errores.AppendLine($" - Diferencia en la monedas. CMS='{lsMoneda}', TOMI='{tomi.T24_CURRENCY}'.");
+                    if (ldImporte != tomi.T24_DRAWDOWN_NET_AMT)
+                        errores.AppendLine($" - Diferencia en el importe. CMS='{ldImporte}', TOMI='{tomi.T24_DRAWDOWN_NET_AMT}'.");
+                }
+                else
+                {
+                    errores.AppendLine(" - No se ha registrado la operaciÃ³n en TOMI.");
+                }
+
+                if (errores.Length > 0)
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception(errores.ToString());
+
+                Config.EscribirLog("INFO|TMD.procesaOperacion|La operaciÃ³n estÃ¡ correctamente conciliada.");
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+                {
+                    Folio = lsFolio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+                _configuracion.AliasProceso = string.Empty;
             }
 
             return true;
+        }
+        private static string[] ParseContenidoFormato(string contenido, string folio)
+        {
+            var parseado = ContenidoFormatoParser.Parse(contenido, folio);
+            ContenidoFormatoParser.ValidarMinimoIndice(parseado, folio, 18);
+
+            string[] valores = new string[32];
+            for (int i = 0; i <= 18; i++)
+            {
+                valores[i] = ContenidoFormatoParser.ObtenerValorPosicional(parseado, folio, i);
+            }
+
+            return valores;
+        }
+
+        private static string ValueAt(string[] values, int idx) => idx >= 0 && idx < values.Length ? values[idx] ?? string.Empty : string.Empty;
+
+    }
+}
+
+using Aplicacion.Enums;
+using Aplicacion.Interfaces.FirmaElectronica;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Repositorios;
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using static MUFG_T24.Comunes.Comunes;
+
+namespace Aplicacion.Servicios.FirmaElectronica
+{
+    /// <summary>
+    /// Representa Comun FXD.
+    /// </summary>
+    public class ComunFXD : RepositorioMaestro, IComunFXD
+    {
+        private const string CASFIM_MUFG = "40108";
+        private readonly ConfiguracionModelo _configuracion;
+        /// <summary>
+        /// Inicializa una nueva instancia de la clase ComunFXD.
+        /// </summary>
+        public ComunFXD(IAlertas alertaT, ConfiguracionModelo config) : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            _configuracion = config;
+        }
+        /// <summary>
+        /// Genera la firma digital para un registro específico...
+        /// </summary>
+        public async Task<bool> GeneraFirmaDigital(string strTabla,string strFolio,string strFolioT24,bool? strFlgNomina, int? intTipoPago , string strReferencia_emisor="")
+        {
+            try
+            {
+                if (!intTipoPago.HasValue)
+                    intTipoPago = 1;
+
+
+                Config.EscribirLog("INFO|ComunFXD.GenerarFirmaDigital|Inicia proceso para generacion de firma");
+
+                var vDatosGenerarFirmaDigital = (await EjecutarStoredProcedureQuery<ComunFXD_GFDModelo>(ConstantesServicio.ProcedimientosFXDH2H.GFD_CONSULTAR_DATOS_FIRMA, cmd => 
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tabla", strTabla));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", strFolio));
+                }))?.Data?.LastOrDefault();
+               
+                if (vDatosGenerarFirmaDigital==null) 
+                {
+                    Config.EscribirLog("ERROR|ComunFXD.GeneraFirmaDigital|El registro ya se intento registrar pero marco nf_interfase_spei=2 (problemas de registro)");
+                    return false;
+                }
+
+                object[] laValoresFormato = new object[9];
+                string[] laLlaveValor = (vDatosGenerarFirmaDigital.NF_BANCO_BENEF ?? string.Empty).Split('-');
+                string lsDebitTheirRef;
+
+                laValoresFormato[0] = vDatosGenerarFirmaDigital.NF_FECHA_EJECUCION;
+                laValoresFormato[1] = DameTexto(vDatosGenerarFirmaDigital.NF_BANCO_BENEF);
+                laValoresFormato[2] = laLlaveValor.Length > 0 ? laLlaveValor[0].Trim() : string.Empty;
+                laValoresFormato[3] = vDatosGenerarFirmaDigital.IMPORTE;
+                laValoresFormato[4] = (strFlgNomina == true) ? strFolioT24 + "-" + strFolio : strFolioT24;
+                laValoresFormato[5] = (intTipoPago == 1) ? CuentaClabe(DameTexto(vDatosGenerarFirmaDigital.T24_DEBIT_ACCT_NO)) : string.Empty;
+
+                if (string.IsNullOrEmpty(strReferencia_emisor))
+                {
+                    string debitTheirRef = DameTexto(vDatosGenerarFirmaDigital.T24_DEBIT_THEIR_REF);
+                    string debitTheirRef40 = debitTheirRef.Substring(0, Math.Min(40, debitTheirRef.Length)).Trim();
+
+                    if (string.IsNullOrEmpty(debitTheirRef40.ToUpperInvariant()))
+                        lsDebitTheirRef = DameTexto(vDatosGenerarFirmaDigital.NF_FOLIO_UNICO);
+                    else
+                    {
+                        string txtSpei = TextoSPEI(DameTexto(vDatosGenerarFirmaDigital.T24_DEBIT_THEIR_REF));
+                        lsDebitTheirRef = txtSpei.Substring(0, Math.Min(40, txtSpei.Length));
+                    }
+                }
+                else
+                {
+                    lsDebitTheirRef = strReferencia_emisor;
+                    Config.EscribirLog("INFO|ComunFXD.GeneraFirmaDigital|La operación proviene de un SWIFT_IN con referencia='" + lsDebitTheirRef + "'.");
+                }
+
+                laValoresFormato[6] = lsDebitTheirRef;
+                laValoresFormato[7] = DameTexto(vDatosGenerarFirmaDigital.T24_BEN_ACCT_NO);
+                laValoresFormato[8] = DameTexto(vDatosGenerarFirmaDigital.NF_FOREX_RELACIONADO);
+
+                if (!string.IsNullOrEmpty(Convert.ToString(laValoresFormato[8])) && intTipoPago == 1)
+                {
+                    intTipoPago = 5;
+                    Config.EscribirLog("INFO|ComunFXD.GenerarFirmaDigital|Se cambia el tipo de pago SPEI de 1 a 5 por tener forex relacionado.");
+                }
+
+                for (int liIdx = 0; liIdx <= 8; liIdx++)
+                    Config.EscribirLog("INFO|ComunFXD.GeneraFirmaDigital|Valor[" + liIdx + "]=" + Convert.ToString(laValoresFormato[liIdx]));
+
+                Config.EscribirLog($"INFO|ComunFXD.GeneraFirmaDigital|Se termina recolección de datos para firma:{strFolio}");
+
+                OrdenPagoValue OrdenPagoValue = new OrdenPagoValue();
+                {
+                    OrdenPagoValue.InsClaveOrd = CASFIM_MUFG;
+                    OrdenPagoValue.OpFechaOper = laValoresFormato[0];
+                    OrdenPagoValue.InsClaveBen = laValoresFormato[2];
+                    OrdenPagoValue.OpMonto = laValoresFormato[3];
+                    OrdenPagoValue.OpCveRastreo = laValoresFormato[4];
+                    OrdenPagoValue.OpCuentaOrd = laValoresFormato[5];
+                    OrdenPagoValue.OpCuentaBen = laValoresFormato[7];
+                    OrdenPagoValue.TpPago = intTipoPago;
+                }
+
+                OrdenPagoByteArray ordenPagoByteArray = ObtieneTrama(OrdenPagoValue);
+
+                ///Generacion del dato firmado
+                string strFirmaDigital;
+                using (var firma = new MetodosFirma(_configuracion))
+                {
+                    Config.EscribirLog("INFO|ComunFXD.GeneraFirmaDigital|Se realiza el llamado para la firma");
+                    strFirmaDigital = firma.GenerateSign(ordenPagoByteArray.TramaCompleta);
+                }
+
+                var vActualizarFirmadigital = await EjecutarStoredProcedureQuery<ComunFXD_GFDModelo>(ConstantesServicio.ProcedimientosFXDH2H.GFD_ACTUALIZAR_FIRMA_DIGITAL, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tabla", strTabla));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@FirmaDigital", strFirmaDigital));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", strFolio));
+                },
+                validarAfectacion: false);
+
+                if (vActualizarFirmadigital == null || !vActualizarFirmadigital.Exito)
+                {
+                    Config.EscribirLog("ERROR|ComunFXD.GeneraFirmaDigital|No se actualizó el campo OP_FIRMA_DIG.");
+                    return false;
+                }
+
+                Config.EscribirLog("INFO|ComunFXD.GeneraFirmaDigital|Se actualizó el campo para la firma exitosamente");
+
+                return true;
+            }
+            catch (Exception ErrorRegistro)
+            {
+                Config.EscribirLog("ERROR|ComunFXD.GeneraFirmaDigital|Se presenta exception: " + ErrorRegistro);
+                return false;
+            }           
+        }
+
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+        public string MuestraTrama(byte[] trama)
+        {
+            return BitConverter.ToString(trama);
+        }
+
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+        public void LogueDatosTrama(OrdenPagoByteArray ordenPagoByteArrayModelo)
+        {
+            Config.EscribirLog("INFO|ComunFXD.GenerarFirmaDigital|Se obtienen bytes de cada tipo de dato ");
+
+            LogTrama("InsClaveBen", ordenPagoByteArrayModelo.InsClaveBen);
+            LogTrama("InsClaveOrd", ordenPagoByteArrayModelo.InsClaveOrd);
+            LogTrama("OpCuentaBen", ordenPagoByteArrayModelo.OpCuentaBen);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("OpCuentaBen2", ordenPagoByteArrayModelo.OpCuentaBen2);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("OpCuentaOrd", ordenPagoByteArrayModelo.OpCuentaOrd);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("OpCveRastreo", ordenPagoByteArrayModelo.OpCveRastreo);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("OpFechaOper", ordenPagoByteArrayModelo.OpFechaOper);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("OpMonto", ordenPagoByteArrayModelo.OpMonto);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("opCuentaPartOrd", (byte[])ordenPagoByteArrayModelo.opCuentaPartOrd);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("opCuentaEmiRem", (byte[])ordenPagoByteArrayModelo.opCuentaEmiRem);
+            /// <summary>
+            /// Ejecuta la operaciÃ³n LogTrama.
+            /// </summary>
+            LogTrama("TramaCompleta", ordenPagoByteArrayModelo.TramaCompleta);
+        }
+
+        /// <summary>
+        /// Ejecuta la operación LogTrama.
+        /// </summary>
+        private void LogTrama(string etiqueta, byte[] trama)
+        {
+            if (trama != null && trama.Length > 0)
+                Config.EscribirLog($"INFO|ComunFXD.GeneraFirmaDigital|{etiqueta} {MuestraTrama(trama)}");
+        }
+
+        /// <summary>
+        /// Ejecuta la operación public.
+        /// </summary>
+        public async Task<string> ObtieneCampoFirma(OrdenPagoValue OrdenPagoValue)
+        {
+            try
+            {
+                using (var firma = new MetodosFirma(_configuracion))
+                {
+                    var conversiones = ObtieneTrama(OrdenPagoValue);
+                    return firma.GenerateSign(conversiones.TramaCompleta);
+                }
+            }
+            catch (Exception ErrorTrama)
+            {
+
+                throw new Exception($"ObtieneTrama|Se presenta exception:{ErrorTrama}");
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta la operación public.
+        /// </summary>
+        public bool ValidaSPEIEntrada(OrdenPagoValue OrdenPagoValue, string dataSigned)
+        {
+            try
+            {
+                using (var firma = new MetodosFirma(_configuracion))
+                {
+                    Config.EscribirLog($"INFO|ComunFXD.GenerarFirmaDigital|Firma Recibida:{dataSigned}");
+                    var opba = ObtieneTrama(OrdenPagoValue);
+                    if (string.IsNullOrWhiteSpace(dataSigned))
+                    {
+                        Config.EscribirLog("ERROR|ComunFXD.ValidaSPEIEntrada|La firma recibida está vacía.");
+                        return false;
+                    }
+
+                    byte[] signedData;
+
+                    try
+                    {
+                        signedData = Convert.FromBase64String(dataSigned.Trim());
+                    }
+                    catch (FormatException)
+                    {
+                        Config.EscribirLog("ERROR|ComunFXD.ValidaSPEIEntrada|La firma recibida no tiene formato Base64 válido.");
+                        return false;
+                    }
+
+                    //firma.GenerateSign(opba.TramaCompleta); //DEBUG ONLY
+
+                    return firma.ConfirmaFirma(opba.TramaCompleta,signedData);
+                }
+            }
+            catch (Exception ErrorTrama)
+            {
+
+                throw new Exception($"ObtieneTrama|Se presenta exception:{ErrorTrama}");
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta la operación public.
+        /// </summary>
+        public OrdenPagoByteArray ObtieneTrama(OrdenPagoValue OrdenPagoValue)
+        {
+            var vConversiones = new OrdenPagoByteArray();
+            short stTipoPago = Convert.ToInt16(OrdenPagoValue.TpPago);
+
+            vConversiones.OpFechaOper = ConversionHelper.dateToByteArray(Convert.ToInt32(OrdenPagoValue.OpFechaOper), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.InsClaveOrd = ConversionHelper.intToByteArray(Convert.ToInt32(OrdenPagoValue.InsClaveOrd), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.InsClaveBen = ConversionHelper.intToByteArray(Convert.ToInt32(OrdenPagoValue.InsClaveBen), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.OpCveRastreo = ConversionHelper.stringToByteArray(System.Convert.ToString(OrdenPagoValue.OpCveRastreo), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.OpMonto = ConversionHelper.moneyToByteArray((double)System.Convert.ToDecimal(OrdenPagoValue.OpMonto), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.OpCuentaOrd = ConversionHelper.stringToByteArray(System.Convert.ToString(OrdenPagoValue.OpCuentaOrd), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.OpCuentaBen = ConversionHelper.stringToByteArray(System.Convert.ToString(OrdenPagoValue.OpCuentaBen), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.opCuentaPartOrd = ConversionHelper.stringToByteArray(System.Convert.ToString(OrdenPagoValue.opCuentaPartOrd), ConversionHelper.ByteOrder.BIG_ENDIAN);
+            vConversiones.opCuentaEmiRem = ConversionHelper.stringToByteArray(System.Convert.ToString(OrdenPagoValue.opCuentaEmiRem), ConversionHelper.ByteOrder.BIG_ENDIAN);
+
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|InsClaveOrd = {OrdenPagoValue.InsClaveOrd}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|OpFechaOper = {OrdenPagoValue.OpFechaOper}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|InsClaveBen = {OrdenPagoValue.InsClaveBen}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|OpMonto = {OrdenPagoValue.OpMonto}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|OpCveRastreo = {OrdenPagoValue.OpCveRastreo}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|OpCuentaOrd = {OrdenPagoValue.OpCuentaOrd}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|OpCuentaBen = {OrdenPagoValue.OpCuentaBen}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|TpPago = {OrdenPagoValue.TpPago}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|opCuentaPartOrd = {OrdenPagoValue.opCuentaPartOrd}");
+            Config.EscribirLog($"INFO|ComunFXD.ObtieneTrama|opCuentaEmiRem = {OrdenPagoValue.opCuentaEmiRem}");
+
+            vConversiones.TramaCompleta = Array.Empty<byte>();
+
+            try
+            {
+                switch (stTipoPago)
+                {
+                    case 0:
+                       vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                           .Concat(vConversiones.OpFechaOper) 
+                           .Concat(vConversiones.InsClaveOrd)
+                           .Concat(vConversiones.InsClaveBen)
+                           .Concat(vConversiones.OpCveRastreo)
+                           .Concat(vConversiones.OpMonto)
+                           .ToArray();
+                        break;
+                    case 1:
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .Concat(vConversiones.OpCuentaOrd)
+                          .Concat(vConversiones.OpCuentaBen)
+                          .ToArray();
+                        break;
+                    case 5:
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .Concat(vConversiones.OpCuentaBen)
+                          .ToArray();
+                        break;
+                    case 6:
+                        if (string.IsNullOrEmpty(System.Convert.ToString(OrdenPagoValue.OpCuentaBen2)))
+                        {
+                            vConversiones.OpCuentaBen2 = new byte[] { 0 };
+                        }
+                        else
+                        {
+                            vConversiones.OpCuentaBen2 = ConversionHelper.stringToByteArray(System.Convert.ToString(OrdenPagoValue.OpCuentaBen2), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        }
+
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .Concat(vConversiones.OpCuentaBen)
+                          .Concat(vConversiones.OpCuentaBen2)
+                          .ToArray();
+                        break;
+                    case 7:
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .ToArray();
+                        break;
+                    case 3:
+                        if (string.IsNullOrEmpty(System.Convert.ToString(OrdenPagoValue.OpCuentaBen2)))
+                        {
+                            vConversiones.OpCuentaBen2 = new byte[] { 0 };
+                        }
+                        else
+                        {
+                            vConversiones.OpCuentaBen2 = ConversionHelper.stringToByteArray(System.Convert.ToString(OrdenPagoValue.OpCuentaBen2), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        }
+
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .Concat(vConversiones.OpCuentaOrd)
+                          .Concat(vConversiones.OpCuentaBen)
+                          .Concat(vConversiones.OpCuentaBen2)
+                          .ToArray();
+                        break;
+                    case 30:
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .Concat(vConversiones.OpCuentaOrd)
+                          .Concat(vConversiones.OpCuentaBen)
+                          .Concat((byte[])vConversiones.opCuentaPartOrd)
+                          .ToArray();
+                        break;
+                    case 31:
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .Concat(vConversiones.OpCuentaOrd)
+                          .Concat((byte[])vConversiones.opCuentaPartOrd)                         
+                          .ToArray();
+                        break;
+                    case 36:
+                        vConversiones.TramaCompleta = vConversiones.TramaCompleta
+                          .Concat(vConversiones.OpFechaOper)
+                          .Concat(vConversiones.InsClaveOrd)
+                          .Concat(vConversiones.InsClaveBen)
+                          .Concat(vConversiones.OpCveRastreo)
+                          .Concat(vConversiones.OpMonto)
+                          .Concat(vConversiones.OpCuentaOrd)
+                          .Concat(vConversiones.OpCuentaBen)
+                          .Concat((byte[])vConversiones.opCuentaPartOrd)
+                          .Concat((byte[])vConversiones.opCuentaEmiRem)
+                          .ToArray();
+                        break;
+                    default:
+                        throw new Exception($"No existe definición para pago SPEI del tipo de pago {stTipoPago}");
+                }
+
+                LogueDatosTrama(vConversiones);
+                return vConversiones;
+            }
+            catch (Exception lexError)
+            {
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+                throw new Exception("ERROR|ComunFXD.ObtieneTrama|Se presenta exception: " + lexError);
+            }
+        }
+
+    }
+}
+
+using Aplicacion.Interfaces.FirmaElectronica;
+using Aplicacion.Interfaces.SPID;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using System;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using static MUFG_T24.Comunes.Comunes;
+
+namespace Aplicacion.Servicios.FirmaElectronica
+{
+    /// <summary>
+    /// Representa Comun SPID.
+    /// </summary>
+    public class ComunSPID : IComunSPID
+    {
+        private const string CASFIM_MUFG = "40108";
+
+        private readonly IComunSPIDDao _spidDao;
+        private readonly ConfiguracionModelo _configuracion;
+
+/// <summary>
+/// Inicializa una nueva instancia de la clase ComunSPID.
+/// </summary>
+        public ComunSPID(
+            IComunSPIDDao spidDao,
+            ConfiguracionModelo configuracion)
+        {
+            _spidDao = spidDao;
+            _configuracion = configuracion;
+        }
+
+/// <summary>
+/// Ejecuta la operaciÃ³n public.
+/// </summary>
+
+        public async Task<bool> GeneraFirmaDigitalSPID(
+            string strTabla,
+            string strFolio,
+            string strFolioT24,
+            bool? strFlgNomina = false,
+            int? intTipoPago = 1,
+            string strReferencia_emisor = "")
+        {
+            try
+            {
+                using (var metodoFirma = new MetodosFirma(_configuracion))
+                {
+                    Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Inicia proceso para generación de firma");
+
+                    short tipoPago = Convert.ToInt16(intTipoPago ?? 1);
+                    bool flgNomina = strFlgNomina ?? false;
+
+                    var datos = await _spidDao.ObtenerDatosGeneracionFirma(strTabla, strFolio);
+
+                    if (datos == null)
+                    {
+                        Config.EscribirLog("ERROR|ComunSPID.GeneraFirmaDigital|El registro ya se intento registrar pero marco nf_interfase_spei=2 (problemas de registro)");
+                        return false;
+                    }
+
+                    var valores = new object[9];
+
+                    valores[0] = datos.NF_FECHA_EJECUCION;
+                    valores[1] = datos.NF_BANCO_BENEF;
+
+                    var split = (datos.NF_BANCO_BENEF ?? "").Split('-');
+                    valores[2] = split.Length > 0 ? split[0].Trim() : "";
+
+                    valores[3] = datos.IMPORTE;
+
+                    valores[4] = flgNomina
+                        ? $"{strFolioT24}-{strFolio}"
+                        : strFolioT24;
+
+                    valores[5] = tipoPago == 1
+                        ? CuentaClabe(datos.T24_DEBIT_ACCT_NO)
+                        : "";
+
+                    string referencia;
+
+                    if (string.IsNullOrEmpty(strReferencia_emisor))
+                    {
+                        string refRaw = DameTexto(datos.T24_DEBIT_THEIR_REF);
+                        string refRaw40 = refRaw.Substring(0, Math.Min(40, refRaw.Length)).Trim();
+
+                        if (string.IsNullOrEmpty(refRaw40.ToUpperInvariant()))
+                            referencia = DameTexto(datos.NF_FOLIO_UNICO);
+                        else
+                        {
+                            string refNorm = TextoSPID(DameTexto(datos.T24_DEBIT_THEIR_REF));
+                            referencia = refNorm.Substring(0, Math.Min(40, refNorm.Length));
+                        }
+                    }
+                    else
+                    {
+                        referencia = strReferencia_emisor;
+                        Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|La operación proviene de un SWIFT_IN con referencia='{referencia}'.");
+                    }
+
+                    valores[6] = referencia;
+                    valores[7] = datos.T24_BEN_ACCT_NO;
+                    valores[8] = datos.NF_FOREX_RELACIONADO;
+
+                    for (int i = 0; i <= 8; i++)
+                    {
+                        Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigitalSPID|Valor[{i}]={(valores[i] ?? string.Empty)}");
+                    }
+
+                    if (!string.IsNullOrEmpty(valores[8]?.ToString()) && tipoPago == 1)
+                    {
+                        tipoPago = 5;
+                        Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Se cambia el tipo de pago SPID de 1 a 5 por tener forex relacionado.");
+                    }
+
+                    var dataValue = new OrdenPagoValue
+                    {
+                        InsClaveOrd = CASFIM_MUFG,
+                        OpFechaOper = valores[0].ToString(),
+                        InsClaveBen = valores[2].ToString(),
+                        OpMonto = valores[3].ToString(),
+                        OpCveRastreo = valores[4].ToString(),
+                        OpCuentaOrd = valores[5].ToString(),
+                        OpCuentaBen = valores[7].ToString(),
+                        TpPago = tipoPago
+                    };
+
+                    var trama = ObtieneTrama(dataValue);
+
+                    var firma = metodoFirma.GenerateSign(trama.TramaCompleta);
+
+                    bool actualizado = await _spidDao.ActualizarFirma(strTabla, strFolio, firma);
+                    if (actualizado)
+                        Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Se actualizó el campo para la firma exitosamente");
+
+                    return actualizado;
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ComunSPID.GeneraFirmaDigital|Se presenta exception: {ex}");
+                return false;
+            }
+        }
+
+/// <summary>
+/// Ejecuta la operaciÃ³n public.
+/// </summary>
+        public async Task<bool> ValidaFirmaDigitalSPID(
+            string strTabla,
+            string strFolio,
+            string strFolioT24,
+            bool? strFlgNomina = false,
+            int? intTipoPago = 1,
+            string strReferencia_emisor = "")
+        {
+            try
+            {
+                using (var metodoFirma = new MetodosFirma(_configuracion))
+                {
+                    Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Inicia proceso para generación de firma");
+
+                    short tipoPago = Convert.ToInt16(intTipoPago ?? 1);
+                    bool flgNomina = strFlgNomina ?? false;
+
+                    var datos = await _spidDao.ObtenerDatosFirma(strTabla, strFolio);
+                    if (datos == null)
+                    {
+                        Config.EscribirLog("ERROR|ComunSPID.GeneraFirmaDigital|El registro ya se intento registrar pero marco nf_interfase_spei=2 (problemas de registro)");
+                        return false;
+                    }
+
+                    var valores = new object[10];
+                    valores[0] = datos.NF_FECHA_EJECUCION;
+                    valores[1] = datos.NF_BANCO_BENEF;
+
+                    var split = (datos.NF_BANCO_BENEF ?? "").Split('-');
+                    valores[2] = split.Length > 0 ? split[0].Trim() : "";
+
+                    valores[3] = datos.IMPORTE;
+                    valores[4] = flgNomina ? $"{strFolioT24}-{strFolio}" : strFolioT24;
+                    valores[5] = tipoPago == 1 ? CuentaClabe(datos.T24_DEBIT_ACCT_NO) : "";
+
+                    string referencia;
+                    if (string.IsNullOrEmpty(strReferencia_emisor))
+                    {
+                        string refRaw = DameTexto(datos.T24_DEBIT_THEIR_REF);
+                        string refRaw40 = refRaw.Substring(0, Math.Min(40, refRaw.Length)).Trim();
+
+                        if (string.IsNullOrEmpty(refRaw40.ToUpperInvariant()))
+                            referencia = DameTexto(datos.NF_FOLIO_UNICO);
+                        else
+                        {
+                            string refNorm = TextoSPID(DameTexto(datos.T24_DEBIT_THEIR_REF));
+                            referencia = refNorm.Substring(0, Math.Min(40, refNorm.Length));
+                        }
+                    }
+                    else
+                    {
+                        referencia = strReferencia_emisor;
+                        Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|La operación proviene de un SWIFT_IN con referencia='{referencia}'.");
+                    }
+
+                    valores[6] = referencia;
+                    valores[7] = datos.T24_BEN_ACCT_NO;
+                    valores[8] = datos.NF_FOREX_RELACIONADO;
+                    valores[9] = datos.OP_FIRMA_DIG;
+
+                    if (!string.IsNullOrEmpty(valores[8]?.ToString()) && tipoPago == 1)
+                    {
+                        tipoPago = 5;
+                        Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Se cambia el tipo de pago SPID de 1 a 5 por tener forex relacionado.");
+                    }
+
+                    for (int i = 0; i <= 8; i++)
+                    {
+                        Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|Valor[{i}]={(valores[i] ?? string.Empty)}");
+                    }
+
+                    Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Se termina recolección de datos para firma: " + strFolio);
+
+                    var dataValue = new OrdenPagoValue
+                    {
+                        InsClaveOrd = CASFIM_MUFG,
+                        OpFechaOper = valores[0],
+                        InsClaveBen = valores[2],
+                        OpMonto = valores[3],
+                        OpCveRastreo = valores[4],
+                        OpCuentaOrd = valores[5],
+                        OpCuentaBen = valores[7],
+                        TpPago = tipoPago
+                    };
+
+                    var trama = ObtieneTrama(dataValue);
+                    var firma = metodoFirma.GenerateSign(trama.TramaCompleta);
+
+                    Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|Firma obtenida: {firma}");
+                    Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|Firma registrada previamente: {valores[9]}");
+
+                    return string.Equals(firma, Convert.ToString(valores[9]), StringComparison.Ordinal);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ComunSPID.GeneraFirmaDigital|Se presenta exception: {ex}");
+                return false;
+            }
+        }
+
+/// <summary>
+/// Ejecuta la operaciÃ³n public.
+/// </summary>
+
+        public async Task<bool> ValidaSPIDEntrada(OrdenPagoValue dataValue, string dataSigned)
+        {
+            try
+            {
+                using (var metodoFirma = new MetodosFirma(_configuracion))
+                {
+                    Config.EscribirLog($"INFO|ComunSPID.ValidaSPIDEntrada|Firma Recibida: {dataSigned}");
+
+                    var opba = ObtieneTrama(dataValue);
+
+                    var signedData = Convert.FromBase64String(dataSigned);
+
+                    //var firmaTemporal = metodoFirma.GenerateSign(opba.TramaCompleta);
+
+                    return metodoFirma.ConfirmaFirma(opba.TramaCompleta, signedData);
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"ValidaSPIDEntrada|Se presenta exception: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Obtiene la trama de bytes a partir de los datos de la orden de pago.
+        /// </summary>
+        /// <param name="dataValue"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        private OrdenPagoByteArray ObtieneTrama(OrdenPagoValue dataValue)
+        {
+            var conversiones = new OrdenPagoByteArray();
+            short tipoPago = Convert.ToInt16(dataValue.TpPago);
+
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|InsClaveOrd = {dataValue.InsClaveOrd}");
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|OpFechaOper = {dataValue.OpFechaOper}");
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|InsClaveBen = {dataValue.InsClaveBen}");
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|OpMonto = {dataValue.OpMonto}");
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|OpCveRastreo = {dataValue.OpCveRastreo}");
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|OpCuentaOrd = {dataValue.OpCuentaOrd}");
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|OpCuentaBen = {dataValue.OpCuentaBen}");
+            Config.EscribirLog($"INFO|ComunSPID.ObtieneTrama|TpPago = {dataValue.TpPago}");
+
+            try
+            {
+                switch (tipoPago)
+                {
+                    // =========================================
+                    // Devoluciones
+                    // =========================================
+                    case 0:
+                        Config.EscribirLog("INFO|ComunSPID.ObtieneTrama|Se inicia proceso de conversión de bytes tipo Devolucion");
+
+                        conversiones.OpFechaOper = ConversionHelper.dateToByteArray(Convert.ToInt32(dataValue.OpFechaOper), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.InsClaveOrd = ConversionHelper.intToByteArray(Convert.ToInt32(dataValue.InsClaveOrd), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.InsClaveBen = ConversionHelper.intToByteArray(Convert.ToInt32(dataValue.InsClaveBen), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpCveRastreo = ConversionHelper.stringToByteArray(System.Convert.ToString(dataValue.OpCveRastreo), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpMonto = ConversionHelper.moneyToByteArray(Convert.ToDouble(dataValue.OpMonto), ConversionHelper.ByteOrder.BIG_ENDIAN);
+
+                        conversiones.TramaCompleta =
+                            conversiones.OpFechaOper
+                            .Concat(conversiones.InsClaveOrd)
+                            .Concat(conversiones.InsClaveBen)
+                            .Concat(conversiones.OpCveRastreo)
+                            .Concat(conversiones.OpMonto)
+                            .ToArray();
+
+                        break;
+
+                    // =========================================
+                    // Tercero a Tercero
+                    // =========================================
+                    case 1:
+                        Config.EscribirLog("INFO|ComunSPID.ObtieneTrama|Se inicia proceso de conversión de bytes tipo tercero a tercero");
+
+                        conversiones.OpFechaOper = ConversionHelper.dateToByteArray(Convert.ToInt32(dataValue.OpFechaOper), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.InsClaveOrd = ConversionHelper.intToByteArray(Convert.ToInt32(dataValue.InsClaveOrd), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.InsClaveBen = ConversionHelper.intToByteArray(Convert.ToInt32(dataValue.InsClaveBen), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpCveRastreo = ConversionHelper.stringToByteArray(System.Convert.ToString(dataValue.OpCveRastreo), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpMonto = ConversionHelper.moneyToByteArray(Convert.ToDouble(dataValue.OpMonto), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpCuentaOrd = ConversionHelper.stringToByteArray(System.Convert.ToString(dataValue.OpCuentaOrd), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpCuentaBen = ConversionHelper.stringToByteArray(System.Convert.ToString(dataValue.OpCuentaBen), ConversionHelper.ByteOrder.BIG_ENDIAN);
+
+                        conversiones.TramaCompleta =
+                            conversiones.OpFechaOper
+                            .Concat(conversiones.InsClaveOrd)
+                            .Concat(conversiones.InsClaveBen)
+                            .Concat(conversiones.OpCveRastreo)
+                            .Concat(conversiones.OpMonto)
+                            .Concat(conversiones.OpCuentaOrd)
+                            .Concat(conversiones.OpCuentaBen)
+                            .ToArray();
+
+                        break;
+
+                    // =========================================
+                    // Participante a Tercero
+                    // =========================================
+                    case 2:
+                        Config.EscribirLog("INFO|ComunSPID.ObtieneTrama|Se inicia proceso de conversión de bytes tipo participante a tercero");
+
+                        conversiones.OpFechaOper = ConversionHelper.dateToByteArray(Convert.ToInt32(dataValue.OpFechaOper), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.InsClaveOrd = ConversionHelper.intToByteArray(Convert.ToInt32(dataValue.InsClaveOrd), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.InsClaveBen = ConversionHelper.intToByteArray(Convert.ToInt32(dataValue.InsClaveBen), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpCveRastreo = ConversionHelper.stringToByteArray(System.Convert.ToString(dataValue.OpCveRastreo), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpMonto = ConversionHelper.moneyToByteArray(Convert.ToDouble(dataValue.OpMonto), ConversionHelper.ByteOrder.BIG_ENDIAN);
+                        conversiones.OpCuentaBen = ConversionHelper.stringToByteArray(System.Convert.ToString(dataValue.OpCuentaBen), ConversionHelper.ByteOrder.BIG_ENDIAN);
+
+                        conversiones.TramaCompleta =
+                            conversiones.OpFechaOper
+                            .Concat(conversiones.InsClaveOrd)
+                            .Concat(conversiones.InsClaveBen)
+                            .Concat(conversiones.OpCveRastreo)
+                            .Concat(conversiones.OpMonto)
+                            .Concat(conversiones.OpCuentaBen)
+                            .ToArray();
+
+                        break;
+
+                    // =========================================
+                    // ERROR
+                    // =========================================
+                    default:
+                        throw new Exception($"No existe definición para pago SPEI del tipo de pago {tipoPago}");
+                }
+
+                LogueoDatosTramaSPID(conversiones);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"ERROR|ComunSPID.ObtieneTrama|Se presenta exception: {ex}");
+            }
+
+            return conversiones;
+        }
+
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+        public void LogueoDatosTrama(OrdenPagoByteArray datos)
+        {
+            Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Se obtienen bytes de cada tipo de dato");
+
+            if (datos?.InsClaveBen != null && datos.InsClaveBen.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|InsClaveBen {MuestraTrama(datos.InsClaveBen)}");
+
+            if (datos?.InsClaveOrd != null && datos.InsClaveOrd.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|InsClaveOrd {MuestraTrama(datos.InsClaveOrd)}");
+
+            if (datos?.OpCuentaBen != null && datos.OpCuentaBen.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCuentaBen {MuestraTrama(datos.OpCuentaBen)}");
+
+            if (datos?.OpCuentaBen2 != null && datos.OpCuentaBen2.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCuentaBen2 {MuestraTrama(datos.OpCuentaBen2)}");
+
+            if (datos?.OpCuentaOrd != null && datos.OpCuentaOrd.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCuentaOrd {MuestraTrama(datos.OpCuentaOrd)}");
+
+            if (datos?.OpCveRastreo != null && datos.OpCveRastreo.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCveRastreo {MuestraTrama(datos.OpCveRastreo)}");
+
+            if (datos?.OpFechaOper != null && datos.OpFechaOper.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpFechaOper {MuestraTrama(datos.OpFechaOper)}");
+
+            if (datos?.OpMonto != null && datos.OpMonto.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpMonto {MuestraTrama(datos.OpMonto)}");
+
+            var opCuentaPartOrd = datos?.opCuentaPartOrd as byte[];
+            if (opCuentaPartOrd != null && opCuentaPartOrd.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|opCuentaPartOrd {MuestraTrama(opCuentaPartOrd)}");
+
+            var opCuentaEmiRem = datos?.opCuentaEmiRem as byte[];
+            if (opCuentaEmiRem != null && opCuentaEmiRem.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|opCuentaEmiRem {MuestraTrama(opCuentaEmiRem)}");
+
+            if (datos?.TramaCompleta != null && datos.TramaCompleta.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|La trama armada es {MuestraTrama(datos.TramaCompleta)}");
+        }
+
+        private string MuestraTrama(byte[] array)
+        {
+            return array == null ? string.Empty : BitConverter.ToString(array);
+        }
+
+        /// <summary>
+        /// Ejecuta la operaciÃ³n public.
+        /// </summary>
+        public void LogueoDatosTramaSPID(OrdenPagoByteArray datos)
+        {
+            Config.EscribirLog("INFO|ComunSPID.GeneraFirmaDigital|Se obtienen bytes de cada tipo de dato");
+
+            if (datos?.InsClaveBen != null && datos.InsClaveBen.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|InsClaveBen {MuestraTrama(datos.InsClaveBen)}");
+
+            if (datos?.InsClaveOrd != null && datos.InsClaveOrd.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|InsClaveOrd {MuestraTrama(datos.InsClaveOrd)}");
+
+            if (datos?.OpCuentaBen != null && datos.OpCuentaBen.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCuentaBen {MuestraTrama(datos.OpCuentaBen)}");
+
+            if (datos?.OpCuentaBen2 != null && datos.OpCuentaBen2.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCuentaBen2 {MuestraTrama(datos.OpCuentaBen2)}");
+
+            if (datos?.OpCuentaOrd != null && datos.OpCuentaOrd.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCuentaOrd {MuestraTrama(datos.OpCuentaOrd)}");
+
+            if (datos?.OpCveRastreo != null && datos.OpCveRastreo.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpCveRastreo {MuestraTrama(datos.OpCveRastreo)}");
+
+            if (datos?.OpFechaOper != null && datos.OpFechaOper.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpFechaOper {MuestraTrama(datos.OpFechaOper)}");
+
+            if (datos?.OpMonto != null && datos.OpMonto.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|OpMonto {MuestraTrama(datos.OpMonto)}");
+
+            if (datos?.TramaCompleta != null && datos.TramaCompleta.Length > 0)
+                Config.EscribirLog($"INFO|ComunSPID.GeneraFirmaDigital|La trama armada es {MuestraTrama(datos.TramaCompleta)}");
+        }
+
+    }
+}
+
+using Aplicacion.Interfaces.FirmaElectronica;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios.FirmaElectronica
+{
+    /// <summary>
+    /// Representa Metodos Firma.
+    /// </summary>
+    public class MetodosFirma : IDisposable
+    {
+        private readonly string _rutaPfx;
+        private readonly string _password;
+        private readonly string _serialKarpay;
+
+        private readonly X509Certificate2 _certificado;
+        private readonly RSA _rsaPrivada;
+        private readonly RSA _rsaPublica;
+/// <summary>
+/// Inicializa una nueva instancia de la clase MetodosFirma.
+/// </summary>
+
+        public MetodosFirma(ConfiguracionModelo config)
+        {
+            if (string.IsNullOrWhiteSpace(config.RutaPFX))
+                /// <summary>
+                /// Ejecuta la operaciÃ³n ArgumentException.
+                /// </summary>
+                throw new ArgumentException(nameof(config.RutaPFX));
+
+            _rutaPfx = config.RutaPFX;
+            _password = config.SerialPassword;
+            _serialKarpay = config.SerialKarpay;
+
+            _certificado = new X509Certificate2(
+                config.RutaPFX,
+                config.SerialPassword
+            );
+
+            Config.EscribirLog($"INFO|MetodosFirma.GenerateSign|Nombre del archivo p12 : {_rutaPfx}");
+
+            if (!_certificado.HasPrivateKey)
+                /// <summary>
+                /// Ejecuta la operaciÃ³n CryptographicException.
+                /// </summary>
+                throw new CryptographicException("El certificado no contiene llave privada.");
+
+            _rsaPrivada = _certificado.GetRSAPrivateKey();
+            _rsaPublica = _certificado.GetRSAPublicKey();
+
+            Config.EscribirLog("INFO|MetodosFirma.GenerateSign|Se obtienen las llaves pública y privada");
         }
 /// <summary>
 /// Ejecuta la operaciÃ³n public.
 /// </summary>
 
-        public async Task<bool> ValidarDiaHabilSiguiente(DateTime Fecha, long folio)
+        public string GenerateSign(byte[] data)
         {
-            bool blnAux = false;
+            string resultBase64 = string.Empty;
 
             try
             {
-                SpidH2hDiaNoHabilDto diaNoHabil = await _spidH2hDao.ObtenerDiaNoHabil(Fecha);
-                if (diaNoHabil != null)
+                if (data == null || data.Length == 0)
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n ArgumentException.
+                    /// </summary>
+                    throw new ArgumentException(nameof(data));
+
+                byte[] firma = _rsaPrivada.SignData(
+                    data,
+                    HashAlgorithmName.SHA256,
+                    RSASignaturePadding.Pkcs1
+                );
+
+                bool esValida = _rsaPublica != null && _rsaPublica.VerifyData(
+                    data,
+                    firma,
+                    HashAlgorithmName.SHA256,
+                    RSASignaturePadding.Pkcs1
+                );
+
+                if (!esValida)
                 {
-                    if (!string.Equals((diaNoHabil.TipoCcy ?? string.Empty).Trim(), string.Empty, StringComparison.Ordinal))
-                        blnAux = true;
-                    else
-                        blnAux = false;
+                    Config.EscribirLog("WARN|MetodosFirma.GenerateSign|Validación legacy-first con llave pública del PFX falló. Se aplicará fallback de verificación.");
+                    esValida = ConfirmaFirma(data, firma);
+                }
+
+                if (esValida)
+                {
+                    Config.EscribirLog("INFO|MetodosFirma.GenerateSign|Trama firmada exitosamente");
+                    Config.EscribirLog("INFO|MetodosFirma.GenerateSign|Conversion Base 64");
+
+                    resultBase64 = Convert.ToBase64String(firma, 0, firma.Length);
+
+                    Config.EscribirLog($"INFO|MetodosFirma.GenerateSign|Resultado conversión Base 64 : {resultBase64}");
+                }
+            }
+            catch (Exception ex)
+            {
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+                throw new Exception("GenerateSign|Se presenta exception.", ex);
+            }
+
+            return resultBase64;
+        }
+/// <summary>
+/// Ejecuta la operaciÃ³n public.
+/// </summary>
+
+
+        public bool ConfirmaFirma(byte[] data, byte[] firma)
+        {
+            try
+            {
+                if (data == null || firma == null)
+                    return false;
+
+                X509Certificate2 certificate = null;
+                if (!string.IsNullOrWhiteSpace(_serialKarpay))
+                {
+                    string serialConfigurado = NormalizarSerialCertificado(_serialKarpay);
+                    certificate = ObtenerCertificadoPorSerial(serialConfigurado);
                 }
                 else
                 {
-                    blnAux = false;
+                    Config.EscribirLog("WARN|MetodosFirma.ConfirmaFirma|No se configuró serial Karpay. Se omite búsqueda en Store y se usa llave pública del PFX.");
+                }
+
+                if (certificate == null)
+                {
+                    Config.EscribirLog("WARN|MetodosFirma.ConfirmaFirma|No se encontró certificado por serial en LocalMachine/CurrentUser. Se usa llave pública del PFX cargado.");
+
+                    if (_rsaPublica == null)
+                        /// <summary>
+                        /// Ejecuta la operaciÃ³n CryptographicException.
+                        /// </summary>
+                        throw new CryptographicException("No se encontró certificado en Store y el PFX no contiene llave pública RSA.");
+
+                    return _rsaPublica.VerifyData(
+                        data,
+                        firma,
+                        HashAlgorithmName.SHA256,
+                        RSASignaturePadding.Pkcs1
+                    );
+                }
+
+                using (RSA publicKey = certificate.GetRSAPublicKey())
+                {
+                    if (publicKey == null)
+                        /// <summary>
+                        /// Ejecuta la operaciÃ³n CryptographicException.
+                        /// </summary>
+                        throw new CryptographicException("El certificado del Store no contiene llave pública RSA.");
+
+                    return publicKey.VerifyData(
+                        data,
+                        firma,
+                        HashAlgorithmName.SHA256,
+                        RSASignaturePadding.Pkcs1
+                    );
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                throw new Exception($"Error al validar el día habil siguiente con el folio: {folio}");
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+                throw new Exception("ConfirmaFirma|Se presenta exception.", ex);
             }
-
-            return blnAux;
         }
 
+        private X509Certificate2 ObtenerCertificadoPorSerial(string serialConfigurado)
+        {
+            X509Certificate2 certificado = BuscarEnStore(StoreLocation.LocalMachine, serialConfigurado);
+            if (certificado != null)
+                return certificado;
+/// <summary>
+/// Ejecuta la operaciÃ³n BuscarEnStore.
+/// </summary>
+
+            return BuscarEnStore(StoreLocation.CurrentUser, serialConfigurado);
+        }
+
+        private static X509Certificate2 BuscarEnStore(StoreLocation location, string serialConfigurado)
+        {
+            using (X509Store store = new X509Store(StoreName.My, location))
+            {
+                store.Open(OpenFlags.ReadOnly);
+
+                X509Certificate2Collection encontrados = store.Certificates.Find(
+                    X509FindType.FindBySerialNumber,
+                    serialConfigurado,
+                    false);
+
+                if (encontrados != null && encontrados.Count > 0)
+                    return encontrados[0];
+
+                return store.Certificates
+                    .OfType<X509Certificate2>()
+                    .FirstOrDefault(c => string.Equals(
+                        NormalizarSerialCertificado(c.SerialNumber),
+                        serialConfigurado,
+                        StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        private static string NormalizarSerialCertificado(string serial)
+        {
+            if (string.IsNullOrWhiteSpace(serial))
+                return string.Empty;
+
+            return serial
+                .Replace("0x", string.Empty)
+                .Replace("0X", string.Empty)
+                .Replace("\"", string.Empty)
+                .Replace(" ", string.Empty)
+                .Replace("\u200E", string.Empty)
+                .Replace("\u200F", string.Empty)
+                .Replace("\r", string.Empty)
+                .Replace("\n", string.Empty)
+                .Replace("\t", string.Empty)
+                .Trim()
+                .ToUpperInvariant();
+        }
+/// <summary>
+/// Ejecuta la operaciÃ³n public.
+/// </summary>
+
+        public bool CertificadoEncontrado()
+        {
+            try
+            {
+                X509Certificate2Collection collection = new X509Certificate2Collection();
+                collection.Import(_rutaPfx, _password, X509KeyStorageFlags.DefaultKeySet);
+
+                X509Certificate2 cert = collection[0];
+                return cert.HasPrivateKey;
+            }
+            catch (Exception ex)
+            {
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+                throw new Exception("CertificadoEncontrado|Se presenta exception.", ex);
+            }
+        }
+/// <summary>
+/// Ejecuta la operaciÃ³n public.
+/// </summary>
+
+        public void Dispose()
+        {
+            _rsaPrivada?.Dispose();
+            _rsaPublica?.Dispose();
+            _certificado?.Dispose();
+        }
+
+    }
 }
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Representa Orden Pago Byte Array.
+    /// </summary>
+    public class OrdenPagoByteArray
+    {
+        public byte[] OpFechaOper { get; set; }
+        public byte[] InsClaveOrd { get; set; }
+        public byte[] InsClaveBen { get; set; }
+        public byte[] OpCveRastreo { get; set; }
+        public byte[] OpMonto { get; set; }
+        public byte[] OpCuentaOrd { get; set; }
+        public byte[] OpCuentaBen { get; set; }
+        public byte[] OpCuentaBen2 { get; set; }
+        public byte[] TramaCompleta { get; set; }
+
+        public object opCuentaPartOrd { get; set; }
+        public object opCuentaEmiRem { get; set; }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Representa Orden Pago Value.
+    /// </summary>
+    public class OrdenPagoValue
+    {
+        public object OpFechaOper { get; set; }
+        public object InsClaveOrd { get; set; }
+        public object InsClaveBen { get; set; }
+        public object OpCveRastreo { get; set; }
+        public object OpMonto { get; set; }
+        public object OpCuentaOrd { get; set; }
+        public object OpCuentaBen { get; set; }
+        public object OpCuentaBen2 { get; set; }
+        public object TpPago { get; set; }
+        public object opCuentaPartOrd { get; set; }
+        public object opCuentaEmiRem { get; set; }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Representa Orden Pago Value.
+    /// </summary>
+    public class OrdenPagoValue
+    {
+        public object OpFechaOper { get; set; }
+        public object InsClaveOrd { get; set; }
+        public object InsClaveBen { get; set; }
+        public object OpCveRastreo { get; set; }
+        public object OpMonto { get; set; }
+        public object OpCuentaOrd { get; set; }
+        public object OpCuentaBen { get; set; }
+        public object OpCuentaBen2 { get; set; }
+        public object TpPago { get; set; }
+        public object opCuentaPartOrd { get; set; }
+        public object opCuentaEmiRem { get; set; }
+    }
+}
+
+using System;
+
+namespace Aplicacion.DTOs.CNT
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class CntEntradaSalidaDto
+    {
+        public DateTime? EntFechaValor { get; set; }
+        public string EntMonedaCuenta { get; set; }
+        public decimal? EntImporte { get; set; }
+    }
+}
+
+namespace Aplicacion.DTOs.CNT
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoRegistrosDto
+    {
+        public int NumRegs { get; set; }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.ComunSPID
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class SpidFirmaDigitalDto
+    {
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string T24_TRANSACTION_ID { get; set; }
+        public decimal? IMPORTE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public string NF_FOLIO_UNICO { get; set; }
+        public string OP_FIRMA_DIG { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class SpidGeneraFirmaDto
+    {
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string T24_TRANSACTION_ID { get; set; }
+        public decimal? IMPORTE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public string NF_FOLIO_UNICO { get; set; }
+    }
+
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.ConfiguracionServicio
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class OperacionDTO
+    {
+        public string StrFolio;
+        public string StrTipoOperacion;
+        public string StrServicio { get; set; }
+        public int PId { get; set; }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.ENT_COAS
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasParticipanteSpeiDto
+    {
+        public decimal InsClave { get; set; }
+        public decimal InsIndice { get; set; }
+        public string InsNombre { get; set; }
+        public string InsEdoRecep { get; set; }
+        public string InsEdoConec { get; set; }
+        public string InsEstado { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasRespuestaSpeiDto
+    {
+        public decimal? OpError { get; set; }
+        public decimal? OpClave { get; set; }
+        public decimal? OpFechaOper { get; set; }
+        public decimal? OpFolio { get; set; }
+        public string OpDescripcion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasResponderEntradaSpeiRequestDto
+    {
+        public decimal? OpClave { get; set; }
+        public decimal? OpFechaOper { get; set; }
+        public decimal? OpFolio { get; set; }
+        public string OpCveRastreo { get; set; }
+        public decimal? OpMonto { get; set; }
+        public decimal? CdClave { get; set; }
+        public string OpEstatus { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasInsertarFormatoSpeiDto
+    {
+        public decimal? OpClave { get; set; }
+        public decimal? OpFechaOper { get; set; }
+        public decimal? MeClave { get; set; }
+        public decimal? OpFolio { get; set; }
+        public decimal? InsClave { get; set; }
+        public decimal? OpMonto { get; set; }
+        public decimal? TpClave { get; set; }
+        public string OpCveRastreo { get; set; }
+        public string OpNomOrd { get; set; }
+        public decimal? TcClaveOrd { get; set; }
+        public string OpCuentaOrd { get; set; }
+        public string OpRfcCurpOrd { get; set; }
+        public string OpNomBen { get; set; }
+        public decimal? TcClaveBen { get; set; }
+        public string OpCuentaBen { get; set; }
+        public string OpRfcCurpBen { get; set; }
+        public string OpNomBen2 { get; set; }
+        public decimal? TcClaveBen2 { get; set; }
+        public string OpCuentaBen2 { get; set; }
+        public string OpRfcCurpBen2 { get; set; }
+        public string OpConceptoPago { get; set; }
+        public string OpConceptoPag2 { get; set; }
+        public decimal? OpIva { get; set; }
+        public decimal? OpRefNumerica { get; set; }
+        public string OpRefCobranza { get; set; }
+        public string OpClavePago { get; set; }
+        public decimal? ToClave { get; set; }
+        public decimal? CdClave { get; set; }
+        public string OpEstado { get; set; }
+        public string OpCde { get; set; }
+        public decimal? OpFechaCap { get; set; }
+        public decimal? OpHoraCap { get; set; }
+        public string OpTipoOrden { get; set; }
+        public decimal? OpPrioridad { get; set; }
+        public string UsuClave { get; set; }
+        public decimal? OpFolioServidor { get; set; }
+        public string OpRazonRechazo { get; set; }
+        public string OpUsuAutoriza { get; set; }
+        public decimal? OpHoraLiqBm { get; set; }
+        public decimal? OpHoraLiqSist { get; set; }
+
+        public string NfEstatus { get; set; }
+        public string NfFolioUnico { get; set; }
+        public string T24CustomerCode { get; set; }
+        public string T24CompanyName { get; set; }
+        public string T24BenAcctNo { get; set; }
+        public string NfBancoBenef { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasInsertarEntradaSalidaDto
+    {
+        public string Referencia { get; set; }
+        public decimal? NumCliente { get; set; }
+        public decimal? Cdl { get; set; }
+        public string Ordenante { get; set; }
+        public decimal? Operacion { get; set; }
+        public string OperacionDesc { get; set; }
+        public string Tipo { get; set; }
+        public string TipoDesc { get; set; }
+        public decimal? Cuenta { get; set; }
+        public string Nombre { get; set; }
+        public string CuentaMoneda { get; set; }
+        public decimal? Via { get; set; }
+        public string ViaDesc { get; set; }
+        public decimal? Importe { get; set; }
+        public decimal? Saldo { get; set; }
+        public string Comentarios { get; set; }
+        public DateTime? FechaCaptura { get; set; }
+        public DateTime? FechaValor { get; set; }
+        public string Hora { get; set; }
+        public string Capturista { get; set; }
+        public decimal? Fad { get; set; }
+        public string ReferenciaControl { get; set; }
+        public int? ReferenciaControlCont { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasOrdenPagoDto
+    {
+        public string EstadoPendiente { get; set; }
+
+        public int? OpClave { get; set; }
+        public int? OpFechaOper { get; set; }
+        public int? MeClave { get; set; }
+        public int? OpFolio { get; set; }
+        public int? InsClave { get; set; }
+        public decimal? OpMonto { get; set; }
+        public int? TpClave { get; set; }
+        public string OpCveRastreo { get; set; }
+        public string OpNomOrd { get; set; }
+        public int? TcClaveOrd { get; set; }
+        public string OpCuentaOrd { get; set; }
+        public string OpRfcCurpOrd { get; set; }
+        public string OpNomBen { get; set; }
+        public int? TcClaveBen { get; set; }
+        public string OpCuentaBen { get; set; }
+        public string OpRfcCurpBen { get; set; }
+        public string OpNomBen2 { get; set; }
+        public int? TcClaveBen2 { get; set; }
+        public string OpCuentaBen2 { get; set; }
+        public string OpRfcCurpBen2 { get; set; }
+        public string OpConceptoPago { get; set; }
+        public string OpConceptoPag2 { get; set; }
+        public decimal? OpIva { get; set; }
+        public int? OpRefNumerica { get; set; }
+        public string OpRefCobranza { get; set; }
+        public string OpClavePago { get; set; }
+        public int? ToClave { get; set; }
+        public int? CdClave { get; set; }
+        public string OpEstado { get; set; }
+        public string OpCde { get; set; }
+        public int? OpFechaCap { get; set; }
+        public int? OpHoraCap { get; set; }
+        public string OpTipoOrden { get; set; }
+        public int? OpPrioridad { get; set; }
+        public string UsuClave { get; set; }
+        public int? OpFolioServidor { get; set; }
+        public string OpRazonRechazo { get; set; }
+        public string OpUsuAutoriza { get; set; }
+        public string OpTopologia { get; set; }
+        public int? ErrClave { get; set; }
+        public string OpExporta { get; set; }
+        public string OpCargoAbono { get; set; }
+        public string OpAfectaBan { get; set; }
+        public string OpDuplicado { get; set; }
+        public int? OpHoraLiqBm { get; set; }
+
+        // Columnas adicionales del SELECT legacy no copiadas al arreglo laValoresFormato(0..45),
+        // pero sí presentes en el SELECT original.
+        public int? OpHoraLiqSist { get; set; }
+        public int? HoraCargoAbono { get; set; }
+        public int? AhArClave { get; set; }
+        public string OpAhEstado { get; set; }
+        public string ChkFolioHost { get; set; }
+        public string OpCuentaDev { get; set; }
+        public string OpAplicaVos { get; set; }
+        public string OpDepurado { get; set; }
+        public string OpProcesaXml { get; set; }
+        public int? OrdenesHostOpClave { get; set; }
+        public string OpCveRastreoHex { get; set; }
+        public string OpEdoHost { get; set; }
+        public string OpIdMensaje { get; set; }
+        public int? OpHoraHost { get; set; }
+        public string OpEdoAcuse { get; set; }
+        public int? OpHoraAcuse { get; set; }
+        public string OpIdAcuse { get; set; }
+        public int? OpPaqFolio { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasConciliacionTomiDto
+    {
+        public int? OpFechaOper { get; set; }
+        public decimal? OpMonto { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasConciliacionEntradaSalidaDto
+    {
+        public DateTime? EntFechaValor { get; set; }
+        public string EntMonedaCuenta { get; set; }
+        public decimal? EntImporte { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntCoasEntradaSpeiTomiDto
+    {
+        public double? OpMonto { get; set; }
+    }
+
+}
+
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoRegistrosDto
+    {
+        public int NumRegs { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiAutoDevolucionDto
+    {
+        public int Clave { get; set; }
+        public int CodigoDevolucion { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiCambioEstatusRespuestaDto
+    {
+        public decimal? op_error { get; set; }
+        public decimal? op_clave { get; set; }
+        public decimal? op_fecha_oper { get; set; }
+        public decimal? op_folio { get; set; }
+        public string op_descripcion { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiCuentaVostroDto
+    {
+        public string CuentaBeneficiario { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiDataDevolucionDto
+    {
+        public int? OpFechaOper { get; set; }
+        public string OpCveRastreo { get; set; }
+        public int? InsClave { get; set; }
+        public double? OpMonto { get; set; }
+    }
+}
+using System;
+
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiEntradaSalidaConciliacionDto
+    {
+        public DateTime? EntFechaValor { get; set; }
+        public string EntMonedaCuenta { get; set; }
+        public double? EntImporte { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiNfEntradaSpeiDto
+    {
+        public long OpClave { get; set; }
+        public int OpFechaOper { get; set; }
+        public decimal OpMonto { get; set; }
+        public string TpClave { get; set; }
+        public string NfEstatus { get; set; }
+        public string NfFolioUnico { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiOperacionRecibidaDto
+    {
+        public string op_estatus { get; set; }
+        public decimal op_clave { get; set; }
+        public decimal op_fecha_oper { get; set; }
+        public decimal? me_clave { get; set; }
+        public decimal? op_folio { get; set; }
+        public decimal? ins_clave { get; set; }
+        public decimal? op_monto { get; set; }
+        public decimal? tp_clave { get; set; }
+        public string op_cve_rastreo { get; set; }
+        public string op_nom_ord { get; set; }
+        public decimal? tc_clave_ord { get; set; }
+        public string op_cuenta_ord { get; set; }
+        public string op_rfc_curp_ord { get; set; }
+        public string op_nom_ben { get; set; }
+        public decimal? tc_clave_ben { get; set; }
+        public string op_cuenta_ben { get; set; }
+        public string op_rfc_curp_ben { get; set; }
+        public string op_nom_ben2 { get; set; }
+        public decimal? tc_clave_ben2 { get; set; }
+        public string op_cuenta_ben2 { get; set; }
+        public string op_rfc_curp_ben2 { get; set; }
+        public string op_concepto_pago { get; set; }
+        public string op_concepto_pag2 { get; set; }
+        public decimal? op_iva { get; set; }
+        public decimal? op_ref_numerica { get; set; }
+        public string op_ref_cobranza { get; set; }
+        public string op_clave_pago { get; set; }
+        public decimal? to_clave { get; set; }
+        public decimal? cd_clave { get; set; }
+        public string op_estado { get; set; }
+        public string op_cde { get; set; }
+        public decimal? op_fecha_cap { get; set; }
+        public decimal? op_hora_cap { get; set; }
+        public string op_tipo_orden { get; set; }
+        public decimal? op_prioridad { get; set; }
+        public string usu_clave { get; set; }
+        public decimal? op_folio_servidor { get; set; }
+        public string op_razon_rechazo { get; set; }
+        public string op_usu_autoriza { get; set; }
+        public decimal? op_topologia { get; set; }
+        public decimal? err_clave { get; set; }
+        public decimal? op_exporta { get; set; }
+        public string op_cargo_abono { get; set; }
+        public decimal? op_afecta_ban { get; set; }
+        public decimal? op_duplicado { get; set; }
+        public decimal? op_hora_liq_bm { get; set; }
+        public decimal? op_hora_liq_sist { get; set; }
+        public decimal? hora_cargo_abono { get; set; }
+        public decimal? ah_ar_clave { get; set; }
+        public string op_ah_estado { get; set; }
+        public decimal? chk_folio_host { get; set; }
+        public string op_cuenta_dev { get; set; }
+        public decimal? op_aplica_vos { get; set; }
+        public decimal? op_depurado { get; set; }
+        public decimal? op_procesa_xml { get; set; }
+        public decimal? ordenes_host_op_clave { get; set; }
+        public string op_cve_rastreoHEX { get; set; }
+        public string op_edo_host { get; set; }
+        public decimal? op_id_mensaje { get; set; }
+        public decimal? op_hora_host { get; set; }
+        public string op_edo_acuse { get; set; }
+        public decimal? op_hora_acuse { get; set; }
+        public decimal? op_id_acuse { get; set; }
+        public decimal? op_paq_folio { get; set; }
+        public string OP_FIRMA_DIG { get; set; }
+        public string OP_CUENTA_PART_ORD { get; set; }
+        public string OP_CUENTA_EMI_REM { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiParticipanteDto
+    {
+        public int ins_clave { get; set; }
+        public string ins_nombre { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.ENT_SPEI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpeiTomiConciliacionDto
+    {
+        public int? OpFechaOper { get; set; }
+        public double? OpMonto { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.ENT_SPID
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidInsertarFormatoTomiDto
+    {
+        public long OpClave { get; set; }
+        public int OpFechaOper { get; set; }
+        public int MeClave { get; set; }
+        public int OpFolio { get; set; }
+        public long InsClave { get; set; }
+        public decimal OpMonto { get; set; }
+        public int TpClave { get; set; }
+
+        public string OpCveRastreo { get; set; }
+
+        public string OpNomOrd { get; set; }
+        public int? TcClaveOrd { get; set; }
+        public string OpCuentaOrd { get; set; }
+        public string OpRfcCurpOrd { get; set; }
+
+        public string OpNomBen { get; set; }
+        public int? TcClaveBen { get; set; }
+        public string OpCuentaBen { get; set; }
+        public string OpRfcCurpBen { get; set; }
+
+        public string OpNomBen2 { get; set; }
+        public int? TcClaveBen2 { get; set; }
+        public string OpCuentaBen2 { get; set; }
+        public string OpRfcCurpBen2 { get; set; }
+
+        public string OpConceptoPago { get; set; }
+        public string OpConceptoPag2 { get; set; }
+        public decimal? OpIva { get; set; }
+
+        public string OpRefNumerica { get; set; }
+        public string OpRefCobranza { get; set; }
+        public string OpClavePago { get; set; }
+
+        public int? ToClave { get; set; }
+        public int? CdClave { get; set; }
+
+        public string OpEstado { get; set; }
+        public string OpCde { get; set; }
+
+        public int OpFechaCap { get; set; }
+        public int OpHoraCap { get; set; }
+
+        public string OpTipoOrden { get; set; }
+        public int OpPrioridad { get; set; }
+
+        public string UsuClave { get; set; }
+        public long? OpFolioServidor { get; set; }
+
+        public string OpRazonRechazo { get; set; }
+        public string OpUsuAutoriza { get; set; }
+
+        public int? OpHoraLiqBm { get; set; }
+        public long? OpHoraLiqSist { get; set; }
+
+        public string NfEstatus { get; set; }
+        public string NfFolioUnico { get; set; }
+
+        public string T24CustomerCode { get; set; }
+        public string T24CompanyName { get; set; }
+        public string T24BenAcctNo { get; set; }
+
+        public string NfBancoBenef { get; set; }
+        public int NfFechaEjecucion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class T24InformacionCuentaDto
+    {
+        public string Status { get; set; }
+        public string Currency { get; set; }
+        public string Category { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidOperacionRecibidaDto
+    {
+        public decimal OpClave { get; set; }
+        public decimal OpFechaOper { get; set; }
+        public decimal MeClave { get; set; }
+        public decimal OpFolio { get; set; }
+        public decimal InsClave { get; set; }
+        public decimal OpMonto { get; set; }
+        public decimal TpClave { get; set; }
+
+        public string OpCveRastreo { get; set; }
+
+        public string OpNomOrd { get; set; }
+        public decimal? TcClaveOrd { get; set; }
+        public string OpCuentaOrd { get; set; }
+        public string OpRfcCurpOrd { get; set; }
+
+        public string OpNomBen { get; set; }
+        public decimal? TcClaveBen { get; set; }
+        public string OpCuentaBen { get; set; }
+        public string OpRfcCurpBen { get; set; }
+
+        public string OpNomBen2 { get; set; }
+        public decimal? TcClaveBen2 { get; set; }
+        public string OpCuentaBen2 { get; set; }
+        public string OpRfcCurpBen2 { get; set; }
+
+        public string OpConceptoPago { get; set; }
+        public string OpConceptoPag2 { get; set; }
+        public decimal? OpIva { get; set; }
+
+        public string OpRefNumerica { get; set; }
+        public string OpRefCobranza { get; set; }
+        public string OpClavePago { get; set; }
+
+        public decimal? ToClave { get; set; }
+        public decimal? CdClave { get; set; }
+
+        public string OpEstado { get; set; }
+        public string OpCde { get; set; }
+
+        public decimal OpFechaCap { get; set; }
+        public decimal OpHoraCap { get; set; }
+
+        public string OpTipoOrden { get; set; }
+        public decimal OpPrioridad { get; set; }
+
+        public string UsuClave { get; set; }
+        public decimal? OpFolioServidor { get; set; }
+
+        public string OpRazonRechazo { get; set; }
+        public string OpUsuAutoriza { get; set; }
+
+        public decimal? OpHoraLiqBm { get; set; }
+        public decimal? OpHoraLiqSist { get; set; }
+
+        public string OpFirmaDig { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidParticipanteDto
+    {
+        public decimal InsClave { get; set; }
+        public string InsNombre { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidConciliacionTomiDto
+    {
+        public decimal OpFechaOper { get; set; }
+        public decimal OpMonto { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidConciliacionEntradaSalidaDto
+    {
+        public DateTime? EntFechaValor { get; set; }
+        public string EntMonedaCuenta { get; set; }
+        public decimal EntImporte { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoRegistrosDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ResultadoSalidaDto
+    {
+        public short Salida { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidEntradaSpidParaEntradaSalidaDto
+    {
+        public decimal OpMonto { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidInsertarEntradaSalidaDto
+    {
+        public string Referencia { get; set; }            
+        public long NumCliente { get; set; }              
+        public long Cdl { get; set; }                     
+
+        public string Ordenante { get; set; }             
+
+        public long Operacion { get; set; }               
+        public string OperacionDesc { get; set; }         
+
+        public string Tipo { get; set; }                  
+        public string TipoDesc { get; set; }              
+
+        public long? Cuenta { get; set; }                 
+        public string Nombre { get; set; }                
+        public string CuentaMoneda { get; set; }          
+
+        public long Via { get; set; }                     
+        public string ViaDesc { get; set; }               
+
+        public decimal Importe { get; set; }              
+        public decimal Saldo { get; set; }                
+
+        public string Comentarios { get; set; }           
+
+        public DateTime? FechaCaptura { get; set; }       
+        public DateTime? FechaValor { get; set; }         
+
+        public string Hora { get; set; }                  
+        public string Capturista { get; set; }            
+
+        public long Fad { get; set; }                     
+        public string ReferenciaControl { get; set; }     
+        public int? ReferenciaControlCont { get; set; }   
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidCambioEstatusResultadoDto
+    {
+        public int Codigo { get; set; }
+        public string Mensaje { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidCambiarEstatusRecibidaDto
+    {
+        public long OpClave { get; set; }              
+        public int OpFechaOper { get; set; }           
+        public int OpFolio { get; set; }               
+        public string OpCveRastreo { get; set; }       
+        public decimal OpMonto { get; set; }           
+        public int CausaDevolucion { get; set; }       
+        public string OpEstatus { get; set; }          
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidDatosDevolucionDto
+    {
+        public int OpFechaOper { get; set; }           
+        public string OpCveRastreo { get; set; }       
+        public long InsClave { get; set; }             
+        public decimal OpMonto { get; set; }           
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntSpidDevolverEntradaDto
+    {
+        public long OpClave { get; set; }              
+        public int CausaDevolucion { get; set; }       
+        public string OpFirmaDigital { get; set; }     
+    }
 
 }
 
@@ -7252,749 +3714,2712 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace Aplicacion.Servicios.Operaciones
+namespace Aplicacion.DTOs.ENT_TEF
 {
-    using Aplicacion.DTOs.TAX;
-    using Aplicacion.Interfaces.TAX;
-    using Aplicacion.Modelos;
-    using MUFG_T24.Comunes;
-    using MUFG_T24.Comunes.Helpers;
-    using MUFG_T24.Interfaces_utilidades;
-    using MUFG_T24.Modelos;
-    using MUFG_T24.Repositorios;
-    using System;
-    using System.Globalization;
-    using System.Threading.Tasks;
-    using static MUFG_T24.Comunes.Comunes;
     /// <summary>
-    /// Representa TAX.
+    /// DTO necesario para recuperar datos.
     /// </summary>
-
-    public class TAX
+    public class EntTefParticipanteDto
     {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly ITAXCmsDao _taxCmsDao;
-        private readonly ITAXTomiDao _taxTomiDao;
-        private readonly ConexionT24Mw _vwT24;
-
-        private const string tipoOperacion = "TAX";
-        private string folioUnico = string.Empty;
-
-        /// <summary>
-        /// Constructor.
-        /// </summary>
-        public TAX(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            ITAXCmsDao taxCmsDao,
-            ITAXTomiDao taxTomiDao,
-            ConexionT24Mw vwT24)
-        {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _taxCmsDao = taxCmsDao;
-            _taxTomiDao = taxTomiDao;
-            _vwT24 = vwT24;
-        }
-
-        /// <summary>
-        /// Procesa la operación TAX del servicio Lectura.
-        /// </summary>
-        public async Task<bool> ProcesaOperacion(string folio)
-        {
-            long folioNumerico = Convert.ToInt64(folio, CultureInfo.InvariantCulture);
-
-            TaxFormatoCmsDto formatoCms;
-            object[] valoresFormato = new object[38];
-
-            string fechaEjecucionTexto = string.Empty;
-            string moneda = string.Empty;
-            decimal importe = 0m;
-            bool conEntradaSalida = true;
-            bool procesado;
-            bool resultado;
-
-            // Verificamos la última operación no realizada.
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
-
-            if (string.Equals(_configuracion.AliasProceso, "", StringComparison.Ordinal))
-                return false;
-
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Inicia proceso folio={folio}.");
-
-            // Datos del folio en CMS.
-            formatoCms = await _taxCmsDao.ObtenerFormatoTaxPorFolio(folioNumerico);
-            if (formatoCms is null)
-                formatoCms = new TaxFormatoCmsDto();
-            /// <summary>
-            /// Ejecuta la operaciÃ³n CargarValoresFormato.
-            /// </summary>
-
-            CargarValoresFormato(formatoCms, valoresFormato, folio);
-
-            // Fecha ejecución.
-            if (valoresFormato[13] != null && valoresFormato[13] != DBNull.Value)
-                fechaEjecucionTexto = DameTexto(valoresFormato[13]);
-
-            // Moneda.
-            if (valoresFormato[4] != null && valoresFormato[4] != DBNull.Value)
-                moneda = _vwT24.ValidaMoneda(DameTexto(valoresFormato[4]));
-
-            // Importe.
-            importe = formatoCms.OperatingAmount;
-
-            decimal montoCapturado = ConversionHelper.ConvertirDecimalComparable(valoresFormato[5]);
-            decimal montoEnviado = ConversionHelper.ConvertirDecimalComparable(valoresFormato[18]);
-            decimal montoOperacion = ConversionHelper.ConvertirDecimalComparable(valoresFormato[35]);
-
-            if (montoCapturado != montoEnviado || montoCapturado != montoOperacion)
-            {
-                throw new Exception(
-                    $"Hay diferencias entre los montos de la operación: " +
-                    $"MontoOperacion={montoOperacion}, " +
-                    $"MontoCapturado={montoCapturado}, " +
-                    $"MontoEnviado={montoEnviado}.");
-            }
-
-            Config.EscribirLog($"INFO|TAX.procesaOperacion|Veamos que trae la fecha{valoresFormato[13]}-----{fechaEjecucionTexto}");
-
-            int fechaSistema = int.Parse(_configuracion.StrFechaSistema, CultureInfo.InvariantCulture);
-            int intFechaEjecucion = int.Parse(fechaEjecucionTexto, CultureInfo.InvariantCulture);
-            if (intFechaEjecucion < fechaSistema)
-            {
-                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
-                throw new Exception(
-                    $"Se desea realizar una operación al {fechaEjecucionTexto} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-            }
-
-            // Genero el folio único.
-            folioUnico = await _vwT24.GeneraFolioUnico(
-                tipoOperacion,
-                ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucionTexto),
-                folio);
-
-            // Lectura y actualización de los datos del maestro.
-            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
-            {
-                string subtipoOperacion = string.Empty;
-
-                Config.EscribirLog("INFO|TAX.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                await _taxTomiDao.ActualizarDatosGeneralesMaestro(
-                    folioNumerico,
-                    folioUnico,
-                    Convert.ToDecimal(fechaEjecucionTexto, CultureInfo.InvariantCulture),
-                    moneda,
-                    importe,
-                    ConversionHelper.ConvertirNullableInt(valoresFormato[29]),
-                    DameTexto(valoresFormato[1]),
-                    DameTexto(valoresFormato[30]),
-                    subtipoOperacion);
-
-                await _controlServicio.TerminaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-            }
-
-            // Lectura del CMS e inserción a TOMI.
-            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
-            {
-                Config.EscribirLog("INFO|TAX.procesaOperacion|A insertar datos de CMS a TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                procesado = false;
-                resultado = await CMS_A_TOMI(folioNumerico, valoresFormato);
-
-                if (resultado)
-                {
-                    Config.EscribirLog("INFO|TAX.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
-                    procesado = true;
-                }
-                else
-                {
-                    // Posiblemente se restauró el servicio.
-                    int numRegs = await _taxTomiDao.ContarTaxPayPorFolio(folioNumerico);
-                    if (numRegs > 0)
-                    {
-                        procesado = true;
-                        Config.EscribirLog("INFO|TAX.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
-                    }
-                }
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {folio}");
-                }
-            }
-
-            // Registro de la Entrada/Salida.
-            if (string.Equals(_configuracion.AliasProceso, "TOMI_ENTRADAS/SALIDAS", StringComparison.Ordinal))
-            {
-                Config.EscribirLog("INFO|TAX.procesaOperacion|A insertar datos de Entrada/Salida en TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                if (conEntradaSalida)
-                {
-                    procesado = false;
-                    resultado = await TOMI_ENTRADA_SALIDA(folioNumerico);
-
-                    if (resultado)
-                    {
-                        procesado = true;
-                        Config.EscribirLog("INFO|TAX.procesaOperacion|Se insertó correctamente el folio en base de Entrada/Salida.");
-                    }
-                    else
-                    {
-                        // Posiblemente se restauró el servicio.
-                        int numRegs = await _taxTomiDao.ContarEntradaSalidaPorReferencia(folioUnico);
-                        if (numRegs > 0)
-                        {
-                            procesado = true;
-                            Config.EscribirLog("INFO|TAX.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
-                        }
-                    }
-                }
-                else
-                {
-                    procesado = true;
-                    Config.EscribirLog("INFO|TAX.procesaOperacion|La operación no debe generar Entrada/Salida en TOMI).");
-                }
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
-                }
-            }
-
-            // Actualización del estatus del CMS y TOMI.
-            if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
-            {
-                Config.EscribirLog("INFO|TAX.procesaOperacion|A actualizar estatus en CMS y TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                procesado = true;
-
-                if (string.Equals(fechaEjecucionTexto, _configuracion.StrFechaSistema, StringComparison.Ordinal))
-                {
-                    DateTime fechaConfirma = DateTime.ParseExact(
-                        DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                        "yyyy/MM/dd HH:mm",
-                        CultureInfo.InvariantCulture);
-
-                    await _taxCmsDao.ActualizarFormatoAceptado(folioNumerico);
-                    await _taxTomiDao.ActualizarTaxPayAceptado(folioNumerico, "OPER CMS", fechaConfirma);
-
-                    Config.EscribirLog("INFO|TAX.procesaOperacion|Operación fecha valor hoy.");
-                }
-                else if (string.Compare(fechaEjecucionTexto, _configuracion.StrFechaSistema, StringComparison.Ordinal) < 0)
-                {
-                    await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio, CultureInfo.InvariantCulture));
-                    throw new Exception(
-                        $"Se desea realizar una operación al {fechaEjecucionTexto} " +
-                        $"cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
-                }
-                else
-                {
-                    DateTime fechaConfirma = DateTime.ParseExact(
-                        DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
-                        "yyyy/MM/dd HH:mm",
-                        CultureInfo.InvariantCulture);
-
-                    await _taxCmsDao.ActualizarFormatoRecibidoPendienteEjecucion(folioNumerico);
-                    await _taxTomiDao.ActualizarTaxPayFechaFutura(folioNumerico, "OPER CMS", fechaConfirma);
-
-                    Config.EscribirLog("INFO|TAX.procesaOperacion|Operación fecha valor fútura.");
-                }
-
-                if (procesado)
-                {
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CAMBIO_ESTATUS con folio: {folio}");
-                }
-            }
-
-            // Conciliación.
-            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
-            {
-                int regsCms = 1;
-                int regsTomi = 0;
-                int regsEntSal = 0;
-
-                string mensajeError = string.Empty;
-
-                string fechaEjecucionTomi = string.Empty;
-                string monedaTomi = string.Empty;
-                decimal importeTomi = 0m;
-
-                string fechaEjecucionEntSal = string.Empty;
-                string monedaEntSal = string.Empty;
-                decimal importeEntSal = 0m;
-
-                Config.EscribirLog("INFO|TAX.procesaOperacion|A conciliar operaciones entre CMS y TOMI.");
-
-                await _controlServicio.IniciaProceso(new ProcesoDTO
-                {
-                    Folio = folio,
-                    TipoOperacion = tipoOperacion,
-                    Servicio = _configuracion.NombreServicio,
-                    NombreProceso = _configuracion.NombreProceso,
-                    AliasProceso = _configuracion.AliasProceso,
-                    PId = _configuracion.Pid.Value
-                });
-
-                TaxPayConciliacionDto taxPay = await _taxTomiDao.ObtenerTaxPayParaConciliacion(folioNumerico);
-                if (taxPay != null)
-                {
-                    regsTomi = 1;
-                    fechaEjecucionTomi = taxPay.NfFechaEjecucion?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-                    monedaTomi = _vwT24.ValidaMoneda(taxPay.T24Currency);
-                    importeTomi = taxPay.T24Amount ?? 0m;
-                }
-
-                if (conEntradaSalida)
-                {
-                    TaxEntradaSalidaConciliacionDto entradaSalida = await _taxTomiDao.ObtenerEntradaSalidaParaConciliacion(folioUnico);
-                    if (entradaSalida != null)
-                    {
-                        regsEntSal = 1;
-                        fechaEjecucionEntSal = entradaSalida.EntFechaValor?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? string.Empty;
-                        monedaEntSal = _vwT24.ValidaMoneda(entradaSalida.EntMonedaCuenta);
-                        importeEntSal = Convert.ToDecimal(entradaSalida.EntImporte);
-                    }
-                }
-
-                mensajeError = string.Empty;
-
-                if (regsCms == 1 &&
-                    regsTomi == 1 &&
-                    ((conEntradaSalida && regsEntSal == 1) || !conEntradaSalida))
-                {
-                    if (!string.Equals(fechaEjecucionTexto, fechaEjecucionTomi, StringComparison.Ordinal))
-                    {
-                        mensajeError += Environment.NewLine +
-                            $" - Diferencia en la fecha de ejecución. CMS='{fechaEjecucionTexto}', TOMI='{fechaEjecucionTomi}'.";
-                    }
-
-                    if (!string.Equals(moneda, monedaTomi, StringComparison.Ordinal))
-                    {
-                        mensajeError += Environment.NewLine +
-                            $" - Diferencia en la monedas. CMS='{moneda}', TOMI='{monedaTomi}'.";
-                    }
-
-                    if (importe != importeTomi)
-                    {
-                        mensajeError += Environment.NewLine +
-                            $" - Diferencia en el importe. CMS='{importe}', TOMI='{importeTomi}'.";
-                    }
-
-                    if (conEntradaSalida)
-                    {
-                        if (!string.Equals(fechaEjecucionTexto, fechaEjecucionEntSal, StringComparison.Ordinal))
-                        {
-                            mensajeError += Environment.NewLine +
-                                $" - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='{fechaEjecucionTexto}', TOMI='{fechaEjecucionEntSal}'.";
-                        }
-
-                        if (!string.Equals(moneda, monedaEntSal, StringComparison.Ordinal))
-                        {
-                            mensajeError += Environment.NewLine +
-                                $" - Diferencia en la monedas de Entrada/Salida. CMS='{moneda}', TOMI='{monedaEntSal}'.";
-                        }
-
-                        if (importe != importeEntSal)
-                        {
-                            mensajeError += Environment.NewLine +
-                                $" - Diferencia en el importe de Entrada/Salida. CMS='{importe}', Entrada/Salida='{importeEntSal}'.";
-                        }
-                    }
-
-                    procesado = true;
-                }
-                else
-                {
-                    procesado = false;
-                    mensajeError += Environment.NewLine + " - No se ha registrado la operación en TOMI.";
-                }
-
-                if (!string.Equals(mensajeError, "", StringComparison.Ordinal))
-                {
-                    procesado = false;
-                    /// <summary>
-                    /// Ejecuta la operaciÃ³n Exception.
-                    /// </summary>
-                    throw new Exception(mensajeError);
-                }
-
-                if (procesado)
-                {
-                    Config.EscribirLog("INFO|TAX.procesaOperacion|La operación está correctamente conciliada.");
-
-                    await _controlServicio.TerminaProceso(new ProcesoDTO
-                    {
-                        Folio = folio,
-                        TipoOperacion = tipoOperacion,
-                        Servicio = _configuracion.NombreServicio,
-                        NombreProceso = _configuracion.NombreProceso,
-                        AliasProceso = _configuracion.AliasProceso,
-                        PId = _configuracion.Pid.Value
-                    });
-
-                    _configuracion.AliasProceso = "";
-                }
-                else
-                {
-                    throw new Exception($"Error en procesamiento de registro CONCILIAR con folio: {folio}");
-                }
-            }
-
-            return true;
-        }
-
-        /// <summary>
-        /// Inserta registro en la base de datos de TOMI con datos provenientes del CMS.
-        /// </summary>
-        private async Task<bool> CMS_A_TOMI(long folio, object[] valoresFormato)
-        {
-            try
-            {
-                bool resultado = await _taxTomiDao.InsertarFormatoTaxPay(
-                    DameTexto(valoresFormato[27]),
-                    Convert.ToInt64(valoresFormato[28], CultureInfo.InvariantCulture),
-                    DameTexto(valoresFormato[29]),
-                    DameTexto(valoresFormato[1]),
-                    "PEND",
-                    DameTexto(valoresFormato[32]),
-                    DameTexto(valoresFormato[34]),
-                    ConversionHelper.ConvertirNullableDateTimeInvariant(valoresFormato[31]),
-                    ConversionHelper.ConvertirNullableDateTimeInvariant(valoresFormato[33]),
-                    Convert.ToInt32(valoresFormato[13], CultureInfo.InvariantCulture),
-                    DameTexto(valoresFormato[10]),
-                    DameTexto(valoresFormato[19]),
-                    DameTexto(valoresFormato[4]),
-                    DameTexto(valoresFormato[20]),
-                    Convert.ToDouble(valoresFormato[35], CultureInfo.InvariantCulture),
-                    DameTexto(valoresFormato[15]),
-                    DameTexto(valoresFormato[30]),
-                    Convert.ToDouble(valoresFormato[18], CultureInfo.InvariantCulture),
-                    folioUnico,
-                    ConversionHelper.ConvertirNullableLong(valoresFormato[37]),
-                    DameTexto(valoresFormato[8]),
-                    valoresFormato[36].ToString());
-
-                Config.EscribirLog($"INFO|TAX.CMS_A_TOMI|Resultado={resultado}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|TAX.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Inserta registro de Entradas/Salidas en TOMI.
-        /// </summary>
-        private async Task<bool> TOMI_ENTRADA_SALIDA(long folio)
-        {
-            try
-            {
-                TaxPayEntradaSalidaDto taxPay = await _taxTomiDao.ObtenerTaxPayParaEntradaSalida(folio);
-                if (taxPay is null)
-                    throw new Exception($"No se encontraron datos TAX Pay para generar Entrada/Salida. Folio={folio}.");
-
-                string monedaCuenta = _vwT24.ValidaMoneda(taxPay.NfMonedaCuenta);
-                DateTime fechaCaptura = ConversionHelper.TextoToFechaInvariantNullable(_configuracion.StrFechaSistema) ?? DateTime.Now;
-                DateTime fechaValor = ConversionHelper.TextoToFechaInvariantNullable(taxPay.NfFechaEjecucion?.ToString(CultureInfo.InvariantCulture)) ?? DateTime.Now;
-
-                bool resultado = await _taxTomiDao.InsertarEntradaSalidaTax(
-                    taxPay.NfFolioUnico,
-                    Convert.ToInt32(taxPay.T24CustomerCode, CultureInfo.InvariantCulture),
-                    Convert.ToDouble(taxPay.T24CustomerCode, CultureInfo.InvariantCulture),
-                    taxPay.T24CompanyName,
-                    218,
-                    "Salida  (TTS)",
-                    "D",
-                    "Doméstica",
-                    Convert.ToDouble(taxPay.T24AcctNo, CultureInfo.InvariantCulture),
-                    taxPay.NfNombreCuenta,
-                    monedaCuenta,
-                    800,
-                    "TRF ENVIADA MXN TAX",
-                    Convert.ToDouble(taxPay.T24Amount),
-                    0,
-                    taxPay.T24Concept,
-                    fechaCaptura,
-                    fechaValor,
-                    DateTime.Now.ToLongTimeString(),
-                    "JEAI",
-                    0,
-                    "A",
-                    0);
-
-                Config.EscribirLog($"INFO|TAX.TOMI_ENTRADA_SALIDA|Resultado={resultado}.");
-
-                return resultado;
-            }
-            catch (Exception ex)
-            {
-                Config.EscribirLog($"ERROR|TAX.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}. Trace: {ex}");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Carga el arreglo legacy de valoresFormato con posiciones equivalentes al VB.
-        /// </summary>
-        private static void CargarValoresFormato(TaxFormatoCmsDto formatoCms, object[] valoresFormato, string folio)
-        {
-            valoresFormato[27] = "TAX";
-            valoresFormato[28] = formatoCms.IdFormat;
-            valoresFormato[29] = formatoCms.Cdl;
-            valoresFormato[30] = formatoCms.IdAccount;
-            valoresFormato[31] = formatoCms.CaptureDate;
-            valoresFormato[32] = formatoCms.IdUserCapture;
-            valoresFormato[33] = formatoCms.AuthorizationDate;
-            valoresFormato[34] = formatoCms.IdAuthorizationUser;
-            valoresFormato[35] = formatoCms.OperatingAmount;
-            valoresFormato[36] = formatoCms.IdTemplate;
-            valoresFormato[37] = formatoCms.IdTemplateFormat;
-
-            var parseado = ContenidoFormatoParser.Parse(formatoCms.ContentFormat, folio);
-            ContenidoFormatoParser.ValidarMinimoIndice(parseado, folio, 27);
-
-            for (int idx = 0; idx <= 26; idx++)
-            {
-                valoresFormato[idx] = ContenidoFormatoParser.ObtenerValorPosicional(parseado, folio, idx);
-            }
-        }
-
-
+        public int ins_clave { get; set; }
+        public string ins_nombre { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntTefRecibidaDto
+    {
+        public long IDOperacion { get; set; }
+        public int FechaProceso { get; set; }
+        public string BancoPresentador { get; set; }
+        public string BancoReceptor { get; set; }
+        public decimal Importe { get; set; }
+        public string Divisa { get; set; }
+        public int FechaAplicacion { get; set; }
+        public int FechaInicial { get; set; }
+        public string ClaveRastreo { get; set; }
+        public string CodigoOperacion { get; set; }
+        public string TipoOperacion { get; set; }
+        public string TipoCuentaOrdenante { get; set; }
+        public string CuentaOrdenante { get; set; }
+        public string NombreOrdenante { get; set; }
+        public string RFCOrdenante { get; set; }
+        public int RefNumOrdenante { get; set; }
+        public string RefLeyendaOrdenante { get; set; }
+        public string TipoCuentaReceptor { get; set; }
+        public string CuentaReceptor { get; set; }
+        public string NombreReceptor { get; set; }
+        public string RFCReceptor { get; set; }
+        public int NumCorte { get; set; }
+        public int MotivoDevolucion { get; set; }
+        public int? NumeroCarga { get; set; }
+        public int? SecuenciaCarga { get; set; }
+        public int? ErrorEnCarga { get; set; }
+        public string SolicitudConfirmacion { get; set; }
+        public string EsDevolucionExtemporanea { get; set; }
+        public string EstadoBTMUM { get; set; }
+        public string EstadoSistemaTEF { get; set; }
+        public string ReferenciaConfirmacion { get; set; }
+        public string EsDevolucionRecuperada { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntTefCambiarEstatusResultadoDto
+    {
+        public int Codigo { get; set; }
+        public string Mensaje { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntTefInsertarFormatoTomiDto
+    {
+        public long IDOperacion { get; set; }
+        public int FechaProceso { get; set; }
+        public string BancoPresentador { get; set; }
+        public string BancoReceptor { get; set; }
+        public decimal Importe { get; set; }
+        public string Divisa { get; set; }
+        public int FechaAplicacion { get; set; }
+        public int FechaInicial { get; set; }
+        public string ClaveRastreo { get; set; }
+        public string CodigoOperacion { get; set; }
+        public string TipoOperacion { get; set; }
+        public string TipoCuentaOrdenante { get; set; }
+        public string CuentaOrdenante { get; set; }
+        public string NombreOrdenante { get; set; }
+        public string RFCOrdenante { get; set; }
+        public int RefNumOrdenante { get; set; }
+        public string RefLeyendaOrdenante { get; set; }
+        public string TipoCuentaReceptor { get; set; }
+        public string CuentaReceptor { get; set; }
+        public string NombreReceptor { get; set; }
+        public string RFCReceptor { get; set; }
+        public int NumCorte { get; set; }
+        public int MotivoDevolucion { get; set; }
+        public int? NumeroCarga { get; set; }
+        public int? SecuenciaCarga { get; set; }
+        public int? ErrorEnCarga { get; set; }
+        public string SolicitudConfirmacion { get; set; }
+        public string EsDevolucionExtemporanea { get; set; }
+        public string EstadoBTMUM { get; set; }
+        public string EstadoSistemaTEF { get; set; }
+        public string ReferenciaConfirmacion { get; set; }
+        public string EsDevolucionRecuperada { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_COMPANY_NAME { get; set; }
+        public string NF_TIPO_CUENTA { get; set; }
+        public string T24_CREDIT_ACCT_NO { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public string T24_CREDIT_THEIR_REF { get; set; }
+        public string T24_PAYMENT_DETAILS { get; set; }
+        public string T24_SATEL_SYS_REF { get; set; }
+        public string T24_INSTRUCTIONS { get; set; }
+        public string NF_FOLIO_UNICO { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string NF_BEN_CUST_NAME { get; set; }
+        public string NF_TIPO_OPERACION { get; set; }
+        public string NF_CODIGO_OPERACION { get; set; }
+        public int? NF_FECHA_APLICACION { get; set; }
+        public int? NF_FECHA_CARGO { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntTefEntradaSalidaDto
+    {
+        public string Referencia { get; set; }
+        public decimal Num_Cliente { get; set; }
+        public decimal CDL { get; set; }
+        public string Ordenante { get; set; }
+        public decimal Operacion { get; set; }
+        public string OperacionDesc { get; set; }
+        public string Tipo { get; set; }
+        public string TipoDesc { get; set; }
+        public decimal Cuenta { get; set; }
+        public string Nombre { get; set; }
+        public string CuentaMoneda { get; set; }
+        public decimal Via { get; set; }
+        public string ViaDesc { get; set; }
+        public decimal Importe { get; set; }
+        public decimal Saldo { get; set; }
+        public string Comentarios { get; set; }
+        public DateTime Fecha_Captura { get; set; }
+        public DateTime FechaValor { get; set; }
+        public string Hora { get; set; }
+        public string Capturista { get; set; }
+        public decimal Fad { get; set; }
+        public string Referencia_Control { get; set; }
+        public int Referencia_Control_Cont { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntTefFormatoTomiDto
+    {
+        public long IDOperacion { get; set; }
+        public int FechaAplicacion { get; set; }
+        public decimal Importe { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntTefConciliacionTomiDto
+    {
+        public int FechaAplicacion { get; set; }
+        public decimal Importe { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class EntTefConciliacionEntradaSalidaDto
+    {
+        public DateTime? Ent_FechaValor { get; set; }
+        public string Ent_Moneda_Cuenta { get; set; }
+        public decimal Ent_Importe { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ExisteRegistroDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+}
+sing System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoRegistrosDto
+    {
+        public int NumRegs { get; set; }
     }
 }
-
-using Aplicacion.DTOs.TEF;
-using Aplicacion.Interfaces.TEF;
-using Aplicacion.Modelos;
-using MUFG_T24.Comunes;
-using MUFG_T24.Comunes.Helpers;
-using MUFG_T24.Interfaces_utilidades;
-using MUFG_T24.Modelos;
-using MUFG_T24.Repositorios;
 using System;
-using System.Globalization;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
-using static MUFG_T24.Comunes.Comunes;
 
-namespace Aplicacion.Servicios.Operaciones
+namespace Aplicacion.DTOs.FXD
 {
     /// <summary>
-    /// Representa TEF.
+    /// DTO necesario para recuperar datos.
     /// </summary>
-    public class TEF
+    public class ForexStatusDto
     {
-        private readonly ConfiguracionModelo _configuracion;
-        private readonly IControlServicio _controlServicio;
-        private readonly ITEFTomiDao _tefDao;
-        private readonly ITEFCmsDao _tefCmsDao;
-        private readonly ConexionT24Mw _vwT24;
+        public string StatusOperacion { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 
-        private const string tipoOperacion = "TEF";
-        private string folioUnico = string.Empty;
+namespace Aplicacion.DTOs.FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FormatoFxdCmsDto
+    {
+        public long IdFormato { get; set; }                  
+        public decimal? Cdl { get; set; }                    
+        public long? IdCuenta { get; set; }                  
+        public DateTime FechaCaptura { get; set; }           
+        public string IdUsuarioCaptura { get; set; }         
+        public DateTime? FechaAutorizacion { get; set; }     
+        public string IdUsuarioAutorizo { get; set; }        
+        public decimal MontoOperacion { get; set; }          
+        public string IdPlantilla { get; set; }              
+        public long? IdFormatoPlantilla { get; set; }        
+        public string ContenidoFormato { get; set; }         
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 
+namespace Aplicacion.DTOs.FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdEntradaSalidaDto
+    {
+        public DateTime? EntFechaValor { get; set; }   // smalldatetime
+        public string EntMonedaCuenta { get; set; }    // nvarchar(3)
+        public decimal? EntImporte { get; set; }       // money
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdGphDatosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdH2hDatosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class TombinFxdConciliacionDto
+    {
+        public string NfForexRelacionado { get; set; }  
+        public string T24DebitCurrency { get; set; }    
+        public int? NfFechaEjecucion { get; set; }       
+        public decimal? T24DebitAmount { get; set; } 
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class TombinFxdEntradaSalidaDto
+    {
+        public string NfFolioUnico { get; set; }         
+        public string T24CustomerCode { get; set; }      
+        public string T24CompanyName { get; set; }       
+        public string NfForexRelacionado { get; set; }   
+        public string T24DebitAcctNo { get; set; }       
+        public string NfNombreCuenta { get; set; }       
+        public string NfMonedaCuenta { get; set; }       
+        public decimal? T24DebitAmount { get; set; }     
+        public string T24DebitTheirRef { get; set; }     
+        public int? NfFechaEjecucion { get; set; }       
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXD_Local
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdLocalEsPacs008Dto
+    {
+        public int EsPacs008 { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdLocalDatosBasicosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdLocalDatosComisionDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+        public decimal? T24DebitAmount { get; set; }
+        public string NfEstatus { get; set; }
+        public string NfUsuarioAutoriza { get; set; }
+        public string T24DebitCurrency { get; set; }
+        public string T24DebitAcctNo { get; set; }
+        public string NfBancoBenef { get; set; }
+        public string NfForexRelacionado { get; set; }
+        public string T24BenAcctNo { get; set; }
+        public string NfOpClaveSpei { get; set; }
+        public string NfOpFechaOperSpei { get; set; }
+        public string NfOpFolioSpei { get; set; }
+        public string T24CustomerCode { get; set; }
+        public string NfCharge { get; set; }
+        public string T24DebitTheirRef { get; set; }
+        public int EsSwiftIn { get; set; }
+        public string NfVariablesXml { get; set; }
+        public int EsSwiftInMx { get; set; }
+        public string NfVariablesXmlMx { get; set; }
+        public string T24DetailCharge { get; set; }
+        public string CommissionType { get; set; }
+        public string CommissionCcy { get; set; }
+        public decimal? CommissionAmount { get; set; }
+        public decimal? CommissionAmountTax { get; set; }
+        public decimal? CommissionAmountTot { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdLocalEsBancoDto
+    {
+        public int EsBanco { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdLocalCommissionTypeT24Dto
+    {
+        public string ComType { get; set; }
+        public string Currency { get; set; }
+        public decimal? FlatAmt { get; set; }
+        public decimal? MidRevalRate { get; set; }
+    }
+
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ResultadoSalidaDto
+    {
+        public int Salida { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiFormatoCmsDto
+    {
+        public long id_Formato { get; set; }
+        public long id_Cliente { get; set; }
+        public string id_UsuarioCaptura { get; set; }
+        public long? id_Cuenta { get; set; }
+        public string Estatus { get; set; }
+        public DateTime FechaCaptura { get; set; }
+        public DateTime? FechaAutorizacion { get; set; }
+        public string id_UsuarioAutorizo { get; set; }
+        public string ContenidoFormato { get; set; }
+        public string ContenidoSelloDigit { get; set; }
+        public string RazonRechazo { get; set; }
+        public long TipoFormato { get; set; }
+        public decimal MontoOperacion { get; set; }
+        public string FormatoOriginalCompleto { get; set; }
+        public string IPOrigen { get; set; }
+        public string CadenaOriginal { get; set; }
+        public string Mensaje { get; set; }
+        public string CadenaOriginalApplet { get; set; }
+        public string FormatoXML { get; set; }
+        public string FormatoXML_Det { get; set; }
+        public string SerieCertificado { get; set; }
+        public string Descripcion { get; set; }
+        public DateTime? FechaEjecucion { get; set; }
+        public DateTime? Fecha_Autoriza { get; set; }
+        public string id_UsuarioAutorizo_dos { get; set; }
+        public DateTime? FechaAutorizacion_dos { get; set; }
+        public string id_Plantilla { get; set; }
+        public long? id_Autorizaciones { get; set; }
+        public int? id_Autorizacion_uno { get; set; }
+        public int? id_Autorizacion_dos { get; set; }
+        public long? Estilo { get; set; }
+        public string Autorizacion_TOMITAS { get; set; }
+        public long? id_Formato_Plantilla { get; set; }
+        public string id_Beneficiario { get; set; }
+        public string id_CodigoMensaje { get; set; }
+        public decimal? cdl { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiClienteRfcCmsDto
+    {
+        public string RFC { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiActualizarEstatusFormatoAceptadoCmsDto
+    {
+        public long IdFormato { get; set; }
+        public string Mensaje { get; set; }
+        public string Estatus { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiForexEstatusTomiDto
+    {
+        public string STATUSOPERACION { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiNostroCuentaTomiDto
+    {
+        public string NostroAccountNumber { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiExisteRegistroTomiDto
+    {
+        public int num_regs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiTombinNfFxiTomiDto
+    {
+        public string NF_TIPO { get; set; }
+        public long NF_FOLIO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_COMPANY_NAME { get; set; }
+        public string T24_SHORT_NAME { get; set; }
+        public string T24_ACCOUNT_OFFICER { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public string NF_USUARIO_CAPTURA { get; set; }
+        public DateTime? NF_FECHA_CAPTURA { get; set; }
+        public string NF_USUARIO_AUTORIZA { get; set; }
+        public DateTime? NF_FECHA_AUTORIZA { get; set; }
+        public string NF_USUARIO_CONFIRMA { get; set; }
+        public DateTime? NF_FECHA_CONFIRMA { get; set; }
+        public string T24_TRANSACTION_TYPE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+        public DateTime? T24_PROCESSING_DATE { get; set; }
+        public string T24_ORDERING_CUST { get; set; }
+        public string T24_CREDIT_ACCT_NO { get; set; }
+        public string T24_CREDIT_CURRENCY { get; set; }
+        public string T24_CREDIT_THEIR_REF { get; set; }
+        public string T24_PAYMENT_DETAILS { get; set; }
+        public string T24_COMMISSION_CODE { get; set; }
+        public string T24_COMMISSION_TYPE { get; set; }
+        public string T24_CHARGE_CODE { get; set; }
+        public string T24_CHARGE_TYPE { get; set; }
+        public string T24_CHARGES_ACCT_NO { get; set; }
+        public string T24_PROFIT_CENTRE_DEPT { get; set; }
+        public string T24_SATEL_SYS_REF { get; set; }
+        public string T24_CUST_REF_1 { get; set; }
+        public string T24_CUST_REF_2 { get; set; }
+        public string T24_CUST_REF_3 { get; set; }
+        public string T24_CUST_REF_4 { get; set; }
+        public string T24_CUST_REF_5 { get; set; }
+        public string T24_INSTRCTN_CODE { get; set; }
+        public string T24_TIME_IND { get; set; }
+        public string T24_ACCT_WITH_BANK_ACC { get; set; }
+        public string T24_INTERMED_BANK_ACC { get; set; }
+        public string T24_CREDIT_VALUE_DATE { get; set; }
+        public string T24_BK_OPERATION_CODE { get; set; }
+        public string T24_ORD_CUST_ACCT { get; set; }
+        public string T24_ORDERING_BANK { get; set; }
+        public string T24_ACCT_WITH_BANK { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string T24_BEN_CUSTOMER { get; set; }
+        public string T24_INTERMED_BANK { get; set; }
+        public string T24_BEN_OUR_CHARGES { get; set; }
+        public string T24_DEBIT_VALUE_DATE { get; set; }
+        public string T24_ORD_CUST_CODE { get; set; }
+        public string T24_INSTRUCTIONS { get; set; }
+        public decimal? MW_TRX_SEQUENCE { get; set; }
+        public string MW_TRX_ID { get; set; }
+        public string T24_TRANSACTION_ID { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public bool? NF_CIERRE { get; set; }
+        public string NF_ESTATUS_INTERNO { get; set; }
+        public string T24_BEN_CUST_NAME { get; set; }
+        public string NF_RFC_BENEFICIARIO { get; set; }
+        public string NF_TASA_RETENCION { get; set; }
+        public decimal? NF_MONTO_ENVIAR { get; set; }
+        public string NF_RAZON { get; set; }
+        public string NF_FOLIO_UNICO { get; set; }
+        public bool? NF_IMPRESION_VOUCHER { get; set; }
+        public string ID_PLANTILLA { get; set; }
+        public long? ID_FORMATO_PLANTILLA { get; set; }
+        public int? NF_INTERFASE_SPEI { get; set; }
+        public decimal? NF_OPCLAVE_SPEI { get; set; }
+        public decimal? NF_OPFECHAOPER_SPEI { get; set; }
+        public decimal? NF_OPFOLIO_SPEI { get; set; }
+        public string NF_RFC_ORDENANTE { get; set; }
+        public string NF_TIPO_CUENTA { get; set; }
+        public string NF_PAYMENT { get; set; }
+        public string NF_CHARGE { get; set; }
+        public string NF_FXD_COMMENT { get; set; }
+        public string NF_SWIFT_BENEFICIARIO { get; set; }
+        public string NF_BANCO_CORRESPONSAL { get; set; }
+        public string NF_SWIFT_CORRESPONSAL { get; set; }
+        public string NF_CUENTA_CORRESPONSAL { get; set; }
+        public string NF_MENSAJE { get; set; }
+        public string NF_COUNTRY { get; set; }
+        public string NF_NOMBRE_CUENTA { get; set; }
+        public string NF_MONEDA_CUENTA { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string country_ben { get; set; }
+        public string city_ben { get; set; }
+        public string street_ben { get; set; }
+        public string colony_ben { get; set; }
+        public string building_number_ben { get; set; }
+        public string post_code_ben { get; set; }
+        public string OP_FIRMA_DIG { get; set; }
+        public decimal? nf_monto_spei_envio { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiConciliacionNfFxiTomiDto
+    {
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiEntradaSalidaConciliacionTomiDto
+    {
+        public DateTime? ent_fechaValor { get; set; }
+        public string ent_moneda_cuenta { get; set; }
+        public decimal? ent_importe { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiActualizarMaestroDatosGeneralesTomiDto
+    {
+        public long Folio { get; set; }
+        public string TipoOperacion { get; set; }
+        public string FolioUnico { get; set; }
+        public int FechaValor { get; set; }
+        public string Moneda { get; set; }
+        public decimal Importe { get; set; }
+        public int NumCliente { get; set; }
+        public string NombreCliente { get; set; }
+        public string NumCuenta { get; set; }
+        public string SubtipoOperacion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiCancelarMaestroForexTomiDto
+    {
+        public long Folio { get; set; }
+        public string TipoOperacion { get; set; }
+        public int FechaValor { get; set; }
+        public string Moneda { get; set; }
+        public decimal Importe { get; set; }
+        public string ErrorDescripcion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiActualizarEstatusNfFxiTomiDto
+    {
+        public long Folio { get; set; }
+        public string Estatus { get; set; }
+        public string UsuarioConfirma { get; set; }
+        public DateTime FechaConfirma { get; set; }
+        public string Razon { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiInsertarFormatoFxiTomiDto
+    {
+        public string NF_FOLIO_UNICO { get; set; }
+        public string NF_TIPO { get; set; }
+        public long NF_FOLIO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public string NF_USUARIO_CAPTURA { get; set; }
+        public string NF_USUARIO_AUTORIZA { get; set; }
+        public DateTime NF_FECHA_CAPTURA { get; set; }
+        public DateTime? NF_FECHA_AUTORIZA { get; set; }
+        public decimal T24_DEBIT_AMOUNT { get; set; }
+        public string T24_SHORT_NAME { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public decimal NF_MONTO_ENVIAR { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public string NF_TIPO_CUENTA { get; set; }
+        public string NF_PAYMENT { get; set; }
+        public string NF_CHARGE { get; set; }
+        public int NF_FECHA_EJECUCION { get; set; }
+        public string T24_BEN_CUST_NAME { get; set; }
+        public string NF_FXD_COMMENT { get; set; }
+        public string NF_RFC_BENEFICIARIO { get; set; }
+        public string NF_RFC_ORDENANTE { get; set; }
+        public string NF_TASA_RETENCION { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string NF_SWIFT_BENEFICIARIO { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_BANCO_CORRESPONSAL { get; set; }
+        public string NF_SWIFT_CORRESPONSAL { get; set; }
+        public string NF_CUENTA_CORRESPONSAL { get; set; }
+        public string NF_MENSAJE { get; set; }
+        public string NF_COUNTRY { get; set; }
+        public string ID_PLANTILLA { get; set; }
+        public long? ID_FORMATO_PLANTILLA { get; set; }
+        public string COUNTRY_BEN { get; set; }
+        public string city_ben { get; set; }
+        public string street_ben { get; set; }
+        public string colony_ben { get; set; }
+        public string building_number_ben { get; set; }
+        public string post_code_ben { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiInsertarEntradaSalidaTomiDto
+    {
+        public string Referencia { get; set; }
+        public decimal Num_Cliente { get; set; }
+        public decimal CDL { get; set; }
+        public string Ordenante { get; set; }
+        public decimal Operacion { get; set; }
+        public string OperacionDesc { get; set; }
+        public string Tipo { get; set; }
+        public string TipoDesc { get; set; }
+        public decimal Cuenta { get; set; }
+        public string Nombre { get; set; }
+        public string CuentaMoneda { get; set; }
+        public decimal Via { get; set; }
+        public string ViaDesc { get; set; }
+        public decimal Importe { get; set; }
+        public decimal Saldo { get; set; }
+        public string Comentarios { get; set; }
+        public DateTime Fecha_Captura { get; set; }
+        public DateTime FechaValor { get; set; }
+        public string Hora { get; set; }
+        public string Capturista { get; set; }
+        public decimal Fad { get; set; }
+        public string Referencia_Control { get; set; }
+        public int Referencia_Control_Cont { get; set; }
+    }
+
+}
+namespace Aplicacion.DTOs.FXIGPH
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiGphDatosBasicosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+        public string NfNombreArchivoGph { get; set; }
+        public string NfPmtInfId { get; set; }
+        public long? NfIdArchivo { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXI_H2H
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxiH2HDatosBasicosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXI_Local
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FXI_LocalDto
+    {
         /// <summary>
-        /// Constructor.
+        /// DTO necesario para recuperar datos.
         /// </summary>
-        public TEF(
-            ConfiguracionModelo configuracion,
-            IControlServicio controlServicio,
-            ITEFTomiDao tefDao,
-            ITEFCmsDao tefCmsDao,
-            ConexionT24Mw vwT24)
+        public class FxiLocalDatosBasicosDto
         {
-            _configuracion = configuracion;
-            _controlServicio = controlServicio;
-            _tefDao = tefDao;
-            _tefCmsDao = tefCmsDao;
-            _vwT24 = vwT24;
+            public string NfFolioUnico { get; set; }
+            public int? NfFechaEjecucion { get; set; }
         }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 
-        /// <summary>
-        /// Procesa la operación TEF.
-        /// </summary>
-        public async Task<bool> ProcesaOperacion(string folio)
-        {
-            object[] valoresFormato = new object[34];
-            string fechaEjecucion = string.Empty;
-            string moneda = string.Empty;
-            decimal importe = 0m;
-            bool conForex = false;
-            bool fechaFutura;
-            bool forexCancelado = false;
-            string folioForex = string.Empty;
-            bool conEntradaSalida = true;
-            bool procesado;
-            bool resultado;
+namespace Aplicacion.DTOs.FXT
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtFormatoCmsDto
+    {
+        public long IdFormato { get; set; }
+        public decimal? Cdl { get; set; }
+        public long? IdCuenta { get; set; }
+        public DateTime FechaCaptura { get; set; }
+        public string IdUsuarioCaptura { get; set; }
+        public DateTime? FechaAutorizacion { get; set; }
+        public string IdUsuarioAutorizo { get; set; }
+        public decimal MontoOperacion { get; set; }
+        public string IdPlantilla { get; set; }
+        public long? IdFormatoPlantilla { get; set; }
+        public string ContenidoFormato { get; set; }
+    }
 
-            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
-            {
-                Folio = folio,
-                TipoOperacion = tipoOperacion,
-                Servicio = _configuracion.NombreServicio,
-                NombreProceso = _configuracion.NombreProceso,
-                AliasProceso = _configuracion.AliasProceso,
-                PId = _configuracion.Pid.Value
-            });
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtActualizarEstatusFormatoRechazadoDto
+    {
+        public long IdFormato { get; set; }
+        public string RazonRechazo { get; set; }
+    }
 
-            if (string.Equals(_configuracion.AliasProceso, string.Empty, StringComparison.Ordinal))
-                return false;
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtActualizarEstatusFormatoSimpleDto
+    {
+        public long IdFormato { get; set; }
+        public string Mensaje { get; set; }
+        public string Estatus { get; set; }
+    }
 
-            fechaEjecucion = string.Empty;
-            moneda = string.Empty;
-            importe = 0m;
-            folioForex = string.Empty;
-            conForex = false;
-            forexCancelado = false;
-            conEntradaSalida = true;
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtForexStatusTomiDto
+    {
+        public string StatusOperacion { get; set; }
+    }
 
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexión a base de datos del CMS.");
-            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Leyendo los datos de lo operación en base CMS.");
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtActualizarDatosGeneralesPlanTrabajoDto
+    {
+        public long Folio { get; set; }
+        public string TipoOperacion { get; set; }
+        public string FolioUnico { get; set; }
+        public decimal FecValor { get; set; }
+        public string CveMoneda { get; set; }
+        public decimal Importe { get; set; }
+        public int? NumCliente { get; set; }
+        public string NombreCliente { get; set; }
+        public string NumCuenta { get; set; }
+        public string SubtipoOperacion { get; set; }
+    }
 
-            TefFormatoCmsDto datosCms = await _tefCmsDao.ObtenerFormatoPorFolio(folio);
-            if (datosCms is null)
-                datosCms = new TefFormatoCmsDto();
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtInsertarFormatoFxtTomiDto
+    {
+        public string NF_FOLIO_UNICO { get; set; }
+        public string NF_TIPO { get; set; }
+        public int NF_FOLIO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public string NF_USUARIO_CAPTURA { get; set; }
+        public string NF_USUARIO_AUTORIZA { get; set; }
+        public DateTime NF_FECHA_CAPTURA { get; set; }
+        public DateTime? NF_FECHA_AUTORIZA { get; set; }
+        public double T24_DEBIT_AMOUNT { get; set; }
+        public string T24_SHORT_NAME { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_TIPO_CUENTA { get; set; }
+        public string T24_BEN_CUST_NAME { get; set; }
+        public string NF_RFC_BENEFICIARIO { get; set; }
+        public string NF_TASA_RETENCION { get; set; }
+        public int NF_FECHA_EJECUCION { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public decimal NF_MONTO_ENVIAR { get; set; }
+        public string ID_PLANTILLA { get; set; }
+        public long? ID_FORMATO_PLANTILLA { get; set; }
+    }
 
-            valoresFormato[19] = "TEF";
-            valoresFormato[20] = datosCms.IdFormato;
-            valoresFormato[21] = datosCms.Cdl;
-            valoresFormato[22] = datosCms.IdCuenta;
-            valoresFormato[23] = datosCms.FechaCaptura;
-            valoresFormato[24] = datosCms.IdUsuarioCaptura;
-            valoresFormato[25] = datosCms.FechaAutorizacion;
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtExisteRegistroDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtActualizarEstatusFxtRechazadoForexDto
+    {
+        public long NfFolio { get; set; }
+        public string NfRazon { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtActualizarEstatusFxtConfirmacionDto
+    {
+        public long NfFolio { get; set; }
+        public string NfEstatus { get; set; }
+        public string NfUsuarioConfirma { get; set; }
+        public DateTime NfFechaConfirma { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtCancelarPlanTrabajoPorForexDto
+    {
+        public long Folio { get; set; }
+        public string TipoOperacion { get; set; }
+        public decimal FecValor { get; set; }
+        public string CveMoneda { get; set; }
+        public decimal Importe { get; set; }
+        public string ErrDescripcion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtConciliacionTomiDto
+    {
+        public string NfForexRelacionado { get; set; }
+        public string T24DebitCurrency { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+        public decimal? T24DebitAmount { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtMarcarFechaFuturaPlanTrabajoDto
+    {
+        public long Folio { get; set; }
+        public string TipoOperacion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ResultadoSalidaDto
+    {
+        public int Salida { get; set; }
+    }
+
+}
+namespace Aplicacion.DTOs.FXT_GPH
+{
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtGphDatosBasicosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+        public string NfNombreArchivoGph { get; set; }
+        public string NfPmtInfId { get; set; }
+        public long? NfIdArchivo { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.FXT_H2H
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtH2HDatosBasicosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.FXT_Local
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxtLocalDatosBasicosDto
+    {
+        public string NfFolioUnico { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+}
+namespace Aplicacion.DTOs.FirmaElectronica
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ComunFXDFirmaDatosDto
+    {
+        public int NF_FECHA_EJECUCION { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string T24_TRANSACTION_ID { get; set; }
+        public decimal IMPORTE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public string NF_FOLIO_UNICO { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.MFX
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MFXSolicitudForexTomiDto
+    {
+        public long IdAutorizacion { get; set; }
+        public int Plazo { get; set; }
+        public DateTime FechaValorReal { get; set; }
+        public string FechaValorTexto { get; set; }
+
+        public string Nombre { get; set; }
+        public string Contraparte { get; set; }
+        public long IdCliente { get; set; }
+        public string Cdl { get; set; }
+
+        public string DivisaAdquiere { get; set; }
+        public decimal MontoAdquiere { get; set; }
+        public double EcClienteReal { get; set; }
+
+        public string DivisaEntrega { get; set; }
+        public decimal MontoEntrega { get; set; }
+
+        public string DivisaEntregaCliente { get; set; }
+        public string CuentaEntregaCliente { get; set; }
+        public decimal MontoEntregaCliente { get; set; }
+
+        public string DivisaAdquiereCliente { get; set; }
+        public string CuentaAdquiereCliente { get; set; }
+        public decimal MontoAdquiereCliente { get; set; }
+
+        public string Producto { get; set; }
+        public string TipoOperacion { get; set; }
+
+        public double EcCliente { get; set; }
+        public double EcRate { get; set; }
+        public double? CrossRate { get; set; }
+
+        public string Status { get; set; }
+        public string StatusOperacion { get; set; }
+        public string Tipo { get; set; }
+        public string CuentaDebito { get; set; }
+        public string CuentaCredito { get; set; }
+
+        public bool? FlgCuentaDebitoCms { get; set; }
+        public bool? FlgCuentaCreditoCms { get; set; }
+
+        public int? ValidacionSistema { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MFXForexConciliacionDto
+    {
+        public string FechaValorTexto { get; set; }
+
+        public string DivisaAdquiereCliente { get; set; }
+        public decimal MontoAdquiereCliente { get; set; }
+
+        public string CuentaCredito { get; set; }
+
+        public string DivisaEntregaCliente { get; set; }
+        public decimal MontoEntregaCliente { get; set; }
+
+        public string CuentaDebito { get; set; }
+
+        public bool? FlgCuentaCreditoCms { get; set; }
+        public bool? FlgCuentaDebitoCms { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MFXTomiConciliacionDto
+    {
+        public string NfAutorizacion { get; set; }
+
+        public int? NfFechaEjecucion { get; set; }
+
+        public string NfDivisaAdquiere { get; set; }
+
+        public decimal? NfMontoAdquiere { get; set; }
+
+        public string T24CreditAcctNo { get; set; }
+
+        public string NfDivisaEntrega { get; set; }
+        public string NfMontoEntrega { get; set; }
+
+        public string T24DebitAcctNo { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MFXFormatoCmsDto
+    {
+        public long IdFormato { get; set; }
+
+        public long IdCliente { get; set; }
+
+        // LEFT JOIN contra cliente, puede venir null.
+        public decimal? Cdl { get; set; }
+
+        public long? IdCuenta { get; set; }
+
+        public DateTime FechaCaptura { get; set; }
+
+        public string IdUsuarioCaptura { get; set; }
+
+        public DateTime? FechaAutorizacion { get; set; }
+
+        public string IdUsuarioAutorizo { get; set; }
+
+        public decimal MontoOperacion { get; set; }
+
+        public string ContenidoFormato { get; set; }
+
+        public string AutorizacionTomitas { get; set; }
+
+        public string Estatus { get; set; }
+
+        public long TipoFormato { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MFXCuentaCustomerT24Dto
+    {
+        public string AccountNumber { get; set; }
+        public string Category { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MFXFormatoTomiInsertDto
+    {
+        public string NfFolioUnico { get; set; }
+
+        public string NfTipo { get; set; }
+
+        public long NfFolio { get; set; }
+
+        public string T24CustomerCode { get; set; }
+
+        public string T24DebitAcctNo { get; set; }
+
+        public string T24CreditAcctNo { get; set; }
+
+        public string NfEstatus { get; set; } = "PEND";
+
+        public string NfUsuarioCaptura { get; set; }
+
+        public string NfUsuarioAutoriza { get; set; }
+
+        public DateTime NfFechaCaptura { get; set; }
+
+        public DateTime? NfFechaAutoriza { get; set; }
+
+        public decimal T24DebitAmount { get; set; }
+
+        public string T24ShortName { get; set; }
+
+        public string NfAutorizacion { get; set; }
+
+        public string NfFechaEjecucion { get; set; }
+
+        public string NfDivisaAdquiere { get; set; }
+
+        public decimal NfMontoAdquiere { get; set; }
+
+        public string NfEcRate { get; set; }
+
+        public string NfCuentaCredito { get; set; }
+
+        public string NfDivisaEntrega { get; set; }
+
+        public string NfMontoEntrega { get; set; }
+
+        public string NfCuentaDebito { get; set; }
+
+        public string NfDescripcion { get; set; }
+    }
+
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.MercadoDinero
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MercadoDineroLiquidacionTomiDto
+    {
+        public string TipoOperacion { get; set; }              
+        public string TipoLiquidacion { get; set; }            
+        public string T24DebitAcctNo { get; set; }             
+        public string T24CustomerCode { get; set; }            
+        public string T24CompanyName { get; set; }             
+        public string T24DebitCurrency { get; set; }           
+
+        public decimal? T24DebitAmount { get; set; }           
+        public string Sentido { get; set; }                    
+        public string CalypsoId { get; set; }                  
+        public string ExternalRef { get; set; }                
+
+        public string NfEstatus { get; set; }                  
+        public int? NfFechaEjecucion { get; set; }             
+
+        public string DatoCalypso { get; set; }                
+        public string DatosXml { get; set; }                   
+
+        public string Familia { get; set; }                    
+        public int? NfTipoPagoSpei { get; set; }               
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MercadoDineroComplementoPagoDto
+    {
+        public int? SpxxTipoPago { get; set; }          
+        public decimal? SpxxCasfimBene { get; set; }    
+        public string SpxxNomBanco { get; set; }        
+        public string NomBeneficiario { get; set; }     
+        public string SpxxTipoCuenta { get; set; }      
+        public string SpxxCuentaBene { get; set; }      
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MercadoDineroDuplicidadLiquidacionDto
+    {
+        public long NfFolio { get; set; }      
+        public string NfEstatus { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class MercadoDineroEstatusParDto
+    {
+        public string NfEstatus { get; set; }
+    }
+
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.NOM_FXD
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdMaestroCmsDto
+    {
+        public string id_formato { get; set; }
+        public string cdl { get; set; }
+        public string id_cuenta { get; set; }
+        public DateTime? fechaCaptura { get; set; }
+        public string id_usuarioCaptura { get; set; }
+        public DateTime? fechaAutorizacion { get; set; }
+        public string id_usuarioAutorizo { get; set; }
+        public decimal? montoOperacion { get; set; }
+        public string id_plantilla { get; set; }
+        public string id_formato_plantilla { get; set; }
+        public string id_files_btmum { get; set; }
+        public int? noPagos { get; set; }
+        public string pagosDescripcion { get; set; }
+        public int? noPagosProcesados { get; set; }
+        public int? noPagosDevueltos { get; set; }
+        public string contenidoFormato { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdDetalleCmsDto
+    {
+        public string id_formato { get; set; }
+        public string cdl { get; set; }
+        public string id_cuenta { get; set; }
+        public DateTime? fechaCaptura { get; set; }
+        public string id_usuarioCaptura { get; set; }
+        public DateTime? fechaAutorizacion { get; set; }
+        public string id_usuarioAutorizo { get; set; }
+        public decimal? montoOperacion { get; set; }
+        public string id_plantilla { get; set; }
+        public string id_formato_plantilla { get; set; }
+        public string id_files_btmum { get; set; }
+        public int? nopagos { get; set; }
+        public string pagosdescripcion { get; set; }
+        public int? nopagosprocesados { get; set; }
+        public int? nopagosdevueltos { get; set; }
+        public string id_formato_nomina { get; set; }
+        public string contenidoFormato { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdForexStatusDto
+    {
+        public string STATUSOPERACION { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdSumarizadoDetalleTomiDto
+    {
+        public string id_maestro { get; set; }
+        public int? num_regs { get; set; }
+        public decimal? imp_monto { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdConciliacionDetalleTomiDto
+    {
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdEntradaSalidaConciliacionDto
+    {
+        public DateTime? ent_fechaValor { get; set; }
+        public string ent_moneda_cuenta { get; set; }
+        public decimal? ent_importe { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ResultadoSalidaDto
+    {
+        public int Salida { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdInsertarDetalleTomiDto
+    {
+        public string NF_FOLIO_UNICO { get; set; }
+        public string NF_TIPO { get; set; }
+        public decimal? NF_FOLIO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public string NF_USUARIO_CAPTURA { get; set; }
+        public string NF_USUARIO_AUTORIZA { get; set; }
+        public DateTime? NF_FECHA_CAPTURA { get; set; }
+        public DateTime? NF_FECHA_AUTORIZA { get; set; }
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+        public string T24_SHORT_NAME { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_TIPO_CUENTA { get; set; }
+        public string T24_BEN_CUST_NAME { get; set; }
+        public string NF_RFC_BENEFICIARIO { get; set; }
+        public string NF_TASA_RETENCION { get; set; }
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public decimal? NF_MONTO_ENVIAR { get; set; }
+        public string ID_PLANTILLA { get; set; }
+        public decimal? ID_FORMATO_PLANTILLA { get; set; }
+        public decimal? ID_FILES_BTMUM { get; set; }
+        public decimal? NO_PAGOS { get; set; }
+        public string PAGOSDESCRIPCION { get; set; }
+        public decimal? NOPAGOSPROCESADOS { get; set; }
+        public decimal? NOPAGOSDEVUELTOS { get; set; }
+        public decimal? ID_FORMATO_NOMINA { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdInsertarMaestroTomiDto
+    {
+        public string NF_FOLIO_UNICO { get; set; }
+        public string NF_TIPO { get; set; }
+        public decimal? NF_FOLIO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public string NF_USUARIO_CAPTURA { get; set; }
+        public string NF_USUARIO_AUTORIZA { get; set; }
+        public DateTime? NF_FECHA_CAPTURA { get; set; }
+        public DateTime? NF_FECHA_AUTORIZA { get; set; }
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+        public string T24_SHORT_NAME { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_TIPO_CUENTA { get; set; }
+        public string T24_BEN_CUST_NAME { get; set; }
+        public string NF_RFC_BENEFICIARIO { get; set; }
+        public string NF_TASA_RETENCION { get; set; }
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public decimal? NF_MONTO_ENVIAR { get; set; }
+        public string ID_PLANTILLA { get; set; }
+        public decimal? ID_FORMATO_PLANTILLA { get; set; }
+        public decimal? ID_FILES_BTMUM { get; set; }
+        public decimal? NO_PAGOS { get; set; }
+        public string PAGOSDESCRIPCION { get; set; }
+        public decimal? NOPAGOSPROCESADOS { get; set; }
+        public decimal? NOPAGOSDEVUELTOS { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdNominaMaestroParaEntradaSalidaDto
+    {
+        public string NF_FOLIO_UNICO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_COMPANY_NAME { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string NF_NOMBRE_CUENTA { get; set; }
+        public string NF_MONEDA_CUENTA { get; set; }
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public int? NF_FECHA_EJECUCION { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class NomFxdEntradaSalidaMaestroDto
+    {
+        public string Referencia { get; set; }
+        public int? Num_Cliente { get; set; }
+        public decimal? CDL { get; set; }
+        public string Ordenante { get; set; }
+        public decimal? Operacion { get; set; }
+        public string OperacionDesc { get; set; }
+        public string Tipo { get; set; }
+        public string TipoDesc { get; set; }
+        public decimal? Cuenta { get; set; }
+        public string Nombre { get; set; }
+        public string CuentaMoneda { get; set; }
+        public decimal? Via { get; set; }
+        public string ViaDesc { get; set; }
+        public decimal? Importe { get; set; }
+        public decimal? Saldo { get; set; }
+        public string Comentarios { get; set; }
+        public DateTime? Fecha_Captura { get; set; }
+        public DateTime? FechaValor { get; set; }
+        public string Hora { get; set; }
+        public string Capturista { get; set; }
+        public decimal? Fad { get; set; }
+        public string Referencia_Control { get; set; }
+        public decimal? Referencia_Control_Cont { get; set; }
+    }
+
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoRegistrosDto
+    {
+        public int NumRegs { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ForexStatusDto
+    {
+        public string StatusOperacion { get; set; }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class FxdEntradaSalidaDto
+    {
+        public DateTime? EntFechaValor { get; set; }  
+        public string EntMonedaCuenta { get; set; }   
+        public decimal? EntImporte { get; set; }    
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxdContenidoDto
+    {
+        public string NombreCliente { get; set; } = string.Empty;
+        public string Moneda { get; set; } = string.Empty;   
+        public string FechaEjecucion { get; set; } = string.Empty;  
+        public string[] Valores { get; set; } = new string[19];
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxdDetalleCmsDto
+    {
+        public long IdFormato { get; set; }                 
+        public decimal? Cdl { get; set; }                   
+        public long? IdCuenta { get; set; }                 
+        public DateTime FechaCaptura { get; set; }          
+        public string IdUsuarioCaptura { get; set; }        
+        public DateTime? FechaAutorizacion { get; set; }    
+        public string IdUsuarioAutorizo { get; set; }       
+        public decimal MontoOperacion { get; set; }         
+        public string IdPlantilla { get; set; }             
+        public long? IdFormatoPlantilla { get; set; }       
+        public long IdFilesBtmum { get; set; }              
+        public long NoPagos { get; set; }                   
+        public string PagosDescripcion { get; set; }        
+        public long NoPagosProcesados { get; set; }         
+        public long NoPagosDevueltos { get; set; }          
+        public long IdFormatoPap { get; set; }              
+        public string Ref1 { get; set; }                    
+        public string Ref2 { get; set; }                    
+        public string Ref3 { get; set; }                    
+        public string Ref4 { get; set; }                    
+        public string Ref5 { get; set; }                    
+        public string ContenidoFormato { get; set; }        
+    }
+}
+using System;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxdMaestroCmsDto
+    {
+        public long IdFormato { get; set; }                 
+        public decimal? Cdl { get; set; }                   
+        public long? IdCuenta { get; set; }                 
+        public DateTime FechaCaptura { get; set; }          
+        public string IdUsuarioCaptura { get; set; }        
+        public DateTime? FechaAutorizacion { get; set; }    
+        public string IdUsuarioAutorizo { get; set; }       
+        public decimal MontoOperacion { get; set; }         
+        public string IdPlantilla { get; set; }             
+        public long? IdFormatoPlantilla { get; set; }       
+        public long IdFilesBtmum { get; set; }              
+        public long NoPagos { get; set; }                   
+        public string PagosDescripcion { get; set; }        
+        public long NoPagosProcesados { get; set; }         
+        public long NoPagosDevueltos { get; set; }          
+        public string ContenidoFormato { get; set; }        
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PapFxdDetalleImporteDto
+    {
+        public decimal? T24DebitAmount { get; set; }  
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PapFxdDetalleTomiDto
+    {
+        public string NfFolioUnico { get; set; }       
+        public string T24CustomerCode { get; set; }    
+        public string T24CompanyName { get; set; }     
+        public string T24DebitAcctNo { get; set; }     
+        public string NfNombreCuenta { get; set; }     
+        public string NfMonedaCuenta { get; set; }     
+        public decimal? T24DebitAmount { get; set; }   
+        public string T24DebitTheirRef { get; set; }   
+        public int? NfFechaEjecucion { get; set; }     
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PapFxdSumatoriaDetalleDto
+    {
+        public long? IdMaestro { get; set; }      
+        public int NumRegs { get; set; }         
+        public decimal? ImpMonto { get; set; }     
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP_FXI
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiInsertarMaestroPapTomiDto
+    {
+        public string NfFolioUnico { get; set; }          
+        public string NfTipo { get; set; }                
+        public long NfFolio { get; set; }                 
+
+        public string T24CustomerCode { get; set; }       
+        public string T24DebitAcctNo { get; set; }        
+        public string NfEstatus { get; set; }             
+
+        public string NfUsuarioCaptura { get; set; }      
+        public string NfUsuarioAutoriza { get; set; }     
+
+        public DateTime? NfFechaCaptura { get; set; }     
+        public DateTime? NfFechaAutoriza { get; set; }    
+
+        public decimal? T24DebitAmount { get; set; }      
+
+        public string T24ShortName { get; set; }          
+        public string T24DebitCurrency { get; set; }      
+
+        public string NfForexRelacionado { get; set; }    
+        public decimal? NfMontoEnviar { get; set; }       
+
+        public string T24DebitTheirRef { get; set; }      
+        public string NfTipoCuenta { get; set; }          
+        public string NfPayment { get; set; }             
+        public string NfCharge { get; set; }              
+
+        public int? NfFechaEjecucion { get; set; }        
+
+        public string T24BenCustName { get; set; }        
+        public string NfFxdComment { get; set; }          
+        public string NfRfcBeneficiario { get; set; }     
+        public string NfTasaRetencion { get; set; }       
+
+        public string NfBancoBenef { get; set; }          
+        public string NfSwiftBeneficiario { get; set; }   
+        public string T24BenAcctNo { get; set; }          
+
+        public string NfBancoCorresponsal { get; set; }   
+        public string NfSwiftCorresponsal { get; set; }   
+        public string NfCuentaCorresponsal { get; set; }  
+
+        public string NfMensaje { get; set; }             
+        public string NfCountry { get; set; }             
+
+        public string IdPlantilla { get; set; }           
+        public long? IdFormatoPlantilla { get; set; }     
+
+        public long? IdFilesBtmum { get; set; }           
+        public int? NoPagos { get; set; }                 
+        public string PagosDescripcion { get; set; }      
+        public int? NoPagosProcesados { get; set; }       
+        public int? NoPagosDevueltos { get; set; }        
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiMaestroCmsDto
+    {
+        public long IdFormato { get; set; }
+        public long IdCliente { get; set; }
+        public string IdUsuarioCaptura { get; set; }
+        public long? IdCuenta { get; set; }
+        public string Estatus { get; set; }
+        public DateTime FechaCaptura { get; set; }
+        public DateTime? FechaAutorizacion { get; set; }
+        public string IdUsuarioAutorizo { get; set; }
+        public string ContenidoFormato { get; set; }
+        public string ContenidoSelloDigit { get; set; }
+        public string RazonRechazo { get; set; }
+        public long TipoFormato { get; set; }
+        public decimal MontoOperacion { get; set; }
+        public string FormatoOriginalCompleto { get; set; }
+        public string IPOrigen { get; set; }
+        public string CadenaOriginal { get; set; }
+        public string Mensaje { get; set; }
+        public string CadenaOriginalApplet { get; set; }
+        public string FormatoXML { get; set; }
+        public string FormatoXMLDet { get; set; }
+        public string SerieCertificado { get; set; }
+        public string Descripcion { get; set; }
+        public DateTime? FechaEjecucion { get; set; }
+        public DateTime? FechaAutoriza { get; set; }
+        public string IdUsuarioAutorizoDos { get; set; }
+        public DateTime? FechaAutorizacionDos { get; set; }
+        public string IdPlantilla { get; set; }
+        public long? IdAutorizaciones { get; set; }
+        public int? IdAutorizacionUno { get; set; }
+        public int? IdAutorizacionDos { get; set; }
+        public long? Estilo { get; set; }
+        public string AutorizacionTomitas { get; set; }
+        public long? IdFormatoPlantilla { get; set; }
+        public string IdBeneficiario { get; set; }
+        public long IdFilesBtmum { get; set; }
+        public long NoPagos { get; set; }
+        public string PagosDescripcion { get; set; }
+        public long NoPagosProcesados { get; set; }
+        public long NoPagosDevueltos { get; set; }
+        public string IdCanal { get; set; }
+
+        public decimal? Cdl { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiSumarizadoDetalleTomiDto
+    {
+        public long? IdMaestro { get; set; }
+        public int NumRegs { get; set; }
+        public decimal? ImpMonto { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiDetalleTomiConciliacionDto
+    {
+        public decimal? T24DebitAmount { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiDetalleCmsDto
+    {
+        public long IdFormato { get; set; }
+        public long IdCliente { get; set; }
+        public string IdUsuarioCaptura { get; set; }
+        public long? IdCuenta { get; set; }
+        public string Estatus { get; set; }
+        public DateTime FechaCaptura { get; set; }
+        public DateTime? FechaAutorizacion { get; set; }
+        public string IdUsuarioAutorizo { get; set; }
+        public string ContenidoFormato { get; set; }
+        public string ContenidoSelloDigit { get; set; }
+        public string RazonRechazo { get; set; }
+        public long TipoFormato { get; set; }
+        public decimal MontoOperacion { get; set; }
+        public string FormatoOriginalCompleto { get; set; }
+        public string IPOrigen { get; set; }
+        public string CadenaOriginal { get; set; }
+        public string Mensaje { get; set; }
+        public string CadenaOriginalApplet { get; set; }
+        public string FormatoXML { get; set; }
+        public string FormatoXMLDet { get; set; }
+        public string SerieCertificado { get; set; }
+        public string Descripcion { get; set; }
+        public DateTime? FechaEjecucion { get; set; }
+        public DateTime? FechaAutoriza { get; set; }
+        public string IdUsuarioAutorizoDos { get; set; }
+        public DateTime? FechaAutorizacionDos { get; set; }
+        public string IdPlantilla { get; set; }
+        public long? IdAutorizaciones { get; set; }
+        public int? IdAutorizacionUno { get; set; }
+        public int? IdAutorizacionDos { get; set; }
+        public long? Estilo { get; set; }
+        public long? AutorizacionTomitas { get; set; }
+        public long? IdFormatoPlantilla { get; set; }
+        public string IdBeneficiario { get; set; }
+        public long IdFilesBtmum { get; set; }
+        public long NoPagos { get; set; }
+        public string PagosDescripcion { get; set; }
+        public long NoPagosProcesados { get; set; }
+        public long NoPagosDevueltos { get; set; }
+        public long IdFormatoPap { get; set; }
+        public string Ref1 { get; set; }
+        public string Ref2 { get; set; }
+        public string Ref3 { get; set; }
+        public string Ref4 { get; set; }
+        public string Ref5 { get; set; }
+        public string IdCanal { get; set; }
+
+        public decimal? Cdl { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiEntradaSalidaConciliacionDto
+    {
+        public DateTime? EntFechaValor { get; set; }
+        public string EntMonedaCuenta { get; set; }
+        public decimal EntImporte { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiForexStatusDto
+    {
+        public string StatusOperacion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ConteoDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ResultadoSalidaDto
+    {
+        public int Salida { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiInsertarDetallePapTomiDto
+    {
+        public string NfFolioUnico { get; set; }        
+        public string NfTipo { get; set; }              
+        public long NfFolio { get; set; }               
+
+        public string T24CustomerCode { get; set; }     
+        public string T24DebitAcctNo { get; set; }      
+        public string NfEstatus { get; set; }           
+
+        public string NfUsuarioCaptura { get; set; }    
+        public string NfUsuarioAutoriza { get; set; }   
+
+        public DateTime? NfFechaCaptura { get; set; }
+        public DateTime? NfFechaAutoriza { get; set; }
+
+        public decimal? T24DebitAmount { get; set; }    
+
+        public string T24ShortName { get; set; }        
+        public string T24DebitCurrency { get; set; }    
+
+        public string NfForexRelacionado { get; set; }  
+        public decimal? NfMontoEnviar { get; set; }     
+
+        public string T24DebitTheirRef { get; set; }    
+        public string NfTipoCuenta { get; set; }        
+        public string NfPayment { get; set; }           
+        public string NfCharge { get; set; }            
+
+        public int? NfFechaEjecucion { get; set; }      
+
+        public string T24BenCustName { get; set; }      
+        public string NfFxdComment { get; set; }        
+        public string NfRfcBeneficiario { get; set; }   
+        public string NfTasaRetencion { get; set; }     
+
+        public string NfBancoBenef { get; set; }        
+        public string NfSwiftBeneficiario { get; set; } 
+        public string T24BenAcctNo { get; set; }        
+
+        public string NfBancoCorresponsal { get; set; } 
+        public string NfSwiftCorresponsal { get; set; } 
+        public string NfCuentaCorresponsal { get; set; }
+
+        public string NfMensaje { get; set; }           
+        public string NfCountry { get; set; }           
+
+        public string IdPlantilla { get; set; }         
+        public long? IdFormatoPlantilla { get; set; }   
+        public long? IdFilesBtmum { get; set; }         
+
+        public int? NoPagos { get; set; }               
+        public string PagosDescripcion { get; set; }    
+        public int? NoPagosProcesados { get; set; }     
+        public int? NoPagosDevueltos { get; set; }      
+
+        public long? IdFormatoPap { get; set; }         
+
+        public string Ref1 { get; set; }                
+        public string Ref2 { get; set; }                
+        public string Ref3 { get; set; }                
+        public string Ref4 { get; set; }                
+        public string Ref5 { get; set; }                
+
+        public string CountryBen { get; set; }          
+        public string CityBen { get; set; }             
+        public string StreetBen { get; set; }           
+        public string ColonyBen { get; set; }           
+        public string BuildingNumberBen { get; set; }   
+        public string PostCodeBen { get; set; }         
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiDetalleTomiEntradaSalidaDto
+    {
+        public long NfFolio { get; set; }
+
+        public string NfFolioUnico { get; set; }
+        public string T24CustomerCode { get; set; }
+        public string T24CompanyName { get; set; }
+
+        public string T24DebitAcctNo { get; set; }
+        public string T24DebitCurrency { get; set; }
+        public decimal? T24DebitAmount { get; set; }
+
+        public string NfForexRelacionado { get; set; }
+
+        public string NfNombreCuenta { get; set; }
+        public string NfMonedaCuenta { get; set; }
+
+        public string NfMensaje { get; set; }
+        public int? NfFechaEjecucion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFxiInsertarEntradaSalidaDto
+    {
+        public string Referencia { get; set; }          
+        public int? NumCliente { get; set; }            
+        public decimal? Cdl { get; set; }               
+        public string Ordenante { get; set; }           
+
+        public decimal? Operacion { get; set; }         
+        public string OperacionDesc { get; set; }       
+
+        public string Tipo { get; set; }                
+        public string TipoDesc { get; set; }            
+
+        public decimal? Cuenta { get; set; }            
+        public string Nombre { get; set; }              
+        public string CuentaMoneda { get; set; }        
+
+        public decimal? Via { get; set; }               
+        public string ViaDesc { get; set; }             
+
+        public decimal? Importe { get; set; }           
+        public decimal? Saldo { get; set; }             
+
+        public string Comentarios { get; set; }         
+
+        public DateTime? FechaCaptura { get; set; }     
+        public DateTime? FechaValor { get; set; }       
+
+        public string Hora { get; set; }                
+        public string Capturista { get; set; }          
+
+        public decimal? Fad { get; set; }               
+        public string ReferenciaControl { get; set; }   
+        public decimal? ReferenciaControlCont { get; set; }
+    }
+
+}
+using System;
+
+namespace Aplicacion.Interfaces.PaP_FXT
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTFormatoPapMaestroCmsDto
+    {
+        public long IdFormato { get; set; }
+        public long IdCliente { get; set; }
+        public string IdUsuarioCaptura { get; set; }
+        public long? IdCuenta { get; set; }
+        public string Estatus { get; set; }
+        public DateTime FechaCaptura { get; set; }
+        public DateTime? FechaAutorizacion { get; set; }
+        public string IdUsuarioAutorizo { get; set; }
+        public string ContenidoFormato { get; set; }
+        public string ContenidoSelloDigit { get; set; }
+        public string RazonRechazo { get; set; }
+        public long TipoFormato { get; set; }
+        public decimal MontoOperacion { get; set; }
+        public string FormatoOriginalCompleto { get; set; }
+        public string IPOrigen { get; set; }
+        public string CadenaOriginal { get; set; }
+        public string Mensaje { get; set; }
+        public string CadenaOriginalApplet { get; set; }
+        public string FormatoXML { get; set; }
+        public string FormatoXMLDet { get; set; }
+        public string SerieCertificado { get; set; }
+        public string Descripcion { get; set; }
+        public DateTime? FechaEjecucion { get; set; }
+        public DateTime? FechaAutoriza { get; set; }
+        public string IdUsuarioAutorizoDos { get; set; }
+        public DateTime? FechaAutorizacionDos { get; set; }
+        public string IdPlantilla { get; set; }
+        public long? IdAutorizaciones { get; set; }
+        public int? IdAutorizacionUno { get; set; }
+        public int? IdAutorizacionDos { get; set; }
+        public long? Estilo { get; set; }
+        public string AutorizacionTOMITAS { get; set; }
+        public long? IdFormatoPlantilla { get; set; }
+        public string IdBeneficiario { get; set; }
+        public long IdFilesBtmum { get; set; }
+        public long NoPagos { get; set; }
+        public string PagosDescripcion { get; set; }
+        public long NoPagosProcesados { get; set; }
+        public long NoPagosDevueltos { get; set; }
+        public string IdCanal { get; set; }
+
+        public decimal? Cdl { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTFormatoPapDetalleCmsDto
+    {
+        public long IdFormato { get; set; }
+        public long IdCliente { get; set; }
+        public string IdUsuarioCaptura { get; set; }
+        public long? IdCuenta { get; set; }
+        public string Estatus { get; set; }
+        public DateTime FechaCaptura { get; set; }
+        public DateTime? FechaAutorizacion { get; set; }
+        public string IdUsuarioAutorizo { get; set; }
+        public string ContenidoFormato { get; set; }
+        public string ContenidoSelloDigit { get; set; }
+        public string RazonRechazo { get; set; }
+        public long TipoFormato { get; set; }
+        public decimal MontoOperacion { get; set; }
+        public string FormatoOriginalCompleto { get; set; }
+        public string IPOrigen { get; set; }
+        public string CadenaOriginal { get; set; }
+        public string Mensaje { get; set; }
+        public string CadenaOriginalApplet { get; set; }
+        public string FormatoXML { get; set; }
+        public string FormatoXMLDet { get; set; }
+        public string SerieCertificado { get; set; }
+        public string Descripcion { get; set; }
+        public DateTime? FechaEjecucion { get; set; }
+        public DateTime? FechaAutoriza { get; set; }
+        public string IdUsuarioAutorizoDos { get; set; }
+        public DateTime? FechaAutorizacionDos { get; set; }
+        public string IdPlantilla { get; set; }
+        public long? IdAutorizaciones { get; set; }
+        public int? IdAutorizacionUno { get; set; }
+        public int? IdAutorizacionDos { get; set; }
+        public long? Estilo { get; set; }
+        public long? AutorizacionTOMITAS { get; set; }
+        public long? IdFormatoPlantilla { get; set; }
+        public string IdBeneficiario { get; set; }
+        public long IdFilesBtmum { get; set; }
+        public long NoPagos { get; set; }
+        public string PagosDescripcion { get; set; }
+        public long NoPagosProcesados { get; set; }
+        public long NoPagosDevueltos { get; set; }
+        public long IdFormatoPap { get; set; }
+        public string Ref1 { get; set; }
+        public string Ref2 { get; set; }
+        public string Ref3 { get; set; }
+        public string Ref4 { get; set; }
+        public string Ref5 { get; set; }
+        public string IdCanal { get; set; }
+
+        public decimal? Cdl { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTForexEstatusTomiDto
+    {
+        public string StatusOperacion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTExisteRegistroTomiDto
+    {
+        public int NumRegs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTSumarizadoDetalleTomiDto
+    {
+        public long IdMaestro { get; set; }
+        public int NumRegs { get; set; }
+        public decimal? ImpMonto { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTConciliacionDetalleTomiDto
+    {
+        public decimal? T24DebitAmount { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTInsertarDetalleTomiDto
+    {
+        public string NfFolioUnico { get; set; }
+        public string NfTipo { get; set; }
+        public int NfFolio { get; set; }
+        public string T24CustomerCode { get; set; }
+        public string T24DebitAcctNo { get; set; }
+        public string NfEstatus { get; set; }
+        public string NfUsuarioCaptura { get; set; }
+        public string NfUsuarioAutoriza { get; set; }
+        public DateTime? NfFechaCaptura { get; set; }
+        public DateTime? NfFechaAutoriza { get; set; }
+        public decimal? T24DebitAmount { get; set; }
+        public string T24ShortName { get; set; }
+        public string NfForexRelacionado { get; set; }
+        public string T24DebitCurrency { get; set; }
+        public string NfBancoBenef { get; set; }
+        public string T24BenAcctNo { get; set; }
+        public string NfTipoCuenta { get; set; }
+        public string T24BenCustName { get; set; }
+        public string NfRfcBeneficiario { get; set; }
+        public string NfTasaRetencion { get; set; }
+        public string NfFechaEjecucion { get; set; }
+        public string T24DebitTheirRef { get; set; }
+        public decimal? NfMontoEnviar { get; set; }
+        public string IdPlantilla { get; set; }
+        public long? IdFormatoPlantilla { get; set; }
+        public long? IdFilesBtmum { get; set; }
+        public int? NoPagos { get; set; }
+        public string PagosDescripcion { get; set; }
+        public int? NoPagosProcesados { get; set; }
+        public int? NoPagosDevueltos { get; set; }
+        public long? IdFormatoPap { get; set; }
+        public string Ref1 { get; set; }
+        public string Ref2 { get; set; }
+        public string Ref3 { get; set; }
+        public string Ref4 { get; set; }
+        public string Ref5 { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTInsertarMaestroTomiDto
+    {
+        public string NfFolioUnico { get; set; }
+        public string NfTipo { get; set; }
+        public int NfFolio { get; set; }
+        public string T24CustomerCode { get; set; }
+        public string T24DebitAcctNo { get; set; }
+        public string NfEstatus { get; set; }
+        public string NfUsuarioCaptura { get; set; }
+        public string NfUsuarioAutoriza { get; set; }
+        public DateTime? NfFechaCaptura { get; set; }
+        public DateTime? NfFechaAutoriza { get; set; }
+        public decimal? T24DebitAmount { get; set; }
+        public string T24ShortName { get; set; }
+        public string NfForexRelacionado { get; set; }
+        public string T24DebitCurrency { get; set; }
+        public string NfBancoBenef { get; set; }
+        public string T24BenAcctNo { get; set; }
+        public string NfTipoCuenta { get; set; }
+        public string T24BenCustName { get; set; }
+        public string NfRfcBeneficiario { get; set; }
+        public string NfTasaRetencion { get; set; }
+        public string NfFechaEjecucion { get; set; }
+        public string T24DebitTheirRef { get; set; }
+        public decimal? NfMontoEnviar { get; set; }
+        public string IdPlantilla { get; set; }
+        public long? IdFormatoPlantilla { get; set; }
+        public long? IdFilesBtmum { get; set; }
+        public int? NoPagos { get; set; }
+        public string PagosDescripcion { get; set; }
+        public int? NoPagosProcesados { get; set; }
+        public int? NoPagosDevueltos { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTActualizarDatosGeneralesPlanTrabajoTomiDto
+    {
+        public long Folio { get; set; }
+        public long FolioMaestro { get; set; }
+        public string TipoOperacion { get; set; }
+        public string FolioUnico { get; set; }
+        public decimal? FecValor { get; set; }
+        public string CveMoneda { get; set; }
+        public decimal? ImporteDetalle { get; set; }
+        public decimal? ImporteMaestro { get; set; }
+        public int? NumCliente { get; set; }
+        public string NombreCliente { get; set; }
+        public string NumCuenta { get; set; }
+        public int? NumPagos { get; set; }
+        public string SubtipoOperacion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTActualizarEstatusCmsDto
+    {
+        public long IdFormatoPap { get; set; }
+        public string Mensaje { get; set; }
+        public string Estatus { get; set; }
+        public string RazonRechazo { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTActualizarEstatusTomiDto
+    {
+        public long Folio { get; set; }
+        public long IdFormatoPap { get; set; }
+        public string NfEstatus { get; set; }
+        public string NfRazon { get; set; }
+        public string NfUsuarioConfirma { get; set; }
+        public DateTime? NfFechaConfirma { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTCancelarPlanTrabajoPorForexTomiDto
+    {
+        public long Folio { get; set; }
+        public long FolioMaestro { get; set; }
+        public string TipoOperacion { get; set; }
+        public decimal? FecValor { get; set; }
+        public string CveMoneda { get; set; }
+        public decimal? ImporteDetalle { get; set; }
+        public decimal? ImporteMaestro { get; set; }
+        public string ErrDescripcion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTMarcarFechaFuturaTomiDto
+    {
+        public long Folio { get; set; }
+        public long FolioMaestro { get; set; }
+        public string TipoOperacion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPFXTContenidoFormatoDto
+    {
+        public string Valor0 { get; set; }
+        public string NombreCliente { get; set; }
+        public string Valor2 { get; set; }
+        public string FolioForexRelacionado { get; set; }
+        public string Moneda { get; set; }
+        public string Valor5 { get; set; }
+        public string BancoBeneficiario { get; set; }
+        public string CuentaBeneficiario { get; set; }
+        public string TipoCuenta { get; set; }
+        public string Valor9 { get; set; }
+        public string NombreBeneficiario { get; set; }
+        public string RfcBeneficiario { get; set; }
+        public string TasaRetencion { get; set; }
+        public int? FechaEjecucion { get; set; }
+        public string Valor14 { get; set; }
+        public string ReferenciaDebito { get; set; }
+        public string Valor16 { get; set; }
+        public string Valor17 { get; set; }
+        public decimal? MontoEnviar { get; set; }
+    }
+
+}
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Aplicacion.DTOs.PaP_SPID
+{
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class ResultadoSalidaDto
+    {
+        public int Salida { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidExisteRegistroDto
+    {
+        public int num_regs { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidForexStatusDto
+    {
+        public string STATUSOPERACION { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidFormatoPapCmsDto
+    {
+        public long id_Formato { get; set; }
+        public long id_Cliente { get; set; }
+        public string id_UsuarioCaptura { get; set; }
+        public long? id_Cuenta { get; set; }
+        public string Estatus { get; set; }
+        public DateTime FechaCaptura { get; set; }
+        public DateTime? FechaAutorizacion { get; set; }
+        public string id_UsuarioAutorizo { get; set; }
+        public string ContenidoFormato { get; set; }
+        public string ContenidoSelloDigit { get; set; }
+        public string RazonRechazo { get; set; }
+        public long TipoFormato { get; set; }
+        public decimal MontoOperacion { get; set; }
+        public string FormatoOriginalCompleto { get; set; }
+        public string IPOrigen { get; set; }
+        public string CadenaOriginal { get; set; }
+        public string Mensaje { get; set; }
+        public string CadenaOriginalApplet { get; set; }
+        public string FormatoXML { get; set; }
+        public string FormatoXML_Det { get; set; }
+        public string SerieCertificado { get; set; }
+        public string Descripcion { get; set; }
+        public DateTime? FechaEjecucion { get; set; }
+        public DateTime? Fecha_Autoriza { get; set; }
+        public string id_UsuarioAutorizo_dos { get; set; }
+        public DateTime? FechaAutorizacion_dos { get; set; }
+        public string id_Plantilla { get; set; }
+        public long? id_Autorizaciones { get; set; }
+        public int? id_Autorizacion_uno { get; set; }
+        public int? id_Autorizacion_dos { get; set; }
+        public long? Estilo { get; set; }
+        public string Autorizacion_TOMITAS { get; set; }
+        public long? id_Formato_Plantilla { get; set; }
+        public string id_Beneficiario { get; set; }
+        public long id_files_btmum { get; set; }
+        public long nopagos { get; set; }
+        public string pagosdescripcion { get; set; }
+        public long nopagosprocesados { get; set; }
+        public long nopagosdevueltos { get; set; }
+        public decimal? cdl { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidFormatoPapDetalleCmsDto : PaPSpidFormatoPapCmsDto
+    {
+        public long id_formato_pap { get; set; }
+        public string ref1 { get; set; }
+        public string ref2 { get; set; }
+        public string ref3 { get; set; }
+        public string ref4 { get; set; }
+        public string ref5 { get; set; }
+        public string ReferenciaNumerica { get; set; }
+        public string ClasificacionOper { get; set; }
+        public string DesClasificacionOper { get; set; }
+        public string RelacionComercial { get; set; }
+        public string id_canal { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidActualizarPlanTrabajoDto
+    {
+        public long Folio { get; set; }
+        public long FolioMaestro { get; set; }
+        public string TipoOperacion { get; set; }
+        public string FolioUnico { get; set; }
+        public int FechaValor { get; set; }
+        public string Moneda { get; set; }
+        public decimal ImporteDetalle { get; set; }
+        public decimal ImporteMaestro { get; set; }
+        public int NumCliente { get; set; }
+        public string NombreCliente { get; set; }
+        public string NumCuenta { get; set; }
+        public int NumeroPagos { get; set; }
+        public string SubtipoOperacion { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidInsertarFormatoDto
+    {
+        public string NF_FOLIO_UNICO { get; set; }
+        public string NF_TIPO { get; set; }
+        public long NF_FOLIO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public string NF_USUARIO_CAPTURA { get; set; }
+        public string NF_USUARIO_AUTORIZA { get; set; }
+        public DateTime NF_FECHA_CAPTURA { get; set; }
+        public DateTime? NF_FECHA_AUTORIZA { get; set; }
+        public decimal T24_DEBIT_AMOUNT { get; set; }
+        public string T24_SHORT_NAME { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_TIPO_CUENTA { get; set; }
+        public string T24_BEN_CUST_NAME { get; set; }
+        public string NF_RFC_BENEFICIARIO { get; set; }
+        public string NF_TASA_RETENCION { get; set; }
+        public int NF_FECHA_EJECUCION { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public decimal NF_MONTO_ENVIAR { get; set; }
+        public string ID_PLANTILLA { get; set; }
+        public long? ID_FORMATO_PLANTILLA { get; set; }
+        public long ID_FILES_BTMUM { get; set; }
+        public int NO_PAGOS { get; set; }
+        public string PAGOSDESCRIPCION { get; set; }
+        public int NOPAGOSPROCESADOS { get; set; }
+        public int NOPAGOSDEVUELTOS { get; set; }
+        public long? ID_FORMATO_PAP { get; set; }
+        public string REF1 { get; set; }
+        public string REF2 { get; set; }
+        public string REF3 { get; set; }
+        public string REF4 { get; set; }
+        public string REF5 { get; set; }
+        public string NF_ADDRESS { get; set; }
+        public string NF_ZIP_CODE { get; set; }
+        public string NF_CLASIFICACION_OPERACION { get; set; }
+        public string NF_RELACION_COMERCIAL { get; set; }
+        public string NF_NUMERIC_REFERENCE { get; set; }
+        public string NF_DIRECCION_IP { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidInsightCustomerEdoCtaDto
+    {
+        public string NIC { get; set; }
+        public string P1_CALLE { get; set; }
+        public string P1_EXTERIOR { get; set; }
+        public string P1_INTERIOR { get; set; }
+        public string P1_CODIGO_POSTAL { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidSumarizadoDetalleDto
+    {
+        public long? id_maestro { get; set; }
+        public int num_regs { get; set; }
+        public decimal? imp_monto { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidDetalleConciliacionDto
+    {
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidEntradaSalidaConciliacionDto
+    {
+        public DateTime? ent_fechaValor { get; set; }
+        public string ent_moneda_cuenta { get; set; }
+        public decimal? ent_importe { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidTombinDetalleDto
+    {
+        public string NF_TIPO { get; set; }
+        public long NF_FOLIO { get; set; }
+        public string T24_CUSTOMER_CODE { get; set; }
+        public string T24_COMPANY_NAME { get; set; }
+        public string T24_SHORT_NAME { get; set; }
+        public string NF_ESTATUS { get; set; }
+        public string NF_USUARIO_CAPTURA { get; set; }
+        public DateTime? NF_FECHA_CAPTURA { get; set; }
+        public string NF_USUARIO_AUTORIZA { get; set; }
+        public DateTime? NF_FECHA_AUTORIZA { get; set; }
+        public string NF_USUARIO_CONFIRMA { get; set; }
+        public DateTime? NF_FECHA_CONFIRMA { get; set; }
+        public string T24_DEBIT_ACCT_NO { get; set; }
+        public string T24_DEBIT_CURRENCY { get; set; }
+        public string T24_DEBIT_THEIR_REF { get; set; }
+        public decimal? T24_DEBIT_AMOUNT { get; set; }
+        public string T24_BEN_ACCT_NO { get; set; }
+        public string NF_FOREX_RELACIONADO { get; set; }
+        public bool? NF_CIERRE { get; set; }
+        public string NF_ESTATUS_INTERNO { get; set; }
+        public string T24_BEN_CUST_NAME { get; set; }
+        public string NF_RFC_BENEFICIARIO { get; set; }
+        public string NF_TASA_RETENCION { get; set; }
+        public decimal? NF_MONTO_ENVIAR { get; set; }
+        public string NF_RAZON { get; set; }
+        public string NF_FOLIO_UNICO { get; set; }
+        public string ID_PLANTILLA { get; set; }
+        public long? ID_FORMATO_PLANTILLA { get; set; }
+        public long? ID_FILES_BTMUM { get; set; }
+        public int? NOPAGOS { get; set; }
+        public string PAGOSDESCRIPCION { get; set; }
+        public int? NOPAGOSPROCESADOS { get; set; }
+        public int? NOPAGOSDEVUELTOS { get; set; }
+        public long? ID_FORMATO_PAP { get; set; }
+        public string NF_NOMBRE_CUENTA { get; set; }
+        public string NF_MONEDA_CUENTA { get; set; }
+        public string NF_BANCO_BENEF { get; set; }
+        public int? NF_FECHA_EJECUCION { get; set; }
+        public string NF_CLASIFICACION_OPERACION { get; set; }
+        public string NF_RELACION_COMERCIAL { get; set; }
+        public string NF_ADDRESS { get; set; }
+        public string NF_ZIP_CODE { get; set; }
+        public string NF_NUMERIC_REFERENCE { get; set; }
+        public string NF_DIRECCION_IP { get; set; }
+        public string OP_FIRMA_DIG { get; set; }
+    }
+
+    /// <summary>
+    /// DTO necesario para recuperar datos.
+    /// </summary>
+    public class PaPSpidInsertarEntradaSalidaDto
+    {
+        public string Referencia { get; set; }
+        public decimal Num_Cliente { get; set; }
+        public decimal CDL { get; set; }
+        public string Ordenante { get; set; }
+        public decimal Operacion { get; set; }
+        public string OperacionDesc { get; set; }
+        public string Tipo { get; set; }
+        public string TipoDesc { get; set; }
+        public decimal Cuenta { get; set; }
+        public string Nombre { get; set; }
+        public string CuentaMoneda { get; set; }
+        public decimal Via { get; set; }
+        public string ViaDesc { get; set; }
+        public decimal Importe { get; set; }
+        public decimal Saldo { get; set; }
+        public string Comentarios { get; set; }
+        public DateTime Fecha_Captura { get; set; }
+        public DateTime FechaValor { get; set; }
+        public string Hora { get; set; }
+        public string Capturista { get; set; }
+        public decimal Fad { get; set; }
+        public string Referencia_Control { get; set; }
+        public int Referencia_Control_Cont { get; set; }
+    }
+
+}
