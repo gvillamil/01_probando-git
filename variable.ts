@@ -6997,3 +6997,1004 @@ namespace Aplicacion.Servicios.Operaciones
                 if (procesado)
                 {
                     Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|La operación está correctamente conciliada.");
+
+                    procesado = await RespondeEntradaTef("A", null, tefIdOperacion, tefFechaProceso, tefClaveRastreo, tefImporte);
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n TerminaProceso.
+                    /// </summary>
+
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso = string.Empty;
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro CONCILIAR con folio: {folio}");
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Inserta registro en la base de datos de TOMI con datos del TEF.
+        /// </summary>
+        private async Task<bool> TEF_A_TOMI(
+            string folio,
+            EntTefRecibidaDto datosTef,
+            int tefMotivoDevolucion,
+            bool t24Encontrado,
+            bool t24CuentaValida,
+            DataTable t24DatosCliente,
+            string folioUnico,
+            string tefInsNombre)
+        {
+            try
+            {
+                DataRow filaClienteT24 = ObtenerFilaT24(t24DatosCliente, folio, "TEF_A_TOMI", true);
+
+                EntTefInsertarFormatoTomiDto dto = new EntTefInsertarFormatoTomiDto
+                {
+                    IDOperacion = datosTef.IDOperacion,
+                    FechaProceso = datosTef.FechaProceso,
+                    BancoPresentador = datosTef.BancoPresentador,
+                    BancoReceptor = datosTef.BancoReceptor,
+                    Importe = datosTef.Importe,
+                    Divisa = datosTef.Divisa,
+                    FechaAplicacion = datosTef.FechaAplicacion,
+                    FechaInicial = datosTef.FechaInicial,
+                    ClaveRastreo = datosTef.ClaveRastreo,
+                    CodigoOperacion = datosTef.CodigoOperacion,
+                    TipoOperacion = datosTef.TipoOperacion,
+                    TipoCuentaOrdenante = datosTef.TipoCuentaOrdenante,
+                    CuentaOrdenante = datosTef.CuentaOrdenante,
+                    NombreOrdenante = datosTef.NombreOrdenante,
+                    RFCOrdenante = datosTef.RFCOrdenante,
+                    RefNumOrdenante = datosTef.RefNumOrdenante,
+                    RefLeyendaOrdenante = datosTef.RefLeyendaOrdenante,
+                    TipoCuentaReceptor = datosTef.TipoCuentaReceptor,
+                    CuentaReceptor = datosTef.CuentaReceptor,
+                    NombreReceptor = datosTef.NombreReceptor,
+                    RFCReceptor = datosTef.RFCReceptor,
+                    NumCorte = datosTef.NumCorte,
+                    MotivoDevolucion = tefMotivoDevolucion,
+                    NumeroCarga = datosTef.NumeroCarga,
+                    SecuenciaCarga = datosTef.SecuenciaCarga,
+                    ErrorEnCarga = datosTef.ErrorEnCarga,
+                    SolicitudConfirmacion = datosTef.SolicitudConfirmacion,
+                    EsDevolucionExtemporanea = datosTef.EsDevolucionExtemporanea,
+                    EstadoBTMUM = datosTef.EstadoBTMUM,
+                    EstadoSistemaTEF = datosTef.EstadoSistemaTEF,
+                    ReferenciaConfirmacion = datosTef.ReferenciaConfirmacion,
+                    EsDevolucionRecuperada = datosTef.EsDevolucionRecuperada,
+                    NF_ESTATUS = t24Encontrado && t24CuentaValida ? "PEND" : "RECC",
+                    T24_DEBIT_AMOUNT = datosTef.Importe,
+                    T24_DEBIT_CURRENCY = _vwT24.MonedaDefaultMN,
+                    T24_BEN_ACCT_NO = datosTef.CuentaReceptor,
+                    T24_CUSTOMER_CODE = DameTexto(filaClienteT24["CUSTOMER"]),
+                    T24_COMPANY_NAME = DameTexto(filaClienteT24["NAME_1"]),
+                    NF_TIPO_CUENTA = string.Empty,
+                    T24_CREDIT_ACCT_NO = _vwT24.T24_TEF_Acct,
+                    T24_DEBIT_ACCT_NO = datosTef.CuentaOrdenante,
+                    T24_DEBIT_THEIR_REF = string.Empty,
+                    T24_CREDIT_THEIR_REF = string.Empty,
+                    T24_PAYMENT_DETAILS = datosTef.RefLeyendaOrdenante,
+                    T24_SATEL_SYS_REF = folioUnico,
+                    T24_INSTRUCTIONS = datosTef.RefLeyendaOrdenante,
+                    NF_FOLIO_UNICO = folioUnico,
+                    NF_BANCO_BENEF = tefInsNombre,
+                    NF_FECHA_EJECUCION = datosTef.FechaAplicacion,
+                    NF_BEN_CUST_NAME = datosTef.NombreReceptor,
+                    NF_TIPO_OPERACION = datosTef.TipoOperacion,
+                    NF_CODIGO_OPERACION = datosTef.CodigoOperacion,
+                    NF_FECHA_APLICACION = datosTef.FechaAplicacion,
+                    NF_FECHA_CARGO = datosTef.FechaAplicacion
+                };
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|IDOperacion={dto.IDOperacion}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|FechaProceso={dto.FechaProceso}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|BancoPresentador={dto.BancoPresentador}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|BancoReceptor={dto.BancoReceptor}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|Importe={dto.Importe}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|Divisa={dto.Divisa}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|FechaAplicacion={dto.FechaAplicacion}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|ClaveRastreo={dto.ClaveRastreo}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|NF_ESTATUS={dto.NF_ESTATUS}");
+                Config.EscribirLog($"INFO|{tipoOperacion}.TEF_A_TOMI|NF_FOLIO_UNICO={dto.NF_FOLIO_UNICO}");
+
+                return await _entTefTomiDao.InsertarFormatoEntradaTef(dto);
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|{tipoOperacion}.TEF_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Inserta registro de Entrada/Salida en TOMI.
+        /// </summary>
+        private async Task<bool> TOMI_ENTRADA_SALIDA(
+            string folio,
+            string folioUnico,
+            DataTable t24DatosCliente,
+            string cuentaBTMUM,
+            string comentarios)
+        {
+            try
+            {
+                EntTefFormatoTomiDto formato = await _entTefTomiDao.ObtenerFormatoEntradaTef(Convert.ToInt64(folio));
+
+                if (formato == null)
+                    return false;
+
+                DataRow filaClienteT24 = ObtenerFilaT24(t24DatosCliente, folio, "TOMI_ENTRADA_SALIDA", true);
+
+                EntTefEntradaSalidaDto dto = new EntTefEntradaSalidaDto
+                {
+                    Referencia = folioUnico,
+                    Num_Cliente = Convert.ToDecimal(DameTexto(filaClienteT24["CUSTOMER"])),
+                    CDL = Convert.ToDecimal(DameTexto(filaClienteT24["CUSTOMER"])),
+                    Ordenante = DameTexto(filaClienteT24["ACCOUNT_TITLE_1"]),
+                    Operacion = 198,
+                    OperacionDesc = "Entrada  (TTP)",
+                    Tipo = "D",
+                    TipoDesc = "Doméstica TEF",
+                    Cuenta = Convert.ToDecimal(cuentaBTMUM),
+                    Nombre = DameTexto(filaClienteT24["ACCOUNT_TITLE_1"]),
+                    CuentaMoneda = DameTexto(filaClienteT24["CURRENCY"]),
+                    Via = 850,
+                    ViaDesc = "TRF RECIBIDA MXN TEF",
+                    Importe = formato.Importe,
+                    Saldo = 0m,
+                    Comentarios = comentarios,
+                    Fecha_Captura = ConversionHelper.TextoAFechaT24(_configuracion.StrFechaSistema),
+                    FechaValor = ConversionHelper.TextoAFechaT24(formato.FechaAplicacion.ToString()),
+                    Hora = DateTime.Now.ToLongTimeString(),
+                    Capturista = "JEAI",
+                    Fad = 0,
+                    Referencia_Control = "A",
+                    Referencia_Control_Cont = 0
+                };
+
+                bool insertado = await _entTefTomiDao.InsertarEntradaSalida(dto);
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.TOMI_ENTRADA_SALIDA|Insertado={insertado}.");
+
+                return insertado;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|{tipoOperacion}.TOMI_ENTRADA_SALIDA|Se presenta exception: {ex.Message}.Trace:{ex}");
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Actualiza el estatus de la entrada TEF.
+        /// </summary>
+        private async Task<bool> RespondeEntradaTef(
+            string claveOperacion,
+            int? causaDevolucion,
+            long tefIdOperacion,
+            int tefFechaProceso,
+            string tefClaveRastreo,
+            decimal tefImporte)
+        {
+            try
+            {
+                Config.EscribirLog(
+                    $"INFO|{tipoOperacion}.responde_entrada_TEF|Pasaron los parametros. " +
+                    $"opClave={tefIdOperacion},opFechaOper={tefFechaProceso},opFolio={tefIdOperacion}," +
+                    $"cveRastreo='{tefClaveRastreo}',opMonto={tefImporte},cd_clave={causaDevolucion},op_estatus='{claveOperacion}'.");
+
+                EntTefCambiarEstatusResultadoDto resultado =
+                    await _entTefTefDao.CambiarEstatusRecibida(
+                        tefIdOperacion,
+                        tefFechaProceso,
+                        causaDevolucion?.ToString(),
+                        claveOperacion);
+
+                if (resultado == null)
+                    return false;
+
+                Config.EscribirLog($"INFO|{tipoOperacion}.responde_entrada_TEF|Cadena_Regreso={resultado.Codigo}|{resultado.Mensaje}");
+
+                if (resultado.Codigo == 0)
+                    return true;
+
+                if (resultado.Codigo == 1)
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|{tipoOperacion}.responde_entrada_TEF|Se presenta exception: {ex.Message}.Trace:{ex}");
+            }
+
+            return false;
+        }
+
+        private static DataRow ObtenerFilaT24(DataTable t24DatosCliente, string folio, string etapa, bool requerida)
+        {
+            if (t24DatosCliente == null)
+                throw new Exception($"Error técnico al consultar datos T24 para folio {folio} en etapa {etapa}.");
+
+            if (t24DatosCliente.Rows.Count == 0)
+            {
+                if (requerida)
+                    throw new Exception($"No se encontraron datos T24 para folio {folio} en etapa {etapa}.");
+
+                return null;
+            }
+
+            return t24DatosCliente.Rows[0];
+        }
+
+        private bool EsValidoRFC_CURP_TEF(object texto)
+        {
+            string textoValidar = DameTexto(texto).Trim();
+
+            if (string.Equals(textoValidar, "ND", StringComparison.Ordinal))
+                return true;
+
+            if (EsRFC(textoValidar))
+                return true;
+
+            if (EsCURP(textoValidar))
+                return true;
+
+            return false;
+        }
+
+
+    }
+
+}
+
+using Aplicacion.DTOs.FXD;
+using Aplicacion.Interfaces.FirmaElectronica;
+using Aplicacion.Interfaces.FXD;
+using Aplicacion.Modelos;
+using Aplicacion.Servicios.FirmaElectronica;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios.Operaciones
+{
+    /// <summary>
+    /// Representa FXD.
+    /// </summary>
+    public class FXD
+    {
+        private readonly ConfiguracionModelo _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IFXDDao _fxdDao;
+        private readonly IFXDCmsDao _fxdCmsDao;
+        private readonly ConexionT24Mw _vwT24;
+        private readonly IComunFXD _comunFXD;
+
+        private const string tipoOperacion = "FXD";
+        private string folioUnico = string.Empty;
+        private string folioPropuesto = string.Empty;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public FXD(
+            ConfiguracionModelo configuracion,
+            IControlServicio controlServicio,
+            IFXDDao fxdDao,
+            IFXDCmsDao fxdCmsDao,
+            ConexionT24Mw vwT24,
+            IComunFXD comunFXD)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _fxdDao = fxdDao;
+            _fxdCmsDao = fxdCmsDao;
+            _vwT24 = vwT24;
+            _comunFXD = comunFXD;
+        }
+
+        /// <summary>
+        /// Procesa la operación FXD.
+        /// </summary>
+        public async Task<bool> ProcesaOperacion(string folio)
+        {
+            object[] valoresFormato = new object[31];
+            string fechaEjecucion = string.Empty;
+            string moneda = string.Empty;
+            decimal importe = 0m;
+            bool conForex = false;
+            bool fechaFutura;
+            bool forexCancelado = false;
+            string folioForex = string.Empty;
+            bool conEntradaSalida = true;
+            bool procesado;
+            bool resultado;
+
+            //Verificamos la última operación no realizada.
+            _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+            {
+                Folio = folio,
+                TipoOperacion = tipoOperacion,
+                Servicio = _configuracion.NombreServicio,
+                NombreProceso = _configuracion.NombreProceso,
+                AliasProceso = _configuracion.AliasProceso,
+                PId = _configuracion.Pid.Value
+            });
+
+            if (string.Equals(_configuracion.AliasProceso, "", StringComparison.Ordinal))
+                return false;
+
+            //Confirmo que se encuentre el certificado y llave para la firma digital.
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Confirmando que el certificado se encuentre.");
+            using (var firma = new MetodosFirma(_configuracion))
+            {
+                if (!firma.CertificadoEncontrado())
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception("Error en procesamiento de SPEI: No se encontro el certificado y/o llave para realizar la firma de la transacción");
+            }
+
+            //Datos del folio en CMS y TOMI.
+            fechaEjecucion = string.Empty;
+            moneda = string.Empty;
+            importe = 0m;
+            folioForex = string.Empty;
+            conForex = false;
+            forexCancelado = false;
+            conEntradaSalida = true;
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Aperturando conexión a base de datos del CMS.");
+
+            FormatoFxdCmsDto datosCms = await _fxdCmsDao.ObtenerFormatoFxdCmsPorFolio(folio);
+            if (datosCms is null)
+                throw new Exception($"No se encontraron datos de operación FXD para folio={folio}.");
+
+            if (datosCms != null)
+            {
+                valoresFormato[19] = "FXD";
+                valoresFormato[20] = datosCms.IdFormato;
+                valoresFormato[21] = datosCms.Cdl;
+                valoresFormato[22] = datosCms.IdCuenta;
+                valoresFormato[23] = datosCms.FechaCaptura;
+                valoresFormato[24] = datosCms.IdUsuarioCaptura;
+                valoresFormato[25] = datosCms.FechaAutorizacion;
+                valoresFormato[26] = datosCms.IdUsuarioAutorizo;
+                valoresFormato[27] = datosCms.MontoOperacion;
+                valoresFormato[28] = datosCms.IdPlantilla;
+                valoresFormato[29] = datosCms.IdFormatoPlantilla;
+
+                var parseado = ContenidoFormatoParser.Parse(datosCms.ContenidoFormato, folio);
+                ContenidoFormatoParser.ValidarMinimoIndice(parseado, folio, 18);
+
+                for (int idx = 0; idx <= 18; idx++)
+                {
+                    valoresFormato[idx] = ContenidoFormatoParser.ObtenerValorPosicional(parseado, folio, idx);
+                }
+
+                //Referencia Numérica.
+                valoresFormato[30] = ContenidoFormatoParser.ObtenerValorPorClave(parseado, "10062");
+
+                //Folio Forex.
+                if (valoresFormato[3] != null)
+                    folioForex = Convert.ToString(valoresFormato[3]);
+
+                //Fecha ejecución.
+                if (valoresFormato[13] != null)
+                    fechaEjecucion = Convert.ToString(valoresFormato[13]);
+
+                //Moneda.
+                if (valoresFormato[4] != null)
+                    moneda = _vwT24.ValidaMoneda(Convert.ToString(valoresFormato[4]));
+
+                //Importe.
+                importe = datosCms.MontoOperacion;
+            }
+
+            if (CompararMontos(valoresFormato[5], valoresFormato[18]) == false ||
+                CompararMontos(valoresFormato[5], valoresFormato[27]) == false)
+            {
+                throw new Exception(
+                    $"Hay diferencias entre los montos de la operación: MontoOperacion={valoresFormato[27]}, MontoCapturado={valoresFormato[5]}, MontoEnviado={valoresFormato[18]}.");
+            }
+
+            Config.EscribirLog($"INFO|FXD.procesaOperacion|Veamos que trae la fecha{valoresFormato[13]}-----{fechaEjecucion}");
+
+            int fechaSistema = int.Parse(_configuracion.StrFechaSistema);
+            int intFechaEjecucion = int.Parse(fechaEjecucion);
+            if (intFechaEjecucion < fechaSistema)
+            {
+                await _controlServicio.MarcarErrorFechaPasada(long.Parse(folio));
+                throw new Exception(
+                    $"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+            }
+
+            folioUnico = await _vwT24.GeneraFolioUnico(tipoOperacion, ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion), folio);
+            folioPropuesto = await _vwT24.GeneraFolioPresupuesto(folioUnico, int.Parse(ConexionT24Mw.CambiarFechaAJulianaT24(fechaEjecucion)), tipoOperacion);
+
+            if (string.IsNullOrWhiteSpace(folioPropuesto))
+                /// <summary>
+                /// Ejecuta la operaciÃ³n Exception.
+                /// </summary>
+                throw new Exception("Error al obtener el folio propuesto de T24");
+
+            fechaFutura = string.CompareOrdinal(fechaEjecucion, _configuracion.StrFechaSistema) > 0;
+
+            // Validando si la operación está asignada a un Forex.
+            Config.EscribirLog("INFO|FXD.procesaOperacion|Validando si la operación está asignada a un Forex.");
+            if (!string.IsNullOrWhiteSpace(folioForex))
+            {
+                Config.EscribirLog($"INFO|FXD.procesaOperacion|Asignado el folio forex: {folioForex} .");
+                conForex = true;
+
+                //Bug legacy¿?
+                if (decimal.TryParse(folioForex, out _))
+                    throw new Exception($"El Folio del Forex no es válido porque es numérico; se espera una referencia alfanumérica/external ref: {folioForex}");
+
+                ForexStatusDto forexStatus = await _fxdDao.ObtenerForexStatusPorExternalRef(folioForex);
+                if (forexStatus != null &&
+                    string.Equals(forexStatus.StatusOperacion, "CANCELADO", StringComparison.OrdinalIgnoreCase))
+                {
+                    forexCancelado = true;
+                    conEntradaSalida = false;
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|FOREX CANCELADO.");
+                }
+            }
+
+            // Lectura y actualización de los datos del maestro.
+            if (string.Equals(_configuracion.AliasProceso, "DATOS_GRAL", StringComparison.Ordinal))
+            {
+                string subTipo = string.Empty;
+
+                Config.EscribirLog("INFO|FXD.procesaOperacion|Actualizando los datos del plan de trabajo maestro (fecha_valor, importe, etc).");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                if (conForex)
+                    subTipo = $"FX:{folioForex}";
+
+                bool actualizado = await _fxdDao.ActualizarDatosPlanTrabajoMaestroLectura(
+                    folio,
+                    tipoOperacion,
+                    "LECTURA",
+                    folioUnico,
+                ConversionHelper.ConvertirIntDirecto(fechaEjecucion, "NF_FECHA_EJECUCION"),
+                    moneda,
+                    importe,
+                    Convert.ToString(valoresFormato[21]),
+                    Convert.ToString(valoresFormato[1]),
+                    Convert.ToString(valoresFormato[22]),
+                    subTipo);
+
+                if (!actualizado)
+                    throw new Exception($"Error actualizando tb_srv_plan_trabajo_maestro para el folio {folio}.");
+
+                await _controlServicio.TerminaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+            }
+
+            // Lectura del CMS e inserción a TOMI.
+            if (string.Equals(_configuracion.AliasProceso, "CMS_A_TOMI", StringComparison.Ordinal))
+            {
+                Config.EscribirLog("INFO|FXD.procesaOperacion|A insertar datos de CMS a TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                procesado = false;
+                resultado = await CMS_A_TOMI(folio, valoresFormato);
+
+                if (resultado)
+                {
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|Se insertó correctamente el folio en base de TOMI.");
+
+                    // Proceso para Generar la firma digital.
+                    if (!await _comunFXD.GeneraFirmaDigital("tb_tombin_nf_fxd", folio, folioPropuesto))
+                        throw new Exception($"Se presentó un error al generar la firma digital del folio: {folio}");
+
+                    procesado = true;
+                }
+                else
+                {
+                    int numRegs = await _fxdDao.ContarRegistrosTombinFxdPorFolio(folio);
+                    if (numRegs > 0)
+                    {
+                        procesado = true;
+                        Config.EscribirLog("INFO|FXD.procesaOperacion|El folio en procesamiento ya se había insertado en base TOMI pero no se marcó el proceso como realizado.");
+                    }
+                }
+
+                if (procesado)
+                {
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro CMS_A_TOMI con folio: {folio}");
+                }
+            }
+
+            // Registro de la Entrada/Salida.
+            if (string.Equals(_configuracion.AliasProceso, "TOMI_ENTRADAS/SALIDAS", StringComparison.Ordinal))
+            {
+                Config.EscribirLog("INFO|FXD.procesaOperacion|A insertar datos de Entrada/Salida en TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                if (conEntradaSalida)
+                {
+                    procesado = false;
+                    resultado = await TOMI_ENTRADA_SALIDA(folio);
+
+                    if (resultado)
+                    {
+                        procesado = true;
+                        Config.EscribirLog("INFO|FXD.procesaOperacion|Se insertó correctamente el folio en base de Entrada/Salida.");
+                    }
+                    else
+                    {
+                        int numRegs = await _fxdDao.ContarEntradasSalidasPorReferencia(folioUnico);
+                        if (numRegs > 0)
+                        {
+                            procesado = true;
+                            Config.EscribirLog("INFO|FXD.procesaOperacion|El folio en procesamiento ya se había insertado como Entrada/Salida pero no se marcó el proceso como realizado.");
+                        }
+                    }
+                }
+                else
+                {
+                    procesado = true;
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|La operación no debe generar Entrada/Salida en TOMI).");
+                }
+
+                if (procesado)
+                {
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro TOMI_ENTRADAS/SALIDAS con folio: {folio}");
+                }
+            }
+
+            // Actualización del estatus del CMS y TOMI.
+            if (string.Equals(_configuracion.AliasProceso, "CAMBIO_ESTATUS", StringComparison.Ordinal))
+            {
+                Config.EscribirLog("INFO|FXD.procesaOperacion|A actualizar estatus en CMS y TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                procesado = true;
+
+                if (conForex && forexCancelado)
+                {
+                    // Rechazado por cancelación del Forex.
+                    await _fxdCmsDao.ActualizarFormatoCmsRechazadoPorForexCancelado(folio);
+                    await _fxdDao.ActualizarTombinFxdRechazadoPorForexCancelado(folio);
+
+                    Config.EscribirLog($"INFO|FXD.procesaOperacion|Forex Rechazado con Anterioridad: {folio}");
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|A cancelar la operación.");
+
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    await _fxdDao.ActualizarPlanTrabajoMaestroCanceladoPorForex(
+                        folio,
+                        tipoOperacion,
+                ConversionHelper.ConvertirIntDirecto(fechaEjecucion, "NF_FECHA_EJECUCION"),
+                        moneda,
+                        importe,
+                        "El forex relacionado ha sido cancelado");
+
+                    return true;
+                }
+                else
+                {
+                    DateTime fechaConfirmaLegacy = DateTime.ParseExact(
+                        DateTime.Now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
+                        "yyyy/MM/dd HH:mm",
+                        CultureInfo.InvariantCulture);
+
+                    if (string.Equals(fechaEjecucion, _configuracion.StrFechaSistema, StringComparison.Ordinal))
+                    {
+                        await _fxdCmsDao.ActualizarFormatoCmsAceptadoHoy(folio);
+                        await _fxdDao.ActualizarTombinFxdConfirmadoHoy(folio, "OPER CMS", fechaConfirmaLegacy);
+
+                        Config.EscribirLog("INFO|FXD.procesaOperacion|Operación fecha valor hoy.");
+                    }
+                    else if (string.CompareOrdinal(fechaEjecucion, _configuracion.StrFechaSistema) < 0)
+                    {
+                    await _controlServicio.MarcarErrorFechaPasada(ConversionHelper.ConvertirLongDirecto(folio, "Folio"));
+                        throw new Exception($"Se desea realizar una operación al {fechaEjecucion} cuando la fecha del sistema es {_configuracion.StrFechaSistema}.");
+                    }
+                    else
+                    {
+                        await _fxdCmsDao.ActualizarFormatoCmsPendienteEjecucion(folio);
+                        await _fxdDao.ActualizarTombinFxdPendienteFechaFutura(folio, "OPER CMS", fechaConfirmaLegacy);
+
+                        Config.EscribirLog("INFO|FXD.procesaOperacion|Operación fecha valor fútura.");
+                    }
+                }
+
+                if (procesado)
+                {
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso = await _controlServicio.ObtenerUltimoProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro CAMBIO_ESTATUS con folio: {folio}");
+                }
+            }
+
+            // Conciliación.
+            if (string.Equals(_configuracion.AliasProceso, "CONCILIAR", StringComparison.Ordinal))
+            {
+                int regsCms;
+                int regsTomi;
+                int regsEntSal = 0;
+                string mensajeError;
+                string folioForexTomi;
+                string fechaEjecucionTomi;
+                string monedaTomi;
+                decimal importeTomi;
+                string fechaEjecucionEntSal;
+                string monedaEntSal;
+                decimal importeEntSal;
+
+                Config.EscribirLog("INFO|FXD.procesaOperacion|A conciliar operaciones entre CMS y TOMI.");
+
+                await _controlServicio.IniciaProceso(new ProcesoDTO
+                {
+                    Folio = folio,
+                    TipoOperacion = tipoOperacion,
+                    Servicio = _configuracion.NombreServicio,
+                    NombreProceso = _configuracion.NombreProceso,
+                    AliasProceso = _configuracion.AliasProceso,
+                    PId = _configuracion.Pid.Value
+                });
+
+                // Registros en CMS.
+                regsCms = 1;
+
+                // Registros en TOMI.
+                regsTomi = 0;
+                folioForexTomi = string.Empty;
+                fechaEjecucionTomi = string.Empty;
+                monedaTomi = string.Empty;
+                importeTomi = 0m;
+
+                string estatusCsv = (conForex && forexCancelado) ? "RECC" : "SCNP,SCNF";
+
+                TombinFxdConciliacionDto datosTomi = await _fxdDao.ObtenerTombinFxdParaConciliacion(folio, estatusCsv);
+                if (datosTomi != null)
+                {
+                    regsTomi = 1;
+                    folioForexTomi = datosTomi.NfForexRelacionado ?? string.Empty;
+                    fechaEjecucionTomi = datosTomi.NfFechaEjecucion?.ToString() ?? string.Empty;
+                    monedaTomi = _vwT24.ValidaMoneda(datosTomi.T24DebitCurrency);
+                    importeTomi = datosTomi.T24DebitAmount ?? 0m;
+                }
+
+                // Entrada/Salida.
+                fechaEjecucionEntSal = string.Empty;
+                monedaEntSal = string.Empty;
+                importeEntSal = 0m;
+
+                if (conEntradaSalida)
+                {
+                    FxdEntradaSalidaDto entradaSalida = await _fxdDao.ObtenerEntradaSalidaPorReferencia(folioUnico);
+                    if (entradaSalida != null)
+                    {
+                        regsEntSal = 1;
+                        fechaEjecucionEntSal = entradaSalida.EntFechaValor?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? string.Empty;
+                        monedaEntSal = _vwT24.ValidaMoneda(entradaSalida.EntMonedaCuenta);
+                        importeEntSal = entradaSalida.EntImporte ?? 0m;
+                    }
+                }
+
+                // Validación.
+                mensajeError = string.Empty;
+                if (regsCms == 1 && regsTomi == 1 && ((conEntradaSalida && regsEntSal == 1) || !conEntradaSalida))
+                {
+                    if (!string.Equals(folioForex, folioForexTomi, StringComparison.Ordinal))
+                        mensajeError += Environment.NewLine + $" - Diferencia en la autorización de FOREX. CMS='{folioForex}', TOMI='{folioForexTomi}'.";
+
+                    if (!string.Equals(fechaEjecucion, fechaEjecucionTomi, StringComparison.Ordinal))
+                        mensajeError += Environment.NewLine + $" - Diferencia en la fecha de ejecución. CMS='{fechaEjecucion}', TOMI='{fechaEjecucionTomi}'.";
+
+                    if (!string.Equals(moneda, monedaTomi, StringComparison.Ordinal))
+                        mensajeError += Environment.NewLine + $" - Diferencia en la monedas. CMS='{moneda}', TOMI='{monedaTomi}'.";
+
+                    if (importe != importeTomi)
+                        mensajeError += Environment.NewLine + $" - Diferencia en el importe. CMS='{importe}', TOMI='{importeTomi}'.";
+
+                    if (conEntradaSalida)
+                    {
+                        if (!string.Equals(fechaEjecucion, fechaEjecucionEntSal, StringComparison.Ordinal))
+                            mensajeError += Environment.NewLine + $" - Diferencia en la fecha de ejecución de Entrada/Salida. CMS='{fechaEjecucion}', TOMI='{fechaEjecucionEntSal}'.";
+
+                        if (!string.Equals(moneda, monedaEntSal, StringComparison.Ordinal))
+                            mensajeError += Environment.NewLine + $" - Diferencia en la monedas de Entrada/Salida. CMS='{moneda}', TOMI='{monedaEntSal}'.";
+
+                        if (importe != importeEntSal)
+                            mensajeError += Environment.NewLine + $" - Diferencia en el importe de Entrada/Salida. CMS='{importe}', Entrada/Salida='{importeEntSal}'.";
+                    }
+
+                    procesado = true;
+                }
+                else
+                {
+                    procesado = false;
+                    mensajeError += Environment.NewLine + " - No se ha registrado la operación en TOMI.";
+                }
+
+                if (!string.IsNullOrWhiteSpace(mensajeError))
+                {
+                    procesado = false;
+                    /// <summary>
+                    /// Ejecuta la operaciÃ³n Exception.
+                    /// </summary>
+                    throw new Exception(mensajeError);
+                }
+
+                if (procesado)
+                {
+                    Config.EscribirLog("INFO|FXD.procesaOperacion|La operación está correctamente conciliada.");
+
+                    await _controlServicio.TerminaProceso(new ProcesoDTO
+                    {
+                        Folio = folio,
+                        TipoOperacion = tipoOperacion,
+                        Servicio = _configuracion.NombreServicio,
+                        NombreProceso = _configuracion.NombreProceso,
+                        AliasProceso = _configuracion.AliasProceso,
+                        PId = _configuracion.Pid.Value
+                    });
+
+                    _configuracion.AliasProceso = "";
+                }
+                else
+                {
+                    throw new Exception($"Error en procesamiento de registro CONCILIAR con folio: {folio}");
+                }
+            }
+
+            Config.EscribirLog($"INFO|{tipoOperacion}.procesaOperacion|Cerrando conexión a base de datos del CMS.");
+            return true;
+        }
+
+        /// <summary>
+        /// Inserta registro en la base de datos de TOMI (los datos son del CMS).
+        /// </summary>
+        private async Task<bool> CMS_A_TOMI(string folio, object[] valoresFormato)
+        {
+            try
+            {
+                decimal? referenciaNumerica = null;
+                string refNumericaTexto = Convert.ToString(valoresFormato[30]);
+                if (!string.IsNullOrWhiteSpace(refNumericaTexto))
+                referenciaNumerica = ConversionHelper.ConvertirDecimalDirecto(refNumericaTexto, "OP_REF_NUMERICA");
+
+                bool resultado = await _fxdDao.InsertarFormatoFxdEnTomi(
+                    nfFolioUnico: folioUnico,
+                    nfTipo: Convert.ToString(valoresFormato[19]),
+                nfFolio: ConversionHelper.ConvertirLongDirecto(valoresFormato[20], "NF_FOLIO"),
+                    t24CustomerCode: Convert.ToString(valoresFormato[21]),
+                    t24DebitAcctNo: Convert.ToString(valoresFormato[22]),
+                    nfEstatus: "PEND",
+                    nfUsuarioCaptura: Convert.ToString(valoresFormato[24]),
+                    nfUsuarioAutoriza: Convert.ToString(valoresFormato[26]),
+                nfFechaCaptura: ConversionHelper.ConvertirDateTimeDirecto(valoresFormato[23], "NF_FECHA_CAPTURA"),
+                nfFechaAutoriza: ConversionHelper.ConvertirNullableDateTimeDirecto(valoresFormato[25], "NF_FECHA_AUTORIZA"),
+                t24DebitAmount: ConversionHelper.ConvertirDecimalDirecto(valoresFormato[27], "T24_DEBIT_AMOUNT"),
+                    t24ShortName: Convert.ToString(valoresFormato[1]),
+                    nfForexRelacionado: Convert.ToString(valoresFormato[3]),
+                    t24DebitCurrency: Convert.ToString(valoresFormato[4]),
+                    nfBancoBenef: Convert.ToString(valoresFormato[6]),
+                    t24BenAcctNo: Convert.ToString(valoresFormato[7]),
+                    nfTipoCuenta: Convert.ToString(valoresFormato[8]),
+                    t24BenCustName: Convert.ToString(valoresFormato[10]),
+                    nfRfcBeneficiario: Convert.ToString(valoresFormato[11]),
+                    nfTasaRetencion: Convert.ToString(valoresFormato[12]),
+                    nfFechaEjecucion: ConversionHelper.ConvertirIntDirecto(valoresFormato[13], "NF_FECHA_EJECUCION"),
+                    t24DebitTheirRef: Convert.ToString(valoresFormato[15]),
+                    nfMontoEnviar: ConversionHelper.ConvertirDecimalDirecto(valoresFormato[18], "NF_MONTO_ENVIAR"),
+                    idPlantilla: Convert.ToString(valoresFormato[28]),
+                idFormatoPlantilla: ConversionHelper.ConvertirNullableLongDirecto(valoresFormato[29], "ID_FORMATO_PLANTILLA"),
+                    opRefNumerica: referenciaNumerica);
+
+                Config.EscribirLog($"INFO|FXD.CMS_A_TOMI|Salida={(resultado ? 0 : 1)}.");
+                return resultado;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|FXD.CMS_A_TOMI|Se presenta exception: {ex.Message}. Trace: {ex}");
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Inserta registro de Entradas/Salidas en TOMI.
+        /// </summary>
+        private async Task<bool> TOMI_ENTRADA_SALIDA(string folio)
+        {
+            object[] valoresEntSal = new object[24];
+
+            try
+            {
+                TombinFxdEntradaSalidaDto datosTomi = await _fxdDao.ObtenerTombinFxdPorFolio(folio);
+                if (datosTomi is null)
+                    throw new Exception($"No se encontraron datos de operación FXD para folio={folio}.");
+
+                if (datosTomi != null)
+                {
+                    valoresEntSal[1] = datosTomi.NfFolioUnico;
+            valoresEntSal[2] = ConversionHelper.ConvertirIntDirecto(datosTomi.T24CustomerCode, "T24_CUSTOMER_CODE");
+            valoresEntSal[3] = ConversionHelper.ConvertirDoubleDirecto(datosTomi.T24CustomerCode, "T24_CUSTOMER_CODE");
+                    valoresEntSal[4] = datosTomi.T24CompanyName;
+                    valoresEntSal[5] = 218d;
+                    valoresEntSal[6] = "Salida  (TTS)";
+                    valoresEntSal[7] = "D";
+                    valoresEntSal[8] = "Doméstica";
+
+                    if (string.IsNullOrWhiteSpace(datosTomi.NfForexRelacionado))
+                    {
+                valoresEntSal[9] = ConversionHelper.ConvertirDoubleDirecto(datosTomi.T24DebitAcctNo, "T24_DEBIT_ACCT_NO");
+                        valoresEntSal[10] = datosTomi.NfNombreCuenta;
+                        valoresEntSal[11] = _vwT24.ValidaMoneda(datosTomi.NfMonedaCuenta);
+                    }
+                    else
+                    {
+                        List<OperacionesEntidad> T24_FAD_Account = await _vwT24.ObtieneDatosCuentasFad();
+                valoresEntSal[9] = ConversionHelper.ConvertirDoubleDirecto(T24_FAD_Account.Where(x => x.Moneda == _vwT24.MonedaDefaultMN).FirstOrDefault().Cuenta, "T24_FAD_ACCOUNT");
+                        valoresEntSal[10] = "BTMM MXN FAD";
+                        valoresEntSal[11] = _vwT24.MonedaDefaultMN;
+                    }
+
+                    valoresEntSal[12] = 800d;
+                    valoresEntSal[13] = "TRF ENVIADA MXN SPEUA";
+                    valoresEntSal[14] = Convert.ToDouble(datosTomi.T24DebitAmount ?? 0m);
+                    valoresEntSal[15] = 0d;
+                    valoresEntSal[16] = datosTomi.T24DebitTheirRef;
+            valoresEntSal[17] = ConversionHelper.ParseFechaYyyyMMdd(_configuracion.StrFechaSistema);
+            valoresEntSal[18] = ConversionHelper.ParseFechaYyyyMMdd(datosTomi.NfFechaEjecucion?.ToString());
+                    valoresEntSal[19] = DateTime.Now.ToLongTimeString();
+                    valoresEntSal[20] = "JEAI";
+                    valoresEntSal[21] = 0d;
+                    valoresEntSal[22] = "A";
+                    valoresEntSal[23] = 0d;
+                }
+
+                bool resultado = await _fxdDao.InsertarEntradaSalidaSrv(
+                    referencia: Convert.ToString(valoresEntSal[1]),
