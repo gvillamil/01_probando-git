@@ -1,175 +1,1888 @@
-GPH ArchivosSalida Recommendations
-GPH_ArchivosSalida – Architecture & Code Quality Recommendations
-Solution: GPH/GPH_ArchivoSalida/GPH_ArchivosSalida.slnx Compared against: docs/BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md and docs/BaseLine_Docs/code_review.md. See also: docs/recommendation/_ORCHESTRATION.md (methodology, template, standing findings).
-> Audit basis: fresh Phase 3 read of the current source at commit > 3862df0b6337cac842bb0fbf0e2fb928aecc7766 (branch working tree clean), review date 2026-10-22. > Existing-code audit only: no linked work item, no business-rule/legacy-fidelity verdict, no PR > verdict. Findings are static-analysis evidence; the stored procedures, MUFG_T24.dll binary, > production parameter values and the SFTP counterparty contract were not available and are > called out wherever a conclusion depends on them. No source was changed.
-1. Solution Overview (low/no-dependency -> high dependency)
-Tier	Project	Kind	Path
-0	AplicacionGPH_ArchivosSalida	Class library (.NET Framework 4.8, x86) – orchestration, XML/PGP/SFTP logic, contracts	AplicacionGPH_ArchivosSalida/
-1	InfraestructuraGPH_ArchivosSalida	Class library (4.8, x86) – RepositorioTomi (stored-procedure access to the TOMI database)	InfraestructuraGPH_ArchivosSalida/
-2	GPH_ArchivosSalida	Windows Service host (4.8, Exe) – SimpleInjector composition root, timer tick	GPH_ArchivosSalida/
-3	PruebasUnitarias	MSTest 4.0.2 + Moq test project (net48)	PruebasUnitarias/
+using AplicacionGPH_ArchivosSalida.Comunes;
+using AplicacionGPH_ArchivosSalida.DTOs;
+using AplicacionGPH_ArchivosSalida.Enums;
+using AplicacionGPH_ArchivosSalida.Interfaces;
+using AplicacionGPH_ArchivosSalida.Modelos;
+using MUFG_T24.Aplicacion.Conversiones;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Core.Configuracion;
+using MUFG_T24.Infraestructura.Logging;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using PgpCore;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Xml;
+using System.Xml.Linq;
+using System.Xml.XPath;
+using WinSCP;
+using IOperacionServicio = AplicacionGPH_ArchivosSalida.Interfaces.IOperacionServicio;
 
-What this solution actually does: GPH_ArchivosSalida is the *outbound* half of the GPH payment-file integration. On every timer tick (interval from the service configuration, default 10 s) it loads the business date and the GPH parameters from the database, skips the tick if today is not a business day or the time is outside HORA_GPH_INICIO..HORA_GPH_FIN, and otherwise runs four sequential stages against TOMI: (1) Level 1 – for inbound GPH files that were *rejected*, writes a plain-text <id>_<customer>_ERROR_<folio>.txt notice; (2) Level 3 – for files whose payments have been processed, builds an ISO 20022 pain.002.001.03 (CstmrPmtStsRpt) XML status report: a group header, the original group info/status (ACCP/RJCT/PART computed from the accepted vs. rejected counts and a set of "general error" codes) and one OrgnlPmtInfAndSts block per payment (the per-payment XML is re-read from one of five work tables – FXD/FXT/TEF/SPID/FXI – and its debtor/creditor/remittance blocks are copied into the report); (3) Encryption – PGP-encrypts each generated file with the counterparty's public key (PgpCore) and moves the clear-text file to a *processed* folder; (4) SFTP – uploads the encrypted files to the GPH host with WinSCP (key-based auth, pinned host fingerprint), moves them to *processed* and marks them sent in the database. Any stage failure is raised as one exception, written to the alerts table and passed to a 10-minute/5-minute e-mail throttle. In plain terms this service produces and transmits regulatory/customer payment-status reports to an external bank counterparty, so silent corruption, loss or duplication in these four stages is a customer-visible and compliance risk – which is why most Blocker/Major findings below sit in stages 2–4.
-Source size: 36 tracked files / 3,411 physical lines (26 .cs files / 2,548 lines, of which OperacionServicio.cs alone is 1,306 lines = 51 %).
-2. Scope & Methodology Note
-• Full read, no sampling. Every tracked file was read: all 26 C# files (host 4, application 18,
-infrastructure 2, tests 2, including the three AssemblyInfo.cs), the four .csproj, the .slnx, App.config, packages.config, README.md (unmodified GitLab template) and the .gitignore/.gitattributes repository-hygiene files (scanned for bin/obj/packages rules, not audited line-by-line as they carry no behaviour). OperacionServicio.cs was read in seven contiguous ranges (1–260, 203–480, 375–640, 505–790, 664–930, 836–1093, 1008–1420 of the rendered view) so no line was skipped. Pending: none.
-• Context read (not audited): MUFG_T24 source under General/MUFGT24_BTMUM_64 was consulted
-only to resolve contracts (WindowsServiceHostBase, Parametrizacion, XmlHelper, Configuracion); its own findings belong to the MUFG_Library review.
-• Unavailable evidence: the six stored procedures (usp_*GPH_AS_*), the deployed
-MUFG_T24.dll/PgpCore.dll/WinSCPnet.dll binaries, ServicioConfiguracion values and the GPH SFTP/pain.002 acceptance rules. Findings that depend on them are marked [verify].
-• No build, restore, test run, service start or database/SFTP call was performed (the
-configured D:\ServiceCMS\*.dll references are absent on the audit machine).
-• Quantified cross-checks (supplement to the full read):
-Scan	Count
-ParametrosSistema[...] unguarded dictionary lookups	16
-WriteRaw(...) copied block-copy sites (SelectSingleNode/RemoveEmptyNodes/WriteRaw)	10 (RemoveEmptyNodes( calls: 12)
-CodigoErrorGeneral[ABC] repeated Contains predicates	15
-ProcesarNodo( occurrences (1 definition + 19 calls; returns null on a missing node)	20
-String concatenation for file paths (gsRuta… +) vs Path.Combine	14 vs 0
-catch (Exception	11
-DateTime.Now	9
-LogInfo/LogError call sites (several carry another method's label – GPHAS-FR-20)	94
-.Result / .Wait() / throw ex; / MD5/SHA1/DES / Random	0 / 0 / 0 / 0 / 0
-Constants in ConstantesServicio never referenced elsewhere	8 of 69
-ct (CancellationToken) references in OperacionServicio.cs	6 (all in the first 150 lines)
-Result of CreateDetailFileStatus(...) consumed	0 of 1 call
 
-• Behavior verified by probe: string.Format("{0:yyyy-MM-dd}T", "20261022") returns
-20261022T (a format specifier on a string is ignored), and XPathNavigator.SelectSingleNode returns null for a missing node – both underpin findings GPHAS-FR-1 and GPHAS-FR-4.
-3. What's Already Good
-• Layering and dependency direction match the portfolio convention: Aplicacion has no project
-references, Infraestructura → Aplicacion, host → both, tests → Aplicacion/host (GPH_ArchivosSalida.slnx, the four .csproj).
-• Composition root with verification and per-tick scope – ServiceHost.Inicializacion builds a
-SimpleInjector container, calls _containerDI.Verify() (ServiceHost.cs:81) and resolves the work inside AsyncScopedLifestyle.BeginScope on each tick (:108-112).
-• Constructor injection + interfaces for the orchestrator's collaborators
-(OperacionServicio.cs:49-62, IRepositorioTomi, IRealizaControlError, IControlServicio, IAlertas, IParametrizacion) – the seams needed for tests already exist.
-• Parameterized stored-procedure data access only – every RepositorioTomi call passes values via
-CrearParametro; SP names are constants (ConstantesServicio.cs:29-41). No SQL string building, no dynamic SQL → no SQL-injection surface in this repository.
-• SFTP hardening basics are present – pinned host key (SshHostKeyFingerprint, :726),
-private-key authentication, and a ParametrosSensibles list (ConstantesServicio.cs:16) that keeps host/user/key-path parameters out of the log. No plaintext secret is logged; PASSWORD_SFTP_GPH is declared but never read.
-• Safe XML helper already used for the per-payment XML – XmlHelper.TryParseXmlSeguro
-(OperacionServicio.cs:922) prohibits DTDs and nulls the resolver (the pattern FR-11 asks to extend).
-• Tick finalization is in a `finally` (:92-95), so GEN-7 (state finalized only on success) does
-not apply; overlapping ticks are prevented by the shared host's SemaphoreSlim tick lock (WindowsServiceHostBase.cs:21).
-• Startup validation and ordered shutdown – ValidarServicioConfiguracionLocal
-(ServiceHost.cs:58, :151-166), bounded wait/cleanup tokens in TerminacionAsync, container disposal in LiberarRecursosTerminacion.
-• Clean on the portfolio's usual anti-patterns – zero .Result/.Wait(), zero throw ex;, zero
-weak-crypto APIs, zero Random; payload encryption uses PGP public-key encryption.
-• Defensive idioms on DTO reads – ?./?? string.Empty on most DTO members, `StringComparison.
-OrdinalIgnoreCase for status comparisons (:381, :394-395, :853-854), explicit XmlWriter` (not string concatenation) to build the pain.002 document.
-4. Findings by Project (low/no-dependency -> high dependency)
-Severity uses the code_review.md scale (Blocker / Major / Minor). Finding IDs are GPHAS-FR-<n> (GPH ArchivosSalida – Finding/Recommendation) and are referenced by the JIRA table in section 6. Line numbers refer to the files at the audited commit.
-4.1 AplicacionGPH_ArchivosSalida (Tier 0)
-MustChange / Rewrite
-• GPHAS-FR-1 – `CreDtTm` is emitted in an invalid format because a `string` is formatted as a date
-— AplicacionGPH_ArchivosSalida/OperacionServicio.cs:424-429 — *Blocker* (verify with counterparty). Configuracion.FechaSistema is a string already formatted yyyyMMdd (Parametrizacion.ObtenerFechaSistemaAsync, MUFG_T24/.../Parametrizacion.cs:131-146). A format specifier on a string interpolation is ignored, so the date part of CreDtTm is 20261022, not 2026-10-22 (probe: string.Format("{0:yyyy-MM-dd}T", "20261022") → 20261022T). MsgId only works by coincidence because the string is already yyyyMMdd. ``csharp writer.WriteElementString("MsgId", $"{_configuracion.FechaSistema:yyyyMMdd}" + Archivo.FOLIO_FILE); writer.WriteElementString("CreDtTm", $"{_configuracion.FechaSistema:yyyy-MM-dd}" + "T" + DateTime.Now.Hour.ToString("D2") + ":" + DateTime.Now.Minute.ToString("D2") + ":" + DateTime.Now.Second.ToString("D2")); ` Result: <CreDtTm>20261022T14:05:03</CreDtTm>, which is not an xs:dateTime (pain.002.001.03 ISODateTime). A strict schema validator at the bank would reject the whole report. It is also assembled from three separate DateTime.Now reads (a tick crossing a second/minute boundary can yield an inconsistent time (e.g. at 14:59:59 → 15:00:00 the hour is read as 14 and the minute as 00). Recommended: `csharp var fechaNegocio = DateTime.ParseExact(_configuracion.FechaSistema, "yyyyMMdd", CultureInfo.InvariantCulture); var ahora = _reloj.Now;                                   // injected IClock, read once writer.WriteElementString("MsgId", _configuracion.FechaSistema + Archivo.FOLIO_FILE); writer.WriteElementString("CreDtTm", fechaNegocio.Add(ahora.TimeOfDay) .ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture)); ` Benefit: schema-valid, culture-independent, testable timestamp. **[verify]** whether production files are currently accepted with the compact form (it would indicate the counterparty is lenient, not that the value is correct). Suggested JIRA: GPHAS-FR-1` (Blocker).
-• **GPHAS-FR-2 – A payment whose detail cannot be generated is silently dropped from the status report,
-which is still finished, marked processed, encrypted and sent** — OperacionServicio.cs:517 (ignored result), :907-911, :922-926 — *Blocker*. CreateDetailFileStatus returns false when the stored per-payment XML is invalid (:922-926) and true after logging only when no detail row exists (:907-911); the caller discards the return value, so the report is closed (WriteEndDocument, :519) and treated as a success. The payment is simply absent from a report whose group header still declares the original NbOfTxs/CtrlSum (copied from GROUP_HEADER) and whose group status is computed from the database counts – an incomplete but well-formed pain.002 that nothing downstream can detect. ``csharp await CreateDetailFileStatus(writer, DetArchGPHXml, giCountErrorGral);   // :517 result discarded ... if (!XmlHelper.TryParseXmlSeguro(lrsDatos?.NF_ARCHIVO_XML, out doc, out error)) { LogError("ERROR|XML|XML inválido: " + error); return false;                                                        // :925 } ` Recommended: treat both cases as failures that abort the file – build and validate everything first, write to a temporary file, and only publish it when all payments were written: `csharp if (!await CreateDetailFileStatus(writer, det, giCountErrorGral)) throw new InvalidOperationException( $"No se pudo generar el detalle del pago Folio={det.Folio} Operacion={det.Folio_operacion}."); ` and return false/throw (not true) from the "no information found" branch unless an accepted/rejected count proves the payment is legitimately absent. Benefit: no truncated financial reports reach the counterparty. Suggested JIRA: GPHAS-FR-2` (Blocker).
-• **GPHAS-FR-3 – A failed Level-3 generation marks the file as successfully processed and leaves a
-partial XML behind** — OperacionServicio.cs:545-553, :558-563, :436-440 — *Blocker*. The per-file catch logs and then calls the *same* update used on success (L3.Tipo = 1, ArchivoNew = Archivo.Nombre). Any exception (see FR-1, FR-2, FR-4) therefore moves the master record to "processed", so the report is never regenerated,   no alert is raised, and okModif is then set to true by that successful update. The half-written <name>.xml stays in the transmit folder. ``csharp catch (Exception ex) { LogError("ERROR|GeneraArchivosLevel3|Error en la generacion de los archivos de salida. - " + ex.ToString()); L3.Tipo = 1; L3.ArchivoNew = Archivo.Nombre;      // success contract, original (non-generated) name ... okModif = await _repositorioTomi.MarcarOperacionProcesadaLevel3Async(L3); } ` Related defects in the same method: (a) the compensating DB call sits inside the catch with no guard, so a DB failure there escapes the foreach and aborts all remaining files; (b) one mutable L3 object is shared by every iteration, so values leak between files; (c) GROUP_HEADER is validated (:436-440) only **after** XmlWriter.Create and the first header elements were written; (d) the outer catch (:558-563) sets L3.Tipo = 2 and calls the update with whichever Folio was last assigned (0 if the initial query failed) and logs the wrong label GeneraArchivosLevel1. **[verify]** the semantics of @Tipo 1/2 in usp_ActualizarOperacionesGPH_AS_Level3. Recommended: validate inputs before opening the writer, write to <name>.xml.tmp, publish with File.Move on success, delete the temp file in finally, mark the record with an explicit *error* state (new Tipo/enum value and error text, as Encryption already does with ErroDesc), isolate that DB call in its own try, create one ActualizaL3Archivo per file and add the failure to a fallos list (see FR-7). Benefit: a failed report is retried or escalated instead of vanishing. Suggested JIRA: GPHAS-FR-3` (Blocker).
-• GPHAS-FR-4 – `ProcesarNodo` returns `null` for a missing node and callers dereference `.Length`
-— OperacionServicio.cs:472, :1006 (helper :824-829) — *Major*. ``csharp var valor = nav.SelectSingleNode(nodoObtener)?.Value;      // null when the node is absent ... xmlValor = ProcesarNodo(nav, writer, "//GroupHeader/InitgPty/Nm", ""); if (xmlValor.Length > 0)                                    // NullReferenceException ` Same pattern for //PaymentInstruction/CdtTrfTxInf[1]/Amt/InstdAmt (:1005-1006). InitgPty/Nm and InstdAmt are optional in pain.001, so a legitimate file without them throws and (through FR-3) is marked processed with no report. Because SelectSingleNode is on an XPathNavigator the result is an in-memory object, not an EF projection – this is a real null dereference (verified: missing node → null). Recommended – fix once at the source, which repairs all 19 call sites: `csharp var valor = nav.SelectSingleNode(nodoObtener)?.Value ?? string.Empty; ` and use string.IsNullOrEmpty(xmlValor) at the two checks. Benefit: no NRE on optional elements. Suggested JIRA: GPHAS-FR-4` (Major).
-• **GPHAS-FR-5 – SFTP stage uploads the whole folder, not the database batch, and a single failed file
-prevents any success from being recorded** — OperacionServicio.cs:748-760, :762-796 — *Blocker*. ``csharp transferResult = session.PutFiles(gsRutaFilesEncriptados + "*.*", gsRutaFilesRemoteUpload, false, transferOptions); ... transferResult.Check();                         // throws on the first failed transfer foreach (WinSCP.TransferEventArgs transfer in transferResult.Transfers) { ... Move ... Marcar... } ` (a) The upload set is the folder wildcard (WinSCP treats *.* as "all files"), not the operaciones list from usp_ObtenerOperacionesGPH_AS_Envia: anything else in RUTA_ARCHIVOS_GPH_ENCRIPTADOS (leftovers, partial output from FR-8, a file from another business date) is sent. (b) remove is false and only files that *match* a database row are moved (:773-788); whenever at least one database row is pending (the stage returns early when none, :699-703), every unmatched file is **re-uploaded on every tick** for as long as it stays in the folder (FR-6 makes this the normal case for Level-1 notices). (c) Check() throws if any transfer failed, so files that **were** uploaded in the same call are neither moved nor marked sent; the next tick uploads them again → duplicate status reports at the bank. (d) If Check() is ever relaxed, transfer.Error != null is only logged (:764-771) yet the row is still marked sent (:792). (e) No upload to a temporary name/rename, so the remote side can pick up a half-uploaded file. Recommended: `csharp foreach (var op in operaciones) { var local = Path.Combine(rutaEncriptados, NombreEncriptado(op.Nombre_archivo_salida)); var r = session.PutFiles(local, rutaRemota, remove: false, transferOptions); if (r.IsSuccess) { ArchivarArchivo(local, rutaProcesados); if (!await _repositorioTomi.MarcarOperacionProcesadaEnviarAsync(op.Folio)) fallos.Add(op.Folio); } else fallos.Add(op.Folio); } ` Benefit: exactly-once-per-file semantics, no duplicate or stray files, partial failures are recorded per file. Suggested JIRA: GPHAS-FR-5` (Blocker).
-• GPHAS-FR-6 – Encrypted-name matching differs between the encryption and SFTP stages
-— OperacionServicio.cs:614 vs :773-776 — *Major*. Encryption strips both extensions (Replace(".xml","").Replace(".txt",""), :614) but the SFTP matcher strips only .xml and compares case-sensitively against the local path with the folder prefix removed by Replace (:774-775). A .txt (Level-1) row therefore never matches its uploaded file: it is not moved, not marked sent, and (FR-5b) re-uploaded forever. string.Replace also rewrites any .xml/.txt occurring *inside* a name, and a null Nombre_archivo_salida throws inside the Find lambda (:774) and in :614. [verify] whether usp_ObtenerOperacionesGPH_AS_Level1 persists the name with .txt (the code writes the file with .txt at :284 but passes archivoNew without it to ActualizaL1). ``csharp OperacionEnviaDTO selectedValue = operaciones.Find(p => p.Nombre_archivo_salida.Replace(".xml", "") == transfer.FileName.Replace(gsRutaFilesEncriptados, "")); ` Recommended: one tested helper used by both stages – static string NombreEncriptado(string nombre) => Path.GetFileNameWithoutExtension(nombre) – and compare with StringComparison.OrdinalIgnoreCase on Path.GetFileName(transfer.FileName). Suggested JIRA: GPHAS-FR-6` (Major).
-• **GPHAS-FR-7 – Stage results are "last write wins" and per-item failures are swallowed, so a failed
-cycle reports success** — OperacionServicio.cs:240, :297/:303/:306-309, :543/:552, :627-653, :792 — *Major*. okModif, okEncry and okEnvia are overwritten by each item's DB result; Level 1 catches every per-item exception and still returns okModif (initially true); Encryption stores the error text and marks the row but the stage value is the *last* row's marker call. A failure on item 1 followed by success on item 2 returns true, so ProcesarOperacionesAsync raises no exception, no alert and no e-mail. ``csharp catch (Exception ex) { LogError("ERROR|GeneraArchivosLevel1|Se presenta exception: " + ex.ToString()); } ... return okModif;                                   // true although some elements threw ` Recommended: accumulate var fallos = new List<string>(), add per-item failures (including a false DB result), return fallos.Count == 0 and include the first failures in the aggregated exception that ProcesarOperacionesAsync already raises. Benefit: stage status reflects reality, existing alert/e-mail plumbing works. Suggested JIRA: GPHAS-FR-7` (Major).
-• **GPHAS-FR-8 – PGP output and archive moves are not atomic; failed encryption can leave an uploadable
-partial file** — OperacionServicio.cs:1254-1270, :1276-1301, :614-620 — *Major*. File.Create(outputFile) writes straight to the final name; if EncryptStream throws, a zero-byte or partial file remains in RUTA_ARCHIVOS_GPH_ENCRIPTADOS, where the FR-5 wildcard will upload it. MoveFile deletes the destination before MoveTo (:1295-1300): replays silently overwrite the archived copy and a failing MoveTo has already destroyed the previous one. The clear-text report is moved to the processed folder and retained unencrypted indefinitely [verify] retention policy. A failure *after* a successful encryption (e.g. MoveTo) is recorded as an encryption error (Tipo = 1) although the encrypted file exists. EncryptFile is declared async with no await (CS1998) and returns a bool that is always true. ``csharp using (var output = File.Create(outputFile)) { ... pgp.EncryptStream(input, output); } ... if (File.Exists(destPath)) { File.Delete(destPath); } fInfo.MoveTo(destPath); ` Recommended: encrypt to outputFile + ".tmp", File.Move on success, delete the temp file in catch; archive with a timestamped name instead of delete-then-move; make EncryptFile synchronous (void) or truly async; encrypt-then-move as two separately recorded steps. Suggested JIRA: GPHAS-FR-8` (Major).
-• GPHAS-FR-9 – Level-1 "file already generated" guard checks the wrong path, so it never works
-— OperacionServicio.cs:281-304 — *Major*. ``csharp if (!File.Exists(archivoNew))                                   // relative, extensionless name { gsRutaFilesTransmite = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_TRANSMITE]; using (StreamWriter file = new StreamWriter(gsRutaFilesTransmite + archivoNew + ".txt")) ` File.Exists("<id>_<cust>_ERROR_<folio>") resolves against the service's working directory and never matches the real target (<transmit path><name>.txt), so the guard is always true, the Tipo = 2 "already generated" branch (:299-304) is unreachable, and an existing notice is overwritten. Recommended: build var ruta = Path.Combine(rutaTransmite, archivoNew + ".txt") once, test that path, and keep the Tipo = 2 branch **[verify]** the SP contract for Tipo = 2. Suggested JIRA: GPHAS-FR-9` (Major).
-• **GPHAS-FR-10 – Failure e-mail notification can never be sent (state is rebuilt every tick and the
-sender address is never populated)** — OperacionServicio.cs:41, GPH_ArchivosSalida/ServiceHost.cs:63-68,78,110, Servicios/RealizaControlError.cs:20-27,76-88,113-117 — *Major*. (a) loControlError is an instance field of OperacionServicio, which SimpleInjector registers with the default transient lifestyle (ServiceHost.cs:78) and resolves anew on each tick (:110). Every tick therefore starts with an all-default struct array, takes the "Es inicio de control de error" branch (RealizaControlError.cs:61-68) and never reaches the 10-minute (MinutoPrimero) / 5-minute (MinutoRepetir) logic, so lbEnviaCorreo is never true. (b) Even with state fixed, RealizaControlError.cs:76 requires Configuracion.CorreoDeDefault, but the host only sets CorreoParaDefault, SujetoDefault and CorreoSenderTest (ServiceHost.cs:66-68); in the shared library CorreoDeDefault is only read into ServicioConfiguracionSettings (ObtencionConfguracionGeneral.cs:126) and is never copied to Configuracion, so the branch logs "No se identifican datos para enviar correo". (c) There is no recovery path: a successful cycle never clears LbConErrorPrevio, so once state does persist, an unrelated later error is treated as a continuation. (d) if (!IsNullOrEmpty(Para) || !IsNullOrEmpty(De)) (:88) should be &&, and the catch assigns mensaje = instead of += (:115), dropping earlier trace lines. ``csharp private ControlErrorEstructura[] loControlError = new ControlErrorEstructura[2];      // per-instance _containerDI.Register<AplicacionGPH_ArchivosSalida.OperacionServicio>();                // transient ` Alerts are still inserted into the alerts table on each tick (RegistrarAlertaAsync), so the failure is not invisible – but the e-mail the design promises never leaves. Recommended: move the throttle state to a singleton (IControlErrorEstado keyed by stage) with an injected IClock; copy servicioMainConfiguracion.CorreoDeDefault into _configuracionBase; reset state when a cycle succeeds; use &&/+=; add tests (first error, same error <10 min, first mail at 10 min, repeat at 5 min, new message restarts, success clears). Suggested JIRA: GPHAS-FR-10` (Major).
-Rewrite Recommended
-• **GPHAS-FR-11 – GROUP_HEADER is parsed with XPathDocument(StringReader) instead of the shared
-hardened helper** — OperacionServicio.cs:442 (helper already used at :922) — *Major (security hardening)*. The per-payment XML goes through XmlHelper.TryParseXmlSeguro (DTD prohibited, resolver null) but the group header does not: ``csharp var nav = new XPathDocument(new StringReader(groupHeader)).CreateNavigator(); ` On .NET Framework 4.8 this reader still processes DTDs (entity expansion / "billion laughs"), although the null resolver prevents external fetches. The text is customer-originated pain.001 data persisted by the ETL stage **[verify]** whether the ETL already rejects DTDs. Recommended (OWASP, code_review.md §9/§17): reuse the helper and fail the file with a clear message. `csharp if (!XmlHelper.TryParseXmlSeguro(groupHeader, out var docHdr, out var err)) throw new InvalidOperationException("GROUP_HEADER inválido: " + err); var nav = docHdr.CreateNavigator(); ` Benefit: one XML-security policy for every inbound XML. Suggested JIRA: GPHAS-FR-11` (Major).
-• GPHAS-FR-12 – File paths are built by string concatenation from externally derived names
-— 14 sites, e.g. OperacionServicio.cs:284, :416, :524, :533, :612-623, :743-750 — *Major (path handling)*. ``csharp string[] Nombres = nombreArchivo.Split('_'); archivoNew = Nombres[0] + "_" + Nombres[1] + "_ERROR_" + lsFolioFile; using (StreamWriter file = new StreamWriter(gsRutaFilesTransmite + archivoNew + ".txt")) ` Path.Combine is used **0** times in production code. (a) The output name is assembled from the received file name stored in TOMI; a value containing ..\, : or invalid characters can write outside the transmit folder or throw **[verify]** upstream sanitization. (b) The code only works when every folder parameter in the database parameter table ends with \ (a missing separator silently produces …\ENVIADOSname.xml). Recommended: a small RutaArchivo helper – Path.Combine(carpeta, Path.GetFileName(nombreSaneado)), whitelist [A-Za-z0-9_.-], verify the resolved path starts with the configured folder. Benefit: removes traversal and separator bugs in one place. Suggested JIRA: GPHAS-FR-12` (Major).
-• **GPHAS-FR-13 – Copy-pasted XML block/predicate code that should be extracted (and hides two logic
-defects)** — OperacionServicio.cs:1077-1195 (10 blocks), 15 CodigoErrorGeneral[ABC] predicates (:385-387, :449-451, :483-485, :959-973), 12 RemoveEmptyNodes( calls — *Major (duplication)*. Ten blocks differ only in the XPath: ``csharp nodo = nav.SelectSingleNode("//PaymentInstruction/Dbtr"); if (nodo != null) { XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/Dbtr"); RemoveEmptyNodes(nodo2); FileXMLStatus.WriteRaw(nodo2.OuterXml); } ` Extraction points: EscribirBloque(XmlDocument doc, XmlWriter w, string xpath) (replaces the 10 blocks and the double lookup) and EsErrorGeneral(string texto, bool legado) (replaces the 15 predicates). Two defects become visible once extracted: (1) lsErrorCodeGral is declared **outside** the foreach (lrsDatos …) loop (:849, appended at :965-975), so a payment with several detail rows emits 1Z35201|1Z35201; (2) the "multiple general errors" counter giCountErrorGral (:508-517) increments only when ErrorGral contains a *legacy* code (1Z351/1T70/1T57), while ErrorGral can only be set when it contains a *new* code (1Z35201/1T10070/1T10057) and the legacy strings are not substrings of the new ones – so 1T10000 (multiple) is emitted only when both forms appear in the same text **[verify]** the intended business rule with the owner and pin it with tests. Benefit: ~120 fewer lines, one place to fix null/namespace handling. Suggested JIRA: GPHAS-FR-13` (Major).
-• GPHAS-FR-14 – God class and missing seams (baseline §4.1–4.3, §4.6) —
-OperacionServicio.cs (1,306 lines), ServiceHost.cs:75,78,110 — *Major (design/testability)*. One class owns scheduling checks, four stage workflows, pain.002 XML building, empty-node cleanup, PGP encryption, WinSCP, file moves and alerting, and calls File, Directory, StreamWriter, XmlWriter.Create, new PGP(...), new Session() and the static Config.EscribirLog directly, so none of it can be unit-tested without the real file system, SFTP host and database. IOperacionServicio exists but is never resolved (the host resolves the concrete type, :110); EstadoHorarioOperacion is registered as a singleton (ServiceHost.cs:75) but never consumed; EncryptFile/ProcesarNodo are public yet absent from any interface. Recommended extraction (in this order, each step independently shippable): IPain002Builder (XML), IPgpEncryptor, ISftpUploader, IArchivoStore (paths/move/temp files), IClock, ILogger wrapper; keep OperacionServicio as a thin stage coordinator behind IOperacionServicio; delete the unused registration. Benefit: the Blocker/Major defects above become unit-testable. Suggested JIRA: GPHAS-FR-14 (Major).
-• **GPHAS-FR-15 – Unguarded parameter lookups and magic Tipo numbers; inconsistent repository
-contract** — OperacionServicio.cs:180-181, :283, :415, :597-604, :705-716 (16 lookups); ActualizaL1/L3/Encrypta.Tipo; RepositorioTomi.cs:55-104,127-147 — *Major*. _configuracion.ParametrosSistema[...] is a Dictionary<string,string> indexed 16 times; a missing parameter throws KeyNotFoundException ("the given key was not present") without naming the parameter, inside a broad catch (FR-7). The set of parameters also includes keys this service never reads (RUTA_ARCHIVOS_GPH_DESCARGA, RUTA_ARCHIVOS_GPH_XML, ConstantesServicio.cs:5-8). Tipo is 0/1/2 for Level 1 and Encryption and 1/2 for Level 3 with no named meaning; Level 3 header and detail both call usp_ObtenerOperacionesGPH_AS_Level3 differing only by @Tipo, and the date is an argument for L1/Encrypta/Envia but read from _configuracion for L3. Recommended: a GphSettings object built and validated once per tick (Requerido("…") that includes the key in the exception; typed TimeSpan/int), enums EstadoL1, EstadoL3, EstadoEncriptacion, and explicit repository methods (RecuperarCabecerasL3(fecha), RecuperarDetallesL3(folio, fecha)). Suggested JIRA: GPHAS-FR-15 (Major).
-• **GPHAS-FR-16 – Weekend/holiday and out-of-window ticks log an ERROR and insert an alert row every
-tick (standing GEN-10)** — OperacionServicio.cs:165-171, :177-190, :146-156 — *Major*. ``csharp LogError($"ERROR|{ConstantesServicio.MensajeDiaInhabil}"); await RegistrarAlertaAsync(ConstantesServicio.ClaveAvisoError, new Exception(ConstantesServicio.MensajeDiaInhabil)); ` With the default 10 s interval that is ~360 alert rows/hour whenever the service is outside its expected window (all weekend, every night), and InicializarContextoAsync still performs four database round-trips (ActualizaEJecucion, system date, business-day flag, parameters) on every skipped tick. Recommended: treat "not a business day"/"outside window" as a Skipped state, log INFO only on state *transitions*, alert once per transition (or de-duplicate in the shared alert helper), and read the business-day flag before the heavier parameter load. Suggested JIRA: GPHAS-FR-16` (Major).
-• GPHAS-FR-17 – Cancellation and shutdown handling — OperacionServicio.cs:72-96, :146-156 —
-*Minor*. ct reaches only six call sites in the first 150 lines; none of the loops, repository calls, PGP or SFTP honor it, so a stop request waits for the whole stage. The catch (Exception) at :86 also treats an OperationCanceledException from InicializarContextoAsync(ct) as a failure (CRITICAL alert) and the finally awaits ActualizaTerminacion(..., ct) with the already-cancelled token (:94), so that call can fail exactly during a normal stop (the host's TerminacionAsync finalizes again with cleanupCt, which limits the damage). ``csharp catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; } ... finally { await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, CancellationToken.None); } ` Also add ct.ThrowIfCancellationRequested() between files. Suggested JIRA: GPHAS-FR-17` (Minor).
-• GPHAS-FR-18 – N+1 database access and a double-count risk in Level 3 —
-OperacionServicio.cs:380-401, :508-518, :904, :383, :397 — *Major (performance/correctness)*. For every payment row of a file, CreateDetailFileStatus calls usp_ObtenerOperacionesGPH_AS_DetailFileStatus (one round-trip per payment, each returning a large XML blob that is re-parsed), and the detail list is enumerated twice (counting pass, writing pass). Separately, Archivo.Num_operaciones_aceptadas/_rechazadas += 1 mutates properties of OperacionL3DTO that are themselves loaded from the stored procedure (DTOs/OperacionL3DTO.cs); if the SP returns a non-zero value the totals are double-counted [verify]. Recommended: use local counters, one set-based call per file keyed by @Folio, and a single pass. Suggested JIRA: GPHAS-FR-18 (Major).
-• GPHAS-FR-19 – Clock and culture are implicit in date/time output (related standing GEN-12) —
-OperacionServicio.cs:287, :426-429; RealizaControlError.cs:34,44,55,65,104 — *Minor*. DateTime.Now is read 9 times across the solution (8 in production code), the Level-1 notice writes element.Fecha_inicio with the server's current culture ("Received Date Time : " + DateTime), and the report timestamp mixes the business date with the machine clock (FR-1). Inject IClock, format with CultureInfo.InvariantCulture and an explicit pattern [verify] the counterparty's expected Level-1 format. Suggested JIRA: GPHAS-FR-19 (Minor).
-Nice to Rewrite if Time Permits
-• GPHAS-FR-20 – Naming, labels, dead code and typos — *Minor*. Several log lines carry the wrong
-stage label, which misleads operators grepping the log: Level 3 logs as EncriptarArchivos (OperacionServicio.cs:351) and GeneraArchivosLevel1 (:560); the SFTP stage logs EncriptarArchivos|No se encontraron archivos pgp para encriptar (:701) and EncriptarArchivos|Se presenta exception (:808); an error is logged at INFO (:641). Eight of 69 ConstantesServicio members are unused (PASSWORD_SFTP_GPH, MensajeErrorConfiguracion, MensajeTerminacion, MensajeTerminacionExitosa, MensajeOperationCanceledException, MensajeException, MensajeTimer, MensajeParametrizaciones). Typos/identifiers: L3FileSatatus, DetFileStsatus, esatus, contrl, pricipal, Méetodo; lower-case DTO property estatus; Hungarian prefixes (gs…, ls…, lb…, lo…); Boolean/Int64 vs bool/long; xmlValor assigned and never read in many places; commented code (:1282, :1291) and personal-initial comments (rmcb, :1077-1103, RepositorioTomi.cs:8); unused using System.Collections;/System.Text (RepositorioTomi.cs:19,22); README.md is the untouched GitLab template. Suggested JIRA: GPHAS-FR-20 (Minor).
-• GPHAS-FR-21 – Second pass over the generated file and stack traces in e-mails — *Minor*.
-The report is closed, re-opened with XDocument.Load, stripped of every empty element and saved again (OperacionServicio.cs:524-533): a second full read/write that also removes *any* empty element, including one the schema might require (the XPath checks only value/children/attributes). The e-mail body is MensajeDB + LoExcepcion (RealizaControlError.cs:99), i.e. the full exception ToString() with stack trace and, for SFTP failures, host details. Recommended: skip empty values while writing (ProcesarNodo already does) and send message + correlation id by e-mail, keeping the stack trace in the log. Suggested JIRA: GPHAS-FR-21 (Minor).
-4.2 InfraestructuraGPH_ArchivosSalida (Tier 1)
-MustChange / Rewrite
-• **GPHAS-FR-22 – Every query ignores Exito, so a database failure looks like "nothing to do"
-(standing GEN-11)** — RepositorioTomi.cs:64, :101, :144, :167, :185, :221 — *Major*. RepositorioMaestro.EjecutarStoredProcedureQuery converts a SqlException into Exito = false + MensajeError with an empty result and neither logs nor throws (RepositorioMaestro.cs:385-390). All six Recuperar… methods return only .Data: ``csharp var resultado = await EjecutarStoredProcedureQuery<OperacionL1DTO>(ConstantesServicio.usp_ObtenerOperacionesGPH_AS_Level1, cmd => { ... }); return resultado.Data; ` The orchestrator then logs "No se encontraron archivos" and returns true (OperacionServicio.cs:243, :345, :587, :699), so an outage of the TOMI database (or a failing SP) silently stops the whole outbound pipeline: no alert, no e-mail, no ERROR line. The four Marcar… methods do return Exito, and the callers read it (but see FR-7). Recommended: `csharp if (!resultado.Exito) throw new InvalidOperationException($"{nombreSP} falló: {resultado.MensajeError}", resultado.Exception); return resultado.Data; ` (ideally one ObtenerDatosOFallar helper, or the strict mode proposed centrally for MUFG_T24, and pass the CancellationToken overload that already exists). Benefit: failures reach the existing alert/e-mail path instead of looking like an empty queue. Suggested JIRA: GPHAS-FR-22` (Major).
-Rewrite Recommended
-None specific to this project beyond FR-15 (inconsistent method contract) and FR-20 (unused usings, personal-initial comment).
-Nice to Rewrite if Time Permits
-See FR-20.
-4.3 GPH_ArchivosSalida – Windows Service host (Tier 2)
-MustChange / Rewrite
-None found that are specific to the host; FR-10 (unmapped CorreoDeDefault, transient orchestrator holding throttle state) is wired here and fixed here.
-Rewrite Recommended
-• **GPHAS-FR-23 – Service-state results are discarded and the PID is dereferenced without a local check
-(standing GEN-9, latent GEN-8)**   — ServiceHost.cs:99, :135-138, OperacionServicio.cs:94, :148, :209 — *Minor*. MarcarPuertoEnUsoAsync (startup :99, shutdown :135) and ActualizaTerminacion (ServiceHost.cs:138, OperacionServicio.cs:94) return bool/Task<bool> outcomes that are awaited and dropped, so a provider-reported failure leaves the service marked in use/running and the shutdown is still logged as clean. ActualizaEJecucion (:148) is also unchecked. _configuracionBase.Pid.Value (:99) and _configuracion.Pid.Value (OperacionServicio.cs:209) are safe today only because the shared host validates the process identity first (ValidarProcesoActual, :95) – GEN-8 does not apply, but the alert path would mask the original failure if that guarantee ever changed. Recommended: check the returned flag and log/throw, and use Pid.GetValueOrDefault() in the alert DTO. Suggested JIRA: GPHAS-FR-23 (Minor).
-• **GPHAS-FR-24 – Hardcoded absolute DLL references and an unpinned, partly package-based dependency set
-(standing GEN-1)** — AplicacionGPH_ArchivosSalida.csproj (MUFG_T24, PgpCore), Infraestructura…csproj (MUFG_T24), GPH_ArchivosSalida.csproj:60,63 (MUFG_T24, SimpleInjector), PruebasUnitarias.csproj:23 (MUFG_T24) — *Major*. Six <HintPath>D:\ServiceCMS\…</HintPath> references across all four projects. There is no nuget.config and no matching package, so a clean build/CI agent cannot resolve them (the audit machine could not). Since commit c8357e3 (2026-07-09) WinSCPnet and BouncyCastle.Cryptography come from packages.config/..\packages\ – the Phase 0 master document (§4.5.1.1) still lists a D:\ServiceCMS\GPH\WinSCPnet.dll path and should be refreshed. PgpCore 7.0.0.0 is a raw DLL pinned processorArchitecture=x86 next to the NuGet BouncyCastle 2.6.2: [verify] the two versions are compatible. [verify] the WinSCP package's WinSCP.exe reaches the *host's* output folder, because the package is referenced only by the class library. The .slnx maps Debug|x86 for the library projects but declares no Release mapping [verify]. Recommended: publish MUFG_T24, PgpCore and SimpleInjector to the internal NuGet feed (central GEN-1 fix) and convert these references to PackageReference. Suggested JIRA: GPHAS-FR-24 (Major, shared with GEN-1).
-Nice to Rewrite if Time Permits
-• ServiceHost.cs is otherwise compact and follows the shared host template; no further items.
-4.4 PruebasUnitarias (Tier 3)
-MustChange / Rewrite
-• **GPHAS-FR-25 – The only test cannot validate the service and (by static analysis) its one asserting
-case fails; effective coverage of the business logic is zero (standing GEN-2 variant)** — PruebasUnitarias/OperacionServicioUTs.cs:21-23, :28-45, :61, :69, :77-80, :92-98 — *Major*.
-• It loads the real configuration (LecturaConfguracionGeneral.Inicializar(), :30) for the
-wrong service (NombreServicio.GPH_ETL, :31) and builds a real RepositorioTomi (:69) – this is an environment-dependent integration test, not a unit test.
-• The four collaborators are Mock<…> with no `Setup`: IControlServicio.EsDiaHabil() returns
-false, which InicializarContextoAsync writes into _configuracion.EsDiaHabil (OperacionServicio.cs:151), overriding the diaHabil data row, and ObtenerParametrosSistemaAsync returns null. The hora and diaHabil parameters therefore never drive behavior, the dictionary parametros (:45-61) is only attached to the separate configuration object given to the repository – never to the orchestrator's _configuracionBase – and the "Entra" row asserts resultado == true (:98) although the first guard returns false – the case can only fail. The other two rows have no assertion (if (escenario is "Entra")), so they pass vacuously. (Not executed: the D:\ServiceCMS references are absent.)
-• Nothing covers pain.002 generation, FR-1/FR-4 edge cases, file-name mapping, aggregation of stage
-results, the e-mail throttle, the encryption/SFTP stages or container.Verify().
-• Hygiene: [assembly: Parallelize(MethodLevel)] (MSTestSettings.cs) combined with the static
-Logging.Init/LecturaConfguracionGeneral.Inicializar is a race as soon as a second test is added; the project references the service Exe project and D:\ServiceCMS\MUFG_T24.dll; hardcoded D:\ServiceCMS\… and C:/LogsCMS/… paths. Recommended (after FR-14 provides the seams): fix the existing test with real Setups or delete it, then add (1) golden-file tests for the pain.002 builder (CreDtTm format, missing InitgPty/InstdAmt, invalid detail XML → throws, ProcesarNodo null-safety); (2) the encrypted-name helper (.xml, .txt, mixed case, null); (3) the error-throttle with a fake clock (first error, <10 min, 10 min, 5-min repeat, new message, success clears); (4) stage aggregation (item 1 fails, item 2 succeeds ⇒ stage false); (5) SFTP uploader fake – partial failure marks only succeeded files; (6) a composition test calling Container.Verify(). Suggested JIRA: GPHAS-FR-25 (Major).
-Rewrite Recommended
-None beyond FR-25 hygiene items.
-Nice to Rewrite if Time Permits
-• GPHAS-FR-26 – Repository hygiene and documentation drift — *Minor*.
-An orphan ignored folder TestProject1/ (a 3,312-line obj/project.assets.json and build caches from the pre-rename test project) sits beside the real PruebasUnitarias/; the Phase 0 master document (§4.5.1.1) still lists GPH/GPH_ArchivoSalida/TestProject1/PruebasUnitarias.csproj. The README is the unmodified GitLab template (no description, build, deployment, parameter or runbook content) and still points at gitlab.mufg.mx while the git origin is 10.85.177.232; all three assemblies stay at 1.0.0.0 with an empty company. Recommended: delete the orphan folder locally, refresh the Phase 0 inventory, and replace the README with: purpose, the four stages, required parameters (names only, no values), folder layout, the SFTP/PGP prerequisites and the operational runbook. Suggested JIRA: GPHAS-FR-26 (Minor).
-5. Architecture-Fit Note
-This solution is a timer-driven, window-limited batch pipeline (a 10-second tick that does real work only between HORA_GPH_INICIO and HORA_GPH_FIN on business days) implemented as a classic .NET Framework 4.8 Windows Service, running a strictly sequential four-stage flow – generate → encrypt → SFTP upload → mark – with state split between SQL Server (stage status), local folders (clear text, encrypted, processed) and a remote SFTP host. That makes it a small saga with at-least-once semantics rather than a stateless "file egress utility": as written it is *not* idempotent (FR-3, FR-5, FR-6, FR-8), which is the first thing to fix. Applying the standing question in _ORCHESTRATION.md §6: the Serverless/scheduled functions row names this service as a candidate, but the evidence here argues against a near-term move – it depends on local folder state, on PGP keys and WinSCP.exe on disk, on D:\ServiceCMS binaries and on a shared parameter set that is probably common to GPH_Descarga/GPH_ETL (shared folders [verify] – the FR-5 wildcard upload would also ship foreign files). Recommended sequence: (1) fix FR-1…FR-10 and FR-22 (real defects); (2) extract the seams in FR-14, add the FR-25 tests and make the per-file stage a persisted state machine (Generated → Encrypted → Uploaded), which removes the duplicate-send class of bugs; (3) publish the shared binaries as packages (FR-24/GEN-1); (4) only then decide on modernization (a .NET 8 Worker Service in place, or a scheduled/queue-triggered job). Unknowns that block a hosting decision and must come from the owners: delivery SLA for status reports, the counterparty's acceptance window and schema strictness, daily file volumes, deployment/hosting constraints and budget.
-6. JIRA-Ready Backlog
-ID	Title	Category	Project	File(s)	Priority
-GPHAS-FR-1	Emit schema-valid CreDtTm/MsgId (string formatted as date); inject clock	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:424-429	P1 – Blocker
-GPHAS-FR-2	Abort/flag the report when a payment detail cannot be generated (result ignored)	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:517,907-926	P1 – Blocker
-GPHAS-FR-3	Do not mark a failed Level-3 file as processed; temp-file publish; isolate compensating call	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:436-440,545-563	P1 – Blocker
-GPHAS-FR-4	Make ProcesarNodo null-safe (.Length NRE on optional nodes)	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:472,824-829,1006	P2 – Major
-GPHAS-FR-5	Upload only the DB batch; per-file result handling; no repeat/duplicate uploads	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:748-796	P1 – Blocker
-GPHAS-FR-6	Single tested encrypted-name mapping for encryption and SFTP stages	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:614,773-776	P2 – Major
-GPHAS-FR-7	Aggregate per-item failures; stop "last write wins"/swallowed results	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:240-316,543-552,627-653,792	P2 – Major
-GPHAS-FR-8	Atomic PGP output and archive move (temp file + rename, no delete-then-move)	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:1254-1301	P2 – Major
-GPHAS-FR-9	Fix Level-1 "already generated" guard path	MustChange	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:281-304	P2 – Major
-GPHAS-FR-10	Make failure e-mail throttle persistent and map CorreoDeDefault	MustChange	AplicacionGPH_ArchivosSalida / host	OperacionServicio.cs:41, ServiceHost.cs:66-78, RealizaControlError.cs:76-117	P2 – Major
-GPHAS-FR-11	Parse GROUP_HEADER with the hardened XML helper	rewrite_recommended	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:442	P2 – Major
-GPHAS-FR-12	Replace path concatenation with sanitized Path.Combine helper	rewrite_recommended	AplicacionGPH_ArchivosSalida	14 sites in OperacionServicio.cs	P2 – Major
-GPHAS-FR-13	Extract duplicated XML block / error-code predicate code; fix accumulator and counter defects	rewrite_recommended	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:385-387,449-451,483-485,849,959-973,1077-1195	P2 – Major
-GPHAS-FR-14	Split OperacionServicio into injectable services; register IOperacionServicio; drop unused DI	rewrite_recommended	AplicacionGPH_ArchivosSalida / host	OperacionServicio.cs, ServiceHost.cs:75-110	P2 – Major
-GPHAS-FR-15	Typed validated settings, Tipo enums, consistent repository contract	rewrite_recommended	AplicacionGPH_ArchivosSalida / Infraestructura	OperacionServicio.cs (16 lookups), Modelos/*, RepositorioTomi.cs	P2 – Major
-GPHAS-FR-16	Stop ERROR log + alert row on every skipped (weekend/out-of-window) tick (GEN-10)	rewrite_recommended	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:146-190	P2 – Major
-GPHAS-FR-17	Honor cancellation; do not alert on OperationCanceledException; finalizer token	rewrite_recommended	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:72-96	P3 – Minor
-GPHAS-FR-18	Remove N+1 detail query and DTO count double-count risk	rewrite_recommended	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:380-401,508-518,904	P2 – Major
-GPHAS-FR-19	Inject IClock; explicit culture/format for dates (GEN-12 related)	rewrite_recommended	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:287,426-429, RealizaControlError.cs	P3 – Minor
-GPHAS-FR-20	Fix wrong log labels, unused constants/usings, typos, naming	NiceToRewrite_ifTimePermits	All	OperacionServicio.cs:351,560,641,701,808, ConstantesServicio.cs, RepositorioTomi.cs:8,19,22	P3 – Minor
-GPHAS-FR-21	Drop the second XDocument pass; stop e-mailing stack traces	NiceToRewrite_ifTimePermits	AplicacionGPH_ArchivosSalida	OperacionServicio.cs:524-533, RealizaControlError.cs:99	P3 – Minor
-GPHAS-FR-22	Check Exito on all six repository queries (GEN-11)	MustChange	InfraestructuraGPH_ArchivosSalida	RepositorioTomi.cs:64,101,144,167,185,221	P2 – Major
-GPHAS-FR-23	Check discarded service-state results; harden Pid.Value use (GEN-9/GEN-8 latent)	rewrite_recommended	GPH_ArchivosSalida (host)	ServiceHost.cs:99,135-138, OperacionServicio.cs:94,148,209	P3 – Minor
-GPHAS-FR-24	Replace D:\ServiceCMS HintPaths with packages; verify PgpCore/BouncyCastle/WinSCP.exe (GEN-1)	rewrite_recommended	All	4 .csproj, .slnx	P2 – Major
-GPHAS-FR-25	Replace the non-functional test with real unit tests for the critical logic (GEN-2 variant)	MustChange	PruebasUnitarias	OperacionServicioUTs.cs, MSTestSettings.cs	P2 – Major
-GPHAS-FR-26	Remove orphan TestProject1/, write a real README, refresh Phase 0 path, version assemblies	NiceToRewrite_ifTimePermits	Solution	TestProject1/, README.md, AssemblyInfo ×3	P3 – Minor
+namespace AplicacionGPH_ArchivosSalida
+{
+    /// <summary>
+    /// Clase principal de entrada para la ejecución del servicio
+    /// </summary>
+    public class OperacionServicio : IOperacionServicio
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IAlertas _alertas;
+        private readonly IParametrizacion _parametrizacion;
+        private readonly IRepositorioTomi _repositorioTomi;
+        private readonly IRealizaControlError _realizaControlError;
+        private ControlErrorEstructura[] loControlError = new ControlErrorEstructura[2];
+        private int giCountErrorGral;
 
-Open recommendations: 26 – 12 MustChange/rewrite (4 Blocker, 8 Major), 11 rewrite_recommended (8 Major, 3 Minor), 3 NiceToRewrite_ifTimePermits (all Minor). Verdict if this were a PR: Request changes (Blockers FR-1, FR-2, FR-3, FR-5 and unresolved Majors).
+        /// <summary>
+        /// Constructor
+        /// </summary>
+        /// <param name="configuracion"></param>
+        /// <param name="controlServicio"></param>
+        /// <param name="alertas"></param>
+        /// <param name="parametrizacion"></param>
+        /// <param name="repositorioTomi"></param>
+        /// <param name="realizaControlError"></param>
+        public OperacionServicio(Configuracion configuracion,
+           IControlServicio controlServicio,
+           IAlertas alertas,
+           IParametrizacion parametrizacion,
+           IRepositorioTomi repositorioTomi,
+           IRealizaControlError realizaControlError
+           )
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _alertas = alertas;
+            _parametrizacion = parametrizacion;
+            _repositorioTomi = repositorioTomi;
+            _realizaControlError = realizaControlError;
+        }
+
+        /// <summary>
+        /// Método principal para Ejecucion de procedimientos.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> EjecutarProcedimientosAsync(CancellationToken ct)
+        {
+            try
+            {
+                await InicializarContextoAsync(ct);
+
+                if (!await EsDiaHabilAsync())
+                    return false;
+
+                if (!await EstaEnHorarioOperacion())
+                    return false;
+
+                await ProcesarOperacionesAsync();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error en EjecutarProcedimientos: {ex}");
+                await RegistrarAlertaAsync(ConstantesServicio.ClaveAvisoCritico, ex);
+                await _realizaControlError.RealizaControlErrorExceptionAsync(0, ex, loControlError, _configuracion);
+                return false;
+            }
+            finally
+            {
+                await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct);                
+            }
+        }
+        #region Procesamiento
+        /// <summary>
+        /// Método principal para procesar operaciones.
+        /// </summary>
+        /// <returns></returns>
+        private async Task ProcesarOperacionesAsync()
+        {
+                LogInfo("INFO|realiza_operaciones|***** Nuevo ciclo de GPH Archivo Salida *****");                
+                await GeneraArchivosLevel1();                
+                await GeneraArchivosLevel3();                
+                await EncriptarArchivos();                
+                await EnviarArchivosSFTP();               
+                LogInfo("INFO|realiza_operaciones|Fin de ciclo de GPH Archivo Salida");
+        }
+
+        #endregion
+
+        #region Inicialización
+        /// <summary>
+        /// Método para inicializar servicio y parametros del sistema.
+        /// </summary>
+        /// <returns></returns>
+        private async Task InicializarContextoAsync(CancellationToken ct)
+        {
+            await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio, ct);
+
+            _configuracion.FechaSistema = await _parametrizacion.ObtenerFechaSistemaAsync(ct);
+            _configuracion.EsDiaHabil = await _controlServicio.EsDiaHabil();
+            _configuracion.ParametrosSistema =
+                await _parametrizacion.ObtenerParametrosSistemaAsync(ConstantesServicio.stringParametros, ConstantesServicio.stringParametrosSensibles,ct);
+
+        }
+
+        #endregion
+
+        #region Validaciones
+        /// <summary>
+        /// Método para validar si es un día inhabil.
+        /// </summary>
+        /// <returns></returns>
+        private async Task<bool> EsDiaHabilAsync()
+        {
+            if (_configuracion.EsDiaHabil == true) return true;
+            LogError($"ERROR|{ConstantesServicio.MensajeDiaInhabil}");
+            await RegistrarAlertaAsync(ConstantesServicio.ClaveAvisoError, new Exception(ConstantesServicio.MensajeDiaInhabil));
+            return false;
+        }
+
+        /// <summary>
+        /// Método para validar si el servicio está en horario de Operación.
+        /// </summary>
+        /// <returns></returns>
+        private async Task<bool> EstaEnHorarioOperacion()
+        {
+            var horaActual = _parametrizacion.ObtenerHoraSistema();
+            var inicio = ConversionesComunes.ParseTimeSpanRequerido(_configuracion.ParametrosSistema[ConstantesServicio.HoraGPH_Inicio], ConstantesServicio.HoraGPH_Inicio);
+            var fin = ConversionesComunes.ParseTimeSpanRequerido(_configuracion.ParametrosSistema[ConstantesServicio.HoraGPH_Fin], ConstantesServicio.HoraGPH_Fin);
+            if (horaActual >= inicio && horaActual <= fin)
+                return true;
+
+            var mensaje = $"El servicio '{_configuracion.NombreServicio}' está fuera de horario";
+
+            LogError(mensaje);
+            await RegistrarAlertaAsync(ConstantesServicio.ClaveAvisoError, new Exception(mensaje), "Servicio fuera de horario");
+            return false;
+        }
+
+        #endregion
+
+        #region Alertas y Logging
+        /// <summary>
+        /// Método para registrar alertas.
+        /// </summary>
+        /// <param name="tipo"></param>
+        /// <param name="ex"></param>
+        /// <param name="descripcion"></param>
+        /// <returns></returns>
+        private async Task RegistrarAlertaAsync(string tipo, Exception ex, string descripcion = null)
+        {
+            await _alertas.InsertarAlerta(new AlertaDTO
+            {
+                Servicio = _configuracion.NombreServicio,
+                ClaveAviso = tipo,
+                Descipcion = descripcion,
+                PId = _configuracion.Pid.Value,
+                NombreProceso = _configuracion.NombreProceso,
+                Exception = ex
+            });
+        }
+
+        /// <summary>
+        /// Método para registrar Log informativo.
+        /// </summary>
+        /// <param name="msg"></param>
+        private void LogInfo(string msg) =>
+            Logging.Info($"|Ejecuta_Procedimientos|{msg}");
+
+        /// <summary>
+        /// Método para registrar log de errores.
+        /// </summary>
+        /// <param name="msg"></param>
+        private void LogError(string msg) =>
+            Logging.Error($"|Ejecuta_Procedimientos|{msg}");
+
+        #endregion
+
+        #region L1
+        /// <summary>
+        /// Método principal para generar archivos Level1.
+        /// </summary>
+        /// <returns></returns>
+        private async Task GeneraArchivosLevel1()
+        {
+            try
+            {                
+                LogInfo("INFO|GeneraArchivosLevel1|Obteniendo lista de archivos con estatus RECHAZADO.");                
+                List<OperacionL1DTO> operaciones = await _repositorioTomi.RecuperarOperacionLevel1Async();
+                if (!operaciones.Any())
+                {
+                    LogInfo("INFO|GeneraArchivosLevel1|No se encontraron archivos");                    
+                }
+                else {
+                    foreach (OperacionL1DTO element in operaciones)
+                    {
+                        try
+                        {
+                            string nombreArchivo = Convert.ToString(element?.Nombre_archivo) ?? string.Empty;
+                            string[] Nombres = nombreArchivo.Split('_');
+                            string lsFolioFile = Convert.ToString(element?.FOLIO_FILE) ?? string.Empty;
+                            string CustId = "";
+                            string archivoNew;
+
+                            if (Nombres.Length > 1)
+                            {
+                                archivoNew = Nombres[0] + "_" + Nombres[1] + "_ERROR_" + lsFolioFile;
+                                CustId = Nombres[1];
+                            }
+                            else
+                            {
+                                archivoNew = nombreArchivo + "_ERROR_" + lsFolioFile;
+                                CustId = "NA";
+                            }
+
+                            string gsRutaFilesTransmite = "";
+                            var L1 = new ActualizaL1
+                            {
+                                Tipo = 0,
+                                Folio = element.Folio,
+                                ArchivoNew = archivoNew
+
+                            };
+
+                            LogInfo("INFO|GeneraArchivosLevel1|Genera archivo nivel 1 para: " + archivoNew);
+
+                            if (!File.Exists(archivoNew))
+                            {
+                                gsRutaFilesTransmite = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_TRANSMITE];
+                                using (StreamWriter file = new StreamWriter(Path.Combine(gsRutaFilesTransmite, archivoNew, ".txt")))
+                                {
+                                    file.WriteLine("GPH Customer ID".PadRight(19, ' ') + ": " + CustId);
+                                    file.WriteLine("Received Date Time".PadRight(19, ' ') + ": " + element.Fecha_inicio);
+                                    file.WriteLine("Received File ID".PadRight(19, ' ') + ": " + nombreArchivo);
+                                    file.WriteLine("BTMU Reference".PadRight(19, ' ') + ": NA");
+                                    file.WriteLine("Sender".PadRight(19, ' ') + ": NA");
+                                    file.WriteLine("Status Code".PadRight(19, ' ') + ": 10-9999");
+                                    file.WriteLine("Error".PadRight(19, ' ') + ": " + (element?.Err_descripcion ?? string.Empty));
+                                }
+
+                                LogInfo("INFO|GeneraArchivosLevel1|Actualizando el nombre del archivo en maestro. Archivo: " + archivoNew);
+                                L1.Tipo = 1;
+                                await _repositorioTomi.MarcarOperacionProcesadaLevel1Async(L1);
+                            }
+                            else
+                            {
+                                LogInfo("INFO|GeneraArchivosLevel1|Error el archivo ya fue generado. Archivo: " + archivoNew);
+                                L1.Tipo = 2;
+                                await _repositorioTomi.MarcarOperacionProcesadaLevel1Async(L1);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            LogError("ERROR|GeneraArchivosLevel1|Se presenta exception: " + ex.ToString());
+                        }
+                    }
+
+                }
+
+            }
+            catch (Exception ex) 
+            {                
+                LogError("ERROR|GeneraArchivosLevel1|Se presenta exception: " + ex.ToString());                
+            }
+            
+        }
+
+        #endregion
+
+        #region L3
+        /// <summary>
+        /// Método principal para generar archivos Level3.
+        /// </summary>
+        /// <returns></returns>
+        private async Task GeneraArchivosLevel3()
+        {
+            var L3 = new ActualizaL3Archivo
+            {
+                Tipo = 1,
+                Folio = 0,
+                ArchivoNew = "",
+                Num_operaciones_aceptadas = 0,
+                Num_operaciones_rechazadas = 0
+
+            };
+            string gsRutaFilesTransmite = string.Empty;            
+            string ErrorGral = string.Empty;                        
+            try
+            {
+                LogInfo("GeneraArchivosLevel3|Obteniendo lista de archivos MAESTRO con estatus XML SERIALIZADO.");                
+                List<OperacionL3DTO> operaciones = await _repositorioTomi.RecuperarOperacionLevel3Async(L3);
+                if (!operaciones.Any())
+                {
+                    LogInfo("GeneraArchivosLevel3|No se encontraron archivos para generar.");
+                }
+                else
+                {
+                    LogInfo($"EncriptarArchivos|Comienza la generacion de archivos de salida, se detectaron {operaciones.Count.ToString()} archivos para generar.");
+
+                    foreach (OperacionL3DTO Archivo in operaciones)
+                    {
+
+                        try
+                        {
+                            string archivoNew = string.Empty;
+                            giCountErrorGral = 0;
+                            var L3d = new ActualizaL3Archivo
+                            {
+                                Tipo = 2,
+                                Folio = Archivo.Folio
+                            };
+                            ErrorGral = "";
+
+                            L3.Folio = Archivo.Folio;
+
+                            LogInfo("INFO|GeneraArchivosLevel3|Obteniendo Detalles del Archivo " + Archivo.Nombre + "|Estatus:" + Archivo.estatus);
+
+                            //' 2.- De cada archivo Maestro, obtenemos los pagos aceptados y rechazados de la tabla de Detalles.
+                            LogInfo("INFO|GeneraArchivosLevel3|Obtener pagos aceptados, Folio = " + Archivo.Folio.ToString());
+                            List<OperacionL3DetalleDTO> operacionesDet = await _repositorioTomi.RecuperarOperacionLevel3DetalleAsync(L3d);
+
+                            LogInfo("INFO|GeneraArchivosLevel3|Obteniendo totales de operaciones del archivo " + Archivo.Nombre);
+                            foreach (OperacionL3DetalleDTO DetArchGPH in operacionesDet)
+                            {
+                                var estatusOperacion = DetArchGPH?.Estatus ?? string.Empty;
+                                var errorOperacion = DetArchGPH?.Error ?? string.Empty;
+
+                                if (string.Equals(estatusOperacion, ConstantesServicio.EstadoRechazada, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    Archivo.Num_operaciones_rechazadas += 1;
+
+                                    if (string.IsNullOrWhiteSpace(ErrorGral) && (errorOperacion.Contains(ConstantesServicio.CodigoErrorGeneralA) ||
+                                        errorOperacion.Contains(ConstantesServicio.CodigoErrorGeneralB) ||
+                                        errorOperacion.Contains(ConstantesServicio.CodigoErrorGeneralC)))
+                                    {
+                                        ErrorGral = errorOperacion;
+                                    }
+
+                                }
+                                else
+                                    if (string.Equals(estatusOperacion, ConstantesServicio.EstadoAceptada, StringComparison.OrdinalIgnoreCase) ||
+                                        string.Equals(estatusOperacion, ConstantesServicio.EstadoProcesada, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        Archivo.Num_operaciones_aceptadas += 1;
+                                    }
+
+                            }
+
+                            //'Generamos nombre acorde a las especificaciones XXXX_XXXX_BTMM_ERROR.txt
+                            string nombreArchivoL3 = Archivo?.Nombre ?? string.Empty;
+                            string[] NombreArc = nombreArchivoL3.Split('_');
+                            if (NombreArc.Length > 1)
+                            {
+                                archivoNew = NombreArc[0] + "_" + NombreArc[1] + "_BTMM_" + Archivo.FOLIO_FILE;
+                            }
+                            else
+                            {
+                                archivoNew = nombreArchivoL3 + "_BTMM_" + Archivo.FOLIO_FILE;
+                            }
+
+                            var settings = new XmlWriterSettings
+                            {
+                                Indent = true,
+                                IndentChars = " ",
+                                Encoding = new UTF8Encoding(false),
+                                OmitXmlDeclaration = false
+                            };
+
+                            gsRutaFilesTransmite = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_TRANSMITE];
+                            using (XmlWriter writer = XmlWriter.Create(Path.Combine(gsRutaFilesTransmite, archivoNew, ".xml"), settings))
+                            {
+                                writer.WriteStartElement("Document", "urn:iso:std:iso:20022:tech:xsd:pain.002.001.03");
+                                writer.WriteAttributeString("xmlns", "xsi", null, "http://www.w3.org/2001/XMLSchema-instance");
+
+                                writer.WriteStartElement("CstmrPmtStsRpt");
+                                var FechaSistema = Conversion.StringToDate(_configuracion.FechaSistema);
+                                writer.WriteStartElement("GrpHdr"); // BEGIN - GrpHdr
+                                writer.WriteElementString("MsgId", $"{FechaSistema.ToString("yyyyMMdd")}" + Archivo.FOLIO_FILE);
+                                writer.WriteElementString("CreDtTm", $"{FechaSistema.ToString("yyyy-MM-dd")}T{DateTime.Now.ToString("HH:mm:ss")}");
+                                writer.WriteEndElement();          // ' END - GrpHdr
+                                writer.WriteStartElement("OrgnlGrpInfAndSts"); //' Begin - OrgnlGrpInfAndSts
+                                writer.WriteElementString("OrgnlMsgId", Archivo.Msg_id);
+                                writer.WriteElementString("OrgnlMsgNmId", "pain.001.001.03");
+
+                                //--
+                                //Parsear el XML que viene en el string GROUP_HEADER
+                                string creDtTmValue = null;
+                                string nbOfTxsValue = null;
+                                string ctrlSumValue = null;
+                                string InitgPtyNmValue = null;
+
+                                //Nodos opcionesles
+                                if (!string.IsNullOrEmpty(Archivo.GROUP_HEADER))
+                                {
+                                    try
+                                    {
+                                        XmlDocument docGroupHeader = new XmlDocument();
+                                        docGroupHeader.LoadXml(Archivo.GROUP_HEADER);
+                                        var navGroupHeader = docGroupHeader.CreateNavigator();
+                                        creDtTmValue = navGroupHeader.SelectSingleNode("//GroupHeader/CreDtTm")?.Value;
+                                        nbOfTxsValue = navGroupHeader.SelectSingleNode("//GroupHeader/NbOfTxs")?.Value;
+                                        ctrlSumValue = navGroupHeader.SelectSingleNode("//GroupHeader/CtrlSum")?.Value;
+                                        InitgPtyNmValue = navGroupHeader.SelectSingleNode("//GroupHeader/InitgPty/Nm")?.Value;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        LogError($"|GeneraArchivosLevel3|No se pudo parsear GROUP_HEADER: {ex.Message}");
+                                    }
+                                }
+
+                                if (!string.IsNullOrEmpty(creDtTmValue))
+                                {
+                                    writer.WriteElementString("OrgnlCreDtTm", creDtTmValue);
+                                }
+                                if (!string.IsNullOrEmpty(nbOfTxsValue))
+                                {
+                                    writer.WriteElementString("OrgnlNbOfTxs", nbOfTxsValue);
+                                }
+                                if (!string.IsNullOrEmpty(ctrlSumValue))
+                                {
+                                    writer.WriteElementString("OrgnlCtrlSum", ctrlSumValue);
+                                }
+
+                                bool tieneErrorEspecifico = ErrorGral.Contains("1Z35201") ||
+                                                            ErrorGral.Contains("1T10070") ||
+                                                            ErrorGral.Contains("1T10057");
+
+                                string grpSts = tieneErrorEspecifico ? "RJCT" :
+                                    (Archivo.Total_operaciones == Archivo.Num_operaciones_aceptadas) ? "ACCP" :
+                                    (Archivo.Total_operaciones == Archivo.Num_operaciones_rechazadas) ? "RJCT" : "PART";
+
+                                writer.WriteElementString("GrpSts", grpSts);
+
+                                LogInfo("INFO|StsRsnInf|Begin|InitgPty");
+                                writer.WriteStartElement("StsRsnInf");
+
+
+                                //----
+                                string groupHeader = Archivo?.GROUP_HEADER;
+                                if (string.IsNullOrWhiteSpace(groupHeader))
+                                {
+                                    throw new Exception("GROUP_HEADER vacío o nulo para generar XML de salida.");
+                                }
+
+                                var nav = new XPathDocument(new StringReader(groupHeader)).CreateNavigator();
+                                string xmlValor = string.Empty;
+
+                                xmlValor = ProcesarNodo(nav, writer, "//GroupHeader/CreDtTm", "OrgnlCreDtTm");
+                                xmlValor = ProcesarNodo(nav, writer, "//GroupHeader/NbOfTxs", "OrgnlNbOfTxs");
+                                xmlValor = ProcesarNodo(nav, writer, "//GroupHeader/CtrlSum", "OrgnlCtrlSum");
+
+                                if (ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralA) ||
+                                    ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralB) ||
+                                    ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralC))
+                                {
+                                    writer.WriteElementString("GrpSts", ConstantesServicio.EstadoGrupoRjct);
+                                }
+                                else
+                                {
+                                    writer.WriteElementString(
+                                        "GrpSts",
+                                        (Archivo.Total_operaciones == Archivo.Num_operaciones_aceptadas)
+                                            ? ConstantesServicio.EstadoGrupoAccp
+                                            : (Archivo.Total_operaciones == Archivo.Num_operaciones_rechazadas)
+                                                ? ConstantesServicio.EstadoGrupoRjct
+                                                : ConstantesServicio.EstadoGrupoPart
+                                    );
+                                }
+
+                                writer.WriteStartElement("StsRsnInf");
+
+                                LogInfo("INFO|StsRsnInf|Begin|InitgPty");
+
+                                xmlValor = ProcesarNodo(nav, writer, "//GroupHeader/InitgPty/Nm", "");
+                                if (xmlValor.Length > 0)
+                                {
+                                    writer.WriteStartElement("Orgtr");  // ' Begin - Orgtr
+                                    writer.WriteElementString("Nm", xmlValor);
+                                    writer.WriteEndElement();  //' End - Orgtr
+                                }
+                                LogInfo("INFO|StsRsnInf|End|InitgPty");
+
+
+                                writer.WriteStartElement("Rsn");
+
+                                if (ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralA) ||
+                                    ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralB) ||
+                                    ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralC))
+                                {
+                                    writer.WriteElementString("Prtry", ConstantesServicio.CodigoPrtryError);
+                                }
+                                else
+                                {
+                                    writer.WriteElementString(
+                                        "Prtry",
+                                        (Archivo.Total_operaciones == Archivo.Num_operaciones_aceptadas)
+                                            ? ConstantesServicio.CodigoPrtryOk
+                                            : (Archivo.Total_operaciones == Archivo.Num_operaciones_rechazadas)
+                                                ? ConstantesServicio.CodigoPrtryError
+                                                : ConstantesServicio.CodigoPrtryParcial
+                                    );
+                                }
+
+
+                                writer.WriteEndElement();           //' END - Rsn
+                                writer.WriteEndElement();           //' END - StsRsnInf
+                                writer.WriteEndElement();           //' END - OrgnlGrpInfAndSts                        
+
+                                //' /*********** Crear por cada Transaccion **************/   
+                                LogInfo("INFO|GeneraArchivosLevel3|Obtener detalle por operacion");
+                                foreach (OperacionL3DetalleDTO DetArchGPHXml in operacionesDet)
+                                {
+                                    if (ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralALegacy) ||
+                                        ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralBLegacy) ||
+                                        ErrorGral.Contains(ConstantesServicio.CodigoErrorGeneralCLegacy))
+                                    {
+                                        giCountErrorGral = giCountErrorGral + 1;
+                                    }
+
+                                    await CreateDetailFileStatus(writer, DetArchGPHXml, giCountErrorGral);
+                                }
+                                writer.WriteEndDocument();
+                                writer.Close();
+                            }
+
+                            var patchFileNew = Path.Combine(gsRutaFilesTransmite, archivoNew, ".xml");
+    
+                            var doc = XDocument.Load(Path.Combine(patchFileNew));
+
+                            doc.Descendants()
+                                .Where(e =>
+                                    string.IsNullOrWhiteSpace(e.Value) &&
+                                    !e.HasElements &&
+                                    !e.HasAttributes)
+                                .Remove();
+
+                            doc.Save(patchFileNew);
+
+                            LogInfo("INFO|GeneraArchivosLevel3|Se termina la generacion de archivo XML de salida: " + archivoNew + ".xml");
+
+                            L3.Tipo = 1;
+                            L3.ArchivoNew = archivoNew;
+                            L3.Folio = Archivo.Folio;
+                            L3.Num_operaciones_aceptadas = Archivo.Num_operaciones_aceptadas;
+                            L3.Num_operaciones_rechazadas = Archivo.Num_operaciones_rechazadas;
+                            await _repositorioTomi.MarcarOperacionProcesadaLevel3Async(L3);
+
+                        }
+                        catch (Exception ex)
+                        {
+                            LogError("ERROR|GeneraArchivosLevel3|Error en la generacion de los archivos de salida. - " + ex.ToString());
+                            L3.Tipo = 1;
+                            L3.ArchivoNew = Archivo.Nombre;
+                            L3.Folio = Archivo.Folio;
+                            L3.Num_operaciones_aceptadas = Archivo.Num_operaciones_aceptadas;
+                            L3.Num_operaciones_rechazadas = Archivo.Num_operaciones_rechazadas;
+                            await _repositorioTomi.MarcarOperacionProcesadaLevel3Async(L3);
+                        }
+                    }
+
+                }
+
+
+            }
+            catch (Exception ex)
+            {
+                LogError("ERROR|GeneraArchivosLevel1|Se presenta exception: " + ex.ToString());                
+                L3.Tipo = 2;
+                await _repositorioTomi.MarcarOperacionProcesadaLevel3Async(L3);                
+            }
+        }
+        #endregion
+
+        #region Encriptacion
+        /// <summary>
+        /// Método principal para encriptar archivos.
+        /// </summary>
+        /// <returns></returns>
+        private async Task EncriptarArchivos()
+        {
+            try
+            {
+                string gsRutaFilesTransmite = string.Empty;
+                string gsRutaKeys = string.Empty;
+                string gsLlavePublica = string.Empty;
+                string gsRutaFilesEncriptados = string.Empty;
+                string gsRutaFilesProcesados = string.Empty;                
+                LogInfo("INFO|EncriptarArchivos|Obteniendo lista de archivos pendientes de encriptar.");                
+                List<OperacionEncryptaDTO> operaciones = await _repositorioTomi.RecuperarOperacionEncryptaAsync();
+                if (!operaciones.Any())
+                {
+                    LogInfo("INFO|EncriptarArchivos|No se encontraron archivos pgp para encriptar.");
+                    
+                }
+                else
+                {
+                    LogInfo("INFO|EncriptarArchivos|Comienza la encripcion, se detectaron " + operaciones.Count + " archivos de salida.");
+
+                    try
+                    {
+                        gsRutaFilesTransmite = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_TRANSMITE];
+                        gsRutaKeys = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_LLAVES_GPH];
+
+                        //SERVICIO.CONFIG
+                        gsLlavePublica = LecturaConfguracionGeneral.ObtenerValorGeneral("LLAVE_PUBLICA_PGP");
+
+                        gsRutaFilesEncriptados = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_ENCRIPTADOS];
+                        gsRutaFilesProcesados = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_PROCESADOS];
+
+                        foreach (OperacionEncryptaDTO elementEncry in operaciones)
+                        {
+                            string strEx = string.Empty;
+                            try
+                            {
+
+                                string inputFileLocation = Path.Combine(gsRutaFilesTransmite, elementEncry.Nombre_archivo_salida);
+                                string publicKeyLocation = Path.Combine(gsRutaKeys, gsLlavePublica);
+                                string outputFile = Path.Combine(gsRutaFilesEncriptados, elementEncry.Nombre_archivo_salida.Replace(".xml", "").Replace(".txt", ""));
+
+                                LogInfo("INFO|EncriptarArchivos|Encriptando ArchivoEntrada=" + inputFileLocation + " - ArchivoSalida=" + outputFile);
+
+                                await EncryptFile(inputFileLocation, publicKeyLocation, outputFile);
+                                LogInfo("INFO|EncriptarArchivos|Inicio - moviendo archivo a: " + gsRutaFilesTransmite + elementEncry.Nombre_archivo_salida);
+
+                                FileInfo fInfo = new FileInfo(inputFileLocation);
+
+                                MoveFile(fInfo, Path.Combine(gsRutaFilesProcesados, elementEncry.Nombre_archivo_salida));
+                                LogInfo("INFO|EncriptarArchivos|Fin - moviendo archivo a: " + gsRutaFilesTransmite + elementEncry.Nombre_archivo_salida);
+
+                            }
+                            catch (Exception ex)
+                            {
+                                strEx = ex.Message;
+                            }
+
+                            var Encry = new ActualizaEncrypta
+                            {
+                                Tipo = 0,
+                                Folio = elementEncry.Folio,
+                                ErroDesc = strEx
+                            };
+
+                            if (strEx != "")
+                            {
+                                LogInfo("INFO|EncriptarArchivos|Error en la encripcion del archivo pgp " + elementEncry.Nombre_archivo_salida + " - " + strEx);
+
+                                Encry.Tipo = 1;
+                                Encry.ErroDesc = strEx;
+                                await _repositorioTomi.MarcarOperacionProcesadaEncryptaAsync(Encry);
+                            }
+                            else
+                            {
+                                LogInfo("INFO|EncriptarArchivos|Se termina la encripcion deL archivo pgp " + elementEncry.Nombre_archivo_salida);
+
+                                Encry.Tipo = 2;
+                                await _repositorioTomi.MarcarOperacionProcesadaEncryptaAsync(Encry);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError($"ERROR|EncriptarArchivos|Error en la encripcion de los archivos pgp. - {ex}");
+                    }
+                }
+
+          
+            }
+            catch (Exception ex)
+            {             
+                LogError($"ERROR|EncriptarArchivos|Se presenta exception: {ex}");
+            }            
+        }
+
+        #endregion
+
+        #region Envio SFTP
+        /// <summary>
+        /// Método principal para envio de archivos SFTP.
+        /// </summary>
+        /// <returns></returns>
+        private async Task EnviarArchivosSFTP()
+        {
+            try
+            {
+
+                string gsRemoteHostNameSFTP = string.Empty;
+                string gsRemoteUsrSFTP = string.Empty;
+
+                Int32 gsSshPortNumberHostSFTP = 0;
+                string gsSshHostKeySFTP = string.Empty;
+                string gsSshPrivateKeyPathSFTP = string.Empty;
+
+                string gsRutaFilesEncriptados = string.Empty;
+                string gsRutaFilesRemoteUpload = string.Empty;
+                string gsRutaFilesProcesados = string.Empty;
+                
+
+                LogInfo("INFO|SendFiles|Obteniendo lista de archivos encriptados para su envio.");                
+                List<OperacionEnviaDTO> operaciones = await _repositorioTomi.RecuperarOperacionEnviarAsync();
+
+                if (!operaciones.Any())
+                {
+                    LogInfo("INFO|EncriptarArchivos|No se encontraron archivos pgp para encriptar.");
+                    
+                }
+                else
+                {
+
+                    gsRutaFilesEncriptados = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_ENCRIPTADOS];
+                    gsRutaFilesRemoteUpload = _configuracion.ParametrosSistema[ConstantesServicio.REMOTE_PATH_SFTP_GPH_UPLOAD];
+
+                    gsRemoteHostNameSFTP = _configuracion.ParametrosSistema[ConstantesServicio.REMOTE_HOST_NAME_GPH];
+                    gsRemoteUsrSFTP = _configuracion.ParametrosSistema[ConstantesServicio.USER_SFTP_GPH];
+
+                    gsSshPortNumberHostSFTP = ConversionesComunes.ParseEnteroRequerido(_configuracion.ParametrosSistema[ConstantesServicio.SSH_HOST_PORT_NUMBER_GPH], ConstantesServicio.SSH_HOST_PORT_NUMBER_GPH);
+                    gsSshHostKeySFTP = _configuracion.ParametrosSistema[ConstantesServicio.SSH_HOST_KEY_GPH];
+
+
+                    gsSshPrivateKeyPathSFTP = _configuracion.ParametrosSistema[ConstantesServicio.SSH_PRIVATE_KEY_PATH_GPH];
+                    gsRutaFilesProcesados = _configuracion.ParametrosSistema[ConstantesServicio.RUTA_ARCHIVOS_GPH_PROCESADOS];
+
+                    LogInfo("INFO|SendFiles|Lista de archivos con estatus ENCRIPTADO");
+
+                    SessionOptions sessionOptions = new SessionOptions
+                    {
+                        Protocol = Protocol.Sftp,
+                        HostName = gsRemoteHostNameSFTP,
+                        UserName = gsRemoteUsrSFTP,
+                        PortNumber = gsSshPortNumberHostSFTP,
+                        SshHostKeyFingerprint = gsSshHostKeySFTP,
+                        SshPrivateKeyPath = gsSshPrivateKeyPathSFTP
+                    };
+
+                    LogInfo("INFO|SendFiles|Setup session options, ready");
+
+                    using (Session session = new Session())
+                    {
+                        // Connect
+                        session.Open(sessionOptions);
+                        LogInfo("INFO|SendFiles|Connection, ready");
+
+                        // Upload files
+                        TransferOptions transferOptions = new TransferOptions
+                        {
+                            TransferMode = TransferMode.Automatic
+                        };
+                        transferOptions.AddRawSettings("IgnorePermErrors", "1");
+
+                        LogInfo("INFO|SendFiles|Upload begin, ready");
+                        LogInfo("INFO|SendFiles|gsRutaFilesTransmite: " + gsRutaFilesEncriptados + "*.*");
+                        LogInfo("INFO|SendFiles|gsRutaFilesRemoteUpload: " + gsRutaFilesRemoteUpload);
+
+
+
+                        TransferOperationResult transferResult = session.PutFiles(
+                            gsRutaFilesEncriptados + "*.*",
+                            gsRutaFilesRemoteUpload,
+                            false,
+                            transferOptions);
+
+                        LogInfo("INFO|SendFiles|Upload end, ready, Numero de Transfer:" +
+                                  transferResult.Transfers.Count.ToString());
+
+                        transferResult.Check();
+                        LogInfo("INFO|SendFiles|Check end");
+                        foreach (WinSCP.TransferEventArgs transfer in transferResult.Transfers)
+                        {
+                            if (transfer.Error != null)
+                            {
+                                LogError($"ERROR|SendFiles|Upload of {transfer.FileName}, error: {transfer.Error} ");
+                                continue;
+                            }
+                            LogInfo("INFO|SendFiles|Upload of " + transfer.FileName + ", succeeded");
+
+
+                            OperacionEnviaDTO selectedValue = operaciones.Find(
+                                p => p.Nombre_archivo_salida.Replace(".xml", "").Replace(".txt", "") ==
+                                     transfer.FileName.Replace(gsRutaFilesEncriptados, "")
+                            );
+
+                            LogInfo("INFO|SendFiles|find element ");
+
+                            if (selectedValue != null)
+                            {
+                                LogInfo("INFO|SendFiles|Upload of " + selectedValue.Nombre_archivo_salida + ", succeeded");
+
+                                FileInfo fInfo = new FileInfo(transfer.FileName);
+
+                                MoveFile(fInfo,
+                                    gsRutaFilesProcesados +
+                                    transfer.FileName.Replace(gsRutaFilesEncriptados, "")
+                                );
+
+                                LogInfo("INFO|SendFiles|Move " + selectedValue.Nombre_archivo_salida + ", succeeded");
+                                await _repositorioTomi.MarcarOperacionProcesadaEnviarAsync(selectedValue.Folio);
+                            }
+                            else
+                            {
+                                LogInfo("INFO|SendFiles|No se encontro el archivo: " + transfer.FileName);
+                            }
+                        }
+                    }
+
+                    LogInfo("INFO|SendFiles|* * * * * *  Envio de Archivos PGP por SFTP Completa   * * * * * * * * * * *");
+                    LogInfo("INFO|SendFiles|=========================================================================");
+
+                }
+            }
+            catch (Exception ex)
+            {                
+                LogError($"ERROR|EncriptarArchivos|Se presenta exception: {ex}");
+            }            
+        }
+        #endregion
+
+
+        #region Generales
+        /// <summary>
+        /// Método para procesamiento de nodo XML.
+        /// </summary>
+        /// <param name="nav"></param>
+        /// <param name="writer"></param>
+        /// <param name="nodoObtener"></param>
+        /// <param name="nodoPonerlo"></param>
+        /// <returns></returns>
+        private string ProcesarNodo(XPathNavigator nav, XmlWriter writer, string nodoObtener, string nodoPonerlo)
+        {            
+            var valor = nav.SelectSingleNode(nodoObtener)?.Value;
+            if (!string.IsNullOrWhiteSpace(valor) && !string.IsNullOrWhiteSpace(nodoPonerlo)) { writer.WriteElementString(nodoPonerlo, valor); }
+            return valor;
+        }
+
+        /// <summary>
+        /// Método para modificar el detalle de estatus de cada archivo.
+        /// </summary>
+        /// <param name="FileXMLStatus"></param>
+        /// <param name="DetailFileGPH"></param>
+        /// <returns></returns>
+        private async Task<bool> CreateDetailFileStatus(XmlWriter FileXMLStatus, OperacionL3DetalleDTO DetailFileGPH, int giCountErrorGral)
+        {            
+            bool PagoAceptado;
+            var L3FileSatatus = new DetailFileStatus
+            {
+                Folio = DetailFileGPH.Folio,
+                FolioOperacion = DetailFileGPH.Folio_operacion,
+                Pmt_Inf_Id = DetailFileGPH.Pmt_Inf_Id,
+                EndToEndId = DetailFileGPH.EndToEndId,
+                WorkTable = "",
+            };
+
+            string lsErrorCodeGral= string.Empty;
+            string estatusDetalle = DetailFileGPH?.Estatus ?? string.Empty;
+            string errorDetalle = DetailFileGPH?.Error ?? string.Empty;
+
+            if (string.Equals(estatusDetalle, ConstantesServicio.EstadoProcesada, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(estatusDetalle, ConstantesServicio.EstadoAceptada, StringComparison.OrdinalIgnoreCase))
+            {
+                PagoAceptado = true;
+            }
+            else
+            {
+                PagoAceptado = false;
+            }
+
+            switch (DetailFileGPH.Tipo_operacion)
+            {
+                case ConstantesServicio.TipoOperacionFxdGph:
+                    L3FileSatatus.WorkTable = ConstantesServicio.TablaFxdGph;
+                    break;
+
+                case ConstantesServicio.TipoOperacionFxtGph:
+                    L3FileSatatus.WorkTable = ConstantesServicio.TablaFxtGph;
+                    break;
+
+                case ConstantesServicio.TipoOperacionTefGph:
+                    L3FileSatatus.WorkTable = ConstantesServicio.TablaTefGph;
+                    break;
+
+                case ConstantesServicio.TipoOperacionSpidGph:
+                    L3FileSatatus.WorkTable = ConstantesServicio.TablaSpidGph;
+                    break;
+
+                case ConstantesServicio.TipoOperacionFxiGph:
+                    L3FileSatatus.WorkTable = ConstantesServicio.TablaFxiGph;
+                    break;
+
+
+                default:
+                    L3FileSatatus.FolioOperacion = 0;
+                    L3FileSatatus.EndToEndId = "";
+                    L3FileSatatus.WorkTable = ConstantesServicio.TablaNoAplica;
+
+                    break;
+
+            }
+
+            if (L3FileSatatus.WorkTable != ConstantesServicio.TablaNoAplica)
+            {
+                LogInfo($"INFO|Obtener info de BD de la tabla: '{L3FileSatatus.WorkTable}'");
+            }
+            else
+            {
+                LogInfo($"INFO|Obtener info de BD de la tabla: '{ConstantesServicio.TablaDetalleArchivo}'");
+            }
+
+            List<OperacionDetailFileStatusDTO> operacionesFileStatus = await _repositorioTomi.RecuperarOperacionDetailFileStatusAsync(L3FileSatatus);
+            LogInfo("INFO|Obtener info de BD Salio BIEN");
+
+            if (!operacionesFileStatus.Any())
+            {
+                LogInfo("INFO|CrearXmlDetalleFXD|No se encontro información para el Pago: " + L3FileSatatus.Pmt_Inf_Id + ", con numero de folio de archivo: " + L3FileSatatus.Folio);
+                return true;
+            }
+
+
+            foreach (OperacionDetailFileStatusDTO lrsDatos in operacionesFileStatus)
+            {
+                string xmlValor = string.Empty;
+                string xmlValorT = xmlValor;
+
+                XmlDocument doc;
+                string error;
+
+                if (!XmlHelper.TryParseXmlSeguro(lrsDatos?.NF_ARCHIVO_XML, out doc, out error))
+                {
+                    LogError("ERROR|XML|XML inválido: " + error);
+                    return false;
+                }
+
+                var nav = doc.CreateNavigator();
+
+
+                //'---------------------------------    OrgnlPmtInfAndSts  ------------------------------
+                LogInfo("INFO|Begin|OrgnlPmtInfAndSts");
+                FileXMLStatus.WriteStartElement("OrgnlPmtInfAndSts");//  ' Begin - OrgnlPmtInfAndSts
+
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/PmtInfId", "OrgnlPmtInfId");
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/NbOfTxs", "OrgnlNbOfTxs");
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CtrlSum", "OrgnlCtrlSum");
+
+                LogInfo("INFO|End|OrgnlPmtInfAndSts");
+
+                //'----------------------------------    TxInfAndSts  ------------------------------
+                LogInfo("INFO|Begin|TxInfAndSts");
+                FileXMLStatus.WriteStartElement("TxInfAndSts");//  ' Begin - TxInfAndSts
+                FileXMLStatus.WriteElementString("StsId", lrsDatos?.NF_FOLIO_UNICO ?? string.Empty);
+
+
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CdtTrfTxInf[1]/PmtId/InstrId", "OrgnlInstrId");
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CdtTrfTxInf[1]/PmtId/EndToEndId", "OrgnlEndToEndId");
+
+                FileXMLStatus.WriteElementString("TxSts", PagoAceptado ? ConstantesServicio.EstadoGrupoAccp : ConstantesServicio.EstadoGrupoRjct);
+                LogInfo("INFO|End|TxInfAndSts");
+                //'----------------------------------------------------------    StsRsnInf  ------------------------------
+
+                LogInfo("INFO|Begin|StsRsnInf");
+
+                FileXMLStatus.WriteStartElement("StsRsnInf");   // ' Begin - StsRsnInf
+                FileXMLStatus.WriteStartElement("Rsn"); //// ' Begin - Rsn
+
+                if (errorDetalle.Contains(ConstantesServicio.CodigoErrorGeneralA) ||
+                    errorDetalle.Contains(ConstantesServicio.CodigoErrorGeneralB) ||
+                    errorDetalle.Contains(ConstantesServicio.CodigoErrorGeneralC))
+                {
+                    if (errorDetalle.Contains(ConstantesServicio.CodigoErrorGeneralA))
+                    {
+                        lsErrorCodeGral += ConstantesServicio.CodigoErrorGeneralA + "|";
+                    }
+
+                    if (errorDetalle.Contains(ConstantesServicio.CodigoErrorGeneralB))
+                    {
+                        lsErrorCodeGral += ConstantesServicio.CodigoErrorGeneralB + "|";
+                    }
+
+                    if (errorDetalle.Contains(ConstantesServicio.CodigoErrorGeneralC))
+                    {
+                        lsErrorCodeGral += ConstantesServicio.CodigoErrorGeneralC + "|";
+                    }
+
+                    // equivalente de IIf en C# (operador ternario)
+                    FileXMLStatus.WriteElementString(
+                        "Prtry",
+                        giCountErrorGral > 1
+                            ? ConstantesServicio.CodigoTxErrorMultiple
+                            : lsErrorCodeGral.Substring(0, lsErrorCodeGral.Length - 1)
+                    );
+                }
+                else
+                {
+                    FileXMLStatus.WriteElementString(
+                        "Prtry",
+                        PagoAceptado
+                            ? ConstantesServicio.CodigoTxOk
+                            : errorDetalle
+                    );
+                }
+
+                FileXMLStatus.WriteEndElement();        // ' End - Rsn
+                FileXMLStatus.WriteEndElement();        // ' End - StsRsnInf  
+                LogInfo("INFO|End|StsRsnInf");
+
+                //'----------------------------------------------------------    OrgnlTxRef  ------------------------------
+                FileXMLStatus.WriteStartElement("OrgnlTxRef");//// ' Begin - OrgnlTxRef
+
+                //'----------------------------------------    Amt  ------------------------------
+                LogInfo("INFO|Begin|Amt");
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CdtTrfTxInf[1]/Amt/InstdAmt", "");
+                if (xmlValor.Length > 0)
+                {
+
+                    FileXMLStatus.WriteStartElement("Amt"); // ' Begin - Amt
+                    FileXMLStatus.WriteStartElement("InstdAmt");
+                    xmlValorT = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CdtTrfTxInf[1]/Amt/InstdAmt/@Ccy", "");
+                    FileXMLStatus.WriteAttributeString("Ccy", xmlValorT); //'T24_DEBIT_CURRENCY // payment.CdtTrfTxInf(0).Amt.InstdAmt.Ccy 
+                    FileXMLStatus.WriteString(xmlValor);    //'NF_MONTO_ENVIAR //payment.CdtTrfTxInf(0).Amt.InstdAmt.Value
+                    FileXMLStatus.WriteEndElement();        // ' End - InstdAmt                            
+                    FileXMLStatus.WriteEndElement();        // ' End - Amt  
+                }
+
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/ReqdExctnDt", "ReqdExctnDt");
+                LogInfo("INFO|End|Amt");
+                //'----------------------------------------    PmtTpInf  ------------------------------
+                LogInfo("INFO|Begin|PmtTpInf");
+
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/PmtTpInf/LclInstrm", "");
+                xmlValorT = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CdtTrfTxInf[1]/PmtTpInf/CtgyPurp", "");
+
+                if (!string.IsNullOrWhiteSpace(xmlValor) || !string.IsNullOrWhiteSpace(xmlValorT))
+                {
+                    FileXMLStatus.WriteStartElement("PmtTpInf"); //// ' Begin - PmtTpInf
+
+                    if (!string.IsNullOrWhiteSpace(xmlValor))
+                    {
+                        FileXMLStatus.WriteStartElement("LclInstrm"); //// ' Begin - LclInstrm
+
+                        xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/PmtTpInf/LclInstrm/Cd", "Cd");
+                        xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/PmtTpInf/LclInstrm/Prtry", "Prtry");
+
+                        FileXMLStatus.WriteEndElement();  // ' End - LclInstrm
+
+
+                        var nodo22 = nav.SelectSingleNode("//PaymentInstruction/PmtTpInf/LclInstrm");
+                        if (nodo22 != null)
+                        {
+                            nodo22.DeleteSelf();
+                        }
+
+                    }
+                    
+                    if (!string.IsNullOrWhiteSpace(xmlValorT))
+                    {
+                        FileXMLStatus.WriteStartElement("CtgyPurp"); //// ' Begin - CtgyPurp
+
+                        xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CdtTrfTxInf[1]/PmtTpInf/CtgyPurp/Cd", "Cd");
+                        xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/CdtTrfTxInf[1]/PmtTpInf/CtgyPurp/Prtry", "Prtry");
+
+                        FileXMLStatus.WriteEndElement();  // ' End - CtgyPurp
+
+                        var nodo2 = nav.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/PmtTpInf/CtgyPurp");
+                        if (nodo2 != null)
+                        {
+                            nodo2.DeleteSelf();
+                        }
+                    }
+
+                    FileXMLStatus.WriteEndElement();               // ' End - PmtTpInf
+
+                }
+                LogInfo("INFO|End|PmtTpInf");
+
+                xmlValor = string.Empty;
+                xmlValorT = string.Empty;
+
+                // '----------------------------------------    PmtMtd  ------------------------------
+                xmlValor = ProcesarNodo(nav, FileXMLStatus, "//PaymentInstruction/PmtMtd", "PmtMtd");//'Oper/PmtMtd
+
+                // '----------------------------------------    RmtInf  ------------------------------
+                LogInfo("INFO|Begin|RmtInf");
+                //rmcb se trae bloqueo                  
+                var nodo = nav.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/RmtInf");
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/RmtInf");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|RmtInf");
+
+                //'---------------------------------------- -------------------------   UltmtDbtr  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|UltmtDbtr");
+                //rmcb se trae bloque 
+                nodo = nav.SelectSingleNode("//PaymentInstruction/UltmtDbtr");// //PaymentInstruction/UltmtDbtr/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/UltmtDbtr");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|UltmtDbtr");
+
+                //'---------------------------------------- -------------------------   Dbtr  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|Dbtr");
+                //rmcb se trae bloque 
+                nodo = nav.SelectSingleNode("//PaymentInstruction/Dbtr");//PaymentInstruction/Dbtr/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/Dbtr");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|Dbtr");
+                ///'---------------------------------------- -------------------------   DbtrAcct  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|DbtrAcct");
+                nodo = nav.SelectSingleNode("//PaymentInstruction/DbtrAcct");//PaymentInstruction/DbtrAcct/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/DbtrAcct");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|DbtrAcct");
+                //'---------------------------------------- -------------------------   DbtrAgt  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|DbtrAgt");
+                nodo = nav.SelectSingleNode("//PaymentInstruction/DbtrAgt");//PaymentInstruction/DbtrAgt/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/DbtrAgt");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|DbtrAgt");
+                //'---------------------------------------- -------------------------   DbtrAgtAcct  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|DbtrAgtAcct");
+                nodo = nav.SelectSingleNode("//PaymentInstruction/DbtrAgtAcct");//PaymentInstruction/DbtrAgtAcct/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/DbtrAgtAcct");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|DbtrAgtAcct");
+                //'---------------------------------------- -------------------------   CdtrAgt  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|CdtrAgt");
+                nodo = nav.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/CdtrAgt");//PaymentInstruction/CdtTrfTxInf[1]/CdtrAgt/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/CdtrAgt");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|CdtrAgt");
+                //'---------------------------------------- -------------------------   CdtrAgtAcct  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|CdtrAgtAcct");
+                nodo = nav.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/CdtrAgtAcct");//PaymentInstruction/CdtTrfTxInf[1]/CdtrAgtAcct/isNotNullPropertiesThen
+
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/CdtrAgtAcct");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|CdtrAgtAcct");
+                //'---------------------------------------- -------------------------   Cdtr  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|Cdtr");
+                nodo = nav.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/Cdtr");//PaymentInstruction/CdtTrfTxInf[1]/Cdtr/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/Cdtr");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+
+                LogInfo("INFO|End|Cdtr");
+                //'---------------------------------------- -------------------------   CdtrAcct  -------------------------------------------------------------------------
+                LogInfo("INFO|Begin|CdtrAcct");
+                nodo = nav.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/CdtrAcct");//PaymentInstruction/CdtTrfTxInf[1]/CdtrAcct/isNotNullPropertiesThen
+                if (nodo != null)
+                {
+                    XmlNode nodo2 = doc.SelectSingleNode("//PaymentInstruction/CdtTrfTxInf[1]/CdtrAcct");
+                    // limpiar nodos vacíos
+                    RemoveEmptyNodes(nodo2);
+                    FileXMLStatus.WriteRaw(nodo2.OuterXml);
+                }
+                LogInfo("INFO|End|CdtrAcct");
+
+
+                FileXMLStatus.WriteEndElement();    // ' End - OrgnlTxRef
+                FileXMLStatus.WriteEndElement();      // ' End - TxInfAndSts						
+                FileXMLStatus.WriteEndElement();   // ' End - OrgnlPmtInfAndSts						
+
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Método para remover nodos de el archivo XML.
+        /// </summary>
+        /// <param name="node"></param>
+        void RemoveEmptyNodes(XmlNode node)
+        {
+            if (node == null) return;
+
+            // 1. Limpiar atributos vacíos
+            if (node.Attributes != null)
+            {
+                for (int i = node.Attributes.Count - 1; i >= 0; i--)
+                {
+                    var attr = node.Attributes[i];
+
+                    if (string.IsNullOrWhiteSpace(attr.Value))
+                    {
+                        node.Attributes.Remove(attr);
+                    }
+                }
+            }
+
+
+            // recorrer hijos de atrás hacia adelante (importante para eliminar)
+            for (int i = node.ChildNodes.Count - 1; i >= 0; i--)
+            {
+                XmlNode child = node.ChildNodes[i];
+
+                // llamada recursiva
+                RemoveEmptyNodes(child);
+
+                // condiciones para eliminar nodo vacío
+                bool isEmptyElement =
+                    child.NodeType == XmlNodeType.Element &&
+                    string.IsNullOrWhiteSpace(child.InnerText) &&
+                    child.ChildNodes.Count == 0 &&
+                    (child.Attributes == null || child.Attributes.Count == 0);
+
+                if (isEmptyElement)
+                {
+                    node.RemoveChild(child);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Método para encriptar el archivo.
+        /// </summary>
+        /// <param name="inputFile"></param>
+        /// <param name="publicKeyFile"></param>
+        /// <param name="outputFile"></param>
+        /// <returns></returns>
+        private async Task EncryptFile(string inputFile, string publicKeyFile, string outputFile)
+        {
+            using (var publicKeyStream = File.OpenRead(publicKeyFile))
+            {
+                using (var input = File.OpenRead(inputFile))
+                using (var output = File.Create(outputFile))
+                {
+                    var keys1 = new EncryptionKeys(publicKeyStream);
+                    var pgp = new PGP(keys1);
+                    await pgp.EncryptStreamAsync(input, output);
+                }                
+            }
+        }
+
+        /// <summary>
+        /// Método para mover el archivo.
+        /// </summary>
+        /// <param name="fInfo"></param>
+        /// <param name="destPath"></param>
+        private void MoveFile(FileInfo fInfo, string destPath)
+        {
+            // Crear FileInfo del destino
+            FileInfo fInfoDest = new FileInfo(destPath);
+            string dirPath = fInfoDest.Directory.FullName;
+
+            //write_Log("INFO|MoveFile|Verifica si el directorio existe, si no existe lo crea: " + dirPath);
+            LogInfo("INFO|MoveFile|Verifica si el directorio existe, si no existe lo crea: " + dirPath);
+
+            // Si el directorio no existe, crearlo
+            if (!Directory.Exists(dirPath))
+            {
+                Directory.CreateDirectory(dirPath);
+            }
+
+            //write_Log("INFO|MoveFile|Verifica si el archivo existe en directorio, si existe lo elimina: " + destPath);
+            LogInfo("INFO|MoveFile|Verifica si el archivo existe en directorio, si existe lo elimina: " + destPath);
+
+            // Si el archivo existe, eliminarlo
+            if (File.Exists(destPath))
+            {
+                File.Delete(destPath);
+            }
+
+            // Mover archivo
+            fInfo.MoveTo(destPath);
+        }
+        #endregion
+
+    }
+}
+using AplicacionGPH_ArchivosSalida.Enums;
+using AplicacionGPH_ArchivosSalida.Interfaces;
+using AplicacionGPH_ArchivosSalida.Servicios;
+using InfraestructuraGPH_ArchivosSalida.Repositorio;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Core.Configuracion;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace GPH_ArchivosSalida
+{
+    /// <summary>
+    /// Clase principal del servicio Windows (presentación).
+    /// Hereda de WindowsServiceHostBase, quien contiene toda robustez de la gestión del ciclo de vida del servicio.
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private Configuracion _configuracionBase;
+
+        protected override string NombreServicioLog => NombreServicio.GPH_ArchivosSalida.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+            _configuracionBase = new Configuracion();
+
+            //Inicializa la obtención de la configuración general y el logging...
+            {
+                LecturaConfguracionGeneral.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = LecturaConfguracionGeneral.ObtenerServicio(NombreServicio.GPH_ArchivosSalida.ToString());
+                ValidarServicioConfiguracionLocal(servicioMainConfiguracion);
+
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+                _configuracionBase.CorreoParaDefault = LecturaConfguracionGeneral.ObtenerValorGeneral(ConstantesServicio.Para);
+                _configuracionBase.SujetoDefault = LecturaConfguracionGeneral.ObtenerValorGeneral(ConstantesServicio.AsuntoTest);
+                _configuracionBase.CorreoSenderTest = LecturaConfguracionGeneral.ObtenerValorGeneral(ConstantesServicio.SenderTest);
+
+                Logging.Init(_configuracionBase.PathLog, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+            }
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            //Registra los componentes...
+            _containerDI.Register<AplicacionGPH_ArchivosSalida.OperacionServicio>();
+            _containerDI.Register<IRepositorioTomi, RepositorioTomi>();
+            _containerDI.Register<IRealizaControlError, RealizaControlError>(Lifestyle.Scoped);
+            _containerDI.Verify();
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+
+            //Obtiene el proceso actual...
+            IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+            _configuracionBase = await _parametrizacion.ObtenerProcesoActualValidadoAsync(_configuracionBase, ct).ConfigureAwait(false);
+
+            //Validación explícita posterior para revisión de contrato...
+            _parametrizacion.ValidarProcesoActual(_configuracionBase);
+
+            //Marca el servicio en uso...
+            IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+            await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+            //Ejecuta el procedimiento principal del servicio...
+            using (AsyncScopedLifestyle.BeginScope(_containerDI))
+            {
+                var operacionServicio = _containerDI.GetInstance<AplicacionGPH_ArchivosSalida.OperacionServicio>();
+                await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            //Si no se inicializó correctamente el servicio, no se realiza la terminación...
+            if (_containerDI == null || _configuracionBase == null)
+            {
+                Config.EscribirLog(ConstantesServicio.MensajeOmitido);
+                return;
+            }
+
+            using (AsyncScopedLifestyle.BeginScope(_containerDI))
+            {
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                //Marca el servicio en uso...
+                await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                //Marca el termino del servicio...
+                await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Especifica los recursos a liberar al finalizar el servicio.
+        /// </summary>
+        protected override void LiberarRecursosTerminacion()
+            => _containerDI?.Dispose();
+
+        /// <summary>
+        /// Valida la configuración del servicio obtenida desde el archivo de configuración.
+        /// </summary>
+        private static void ValidarServicioConfiguracionLocal(ServicioConfiguracionSettings configuracion)
+        {
+            if (configuracion == null)
+                throw new InvalidOperationException("No se obtuvo configuración del servicio.");
+
+            if (string.IsNullOrWhiteSpace(configuracion.Log))
+                throw new InvalidOperationException("La configuración obligatoria 'Log' no está definida para el servicio.");
+
+            if (configuracion.TamanoMaximoArchivoLogKB <= 0)
+                throw new InvalidOperationException("La configuración obligatoria 'TamanoMaximoArchivoLogKB' debe ser mayor a cero para el servicio.");
+
+            if (configuracion.TimerEnable && configuracion.Timer <= 0)
+                throw new InvalidOperationException("La configuración obligatoria 'Timer' debe ser mayor a cero cuando 'TimerEnable' es true en el servicio.");
+        }
+
+    }
+}
+using AplicacionGPH_ArchivosSalida.Enums;
+using AplicacionGPH_ArchivosSalida.Interfaces;
+using AplicacionGPH_ArchivosSalida.Modelos;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Threading.Tasks;
+using static AplicacionGPH_ArchivosSalida.Enums.ConstantesServicio;
+
+
+
+namespace AplicacionGPH_ArchivosSalida.Servicios
+{
+    public class RealizaControlError : IRealizaControlError
+    {
+
+        public async Task<string> RealizaControlErrorExceptionAsync(int index, Exception e, ControlErrorEstructura[] loControlError, Configuracion _configuracion)
+        {
+            bool lbEnviaCorreo = false;
+            string mensaje = string.Empty;
+
+            string correoDeDefault = string.Empty;
+            string correoParaDefault = string.Empty;
+            string sujetoDefault = string.Empty;
+            
+            if (loControlError[index].LbConErrorPrevio)
+            {                
+                // Valido si es el mismo error
+                if (loControlError[index].LsMensaje == e.Message)
+                {
+                    // Mismo error
+                    if (loControlError[index].LdFechaInicio != null &&
+                        ((DateTime)loControlError[index].LdFechaInicio).AddMinutes(ControlErrorIntervalos.MinutoPrimero) <= DateTime.Now)
+                    {
+                        // 10 minutos o más con el mismo error
+                        if (loControlError[index].LdFechaMail == null)
+                        {
+                            lbEnviaCorreo = true;
+                            mensaje += ("INFO|ControlError|Primer mail de error, index=" + index) + Environment.NewLine;
+                        }
+                        else
+                        {
+                            if (((DateTime)loControlError[index].LdFechaMail).AddMinutes(ControlErrorIntervalos.MinutoRepetir) <= DateTime.Now)
+                            {
+                                lbEnviaCorreo = true;
+                                mensaje += ("INFO|ControlError|Error recursivo, index=" + index) + Environment.NewLine;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Nuevo error
+                    loControlError[index].LdFechaInicio = DateTime.Now;
+                    loControlError[index].LdFechaMail = null;
+                    loControlError[index].LsMensaje = e.Message;
+                    loControlError[index].LoExcepcion = e;
+                }
+            }
+            else
+            {
+                mensaje += ("INFO|ControlError|Es inicio de control de error, index=" + index) + Environment.NewLine;
+                loControlError[index].LbConErrorPrevio = true;
+                loControlError[index].LdFechaInicio = DateTime.Now;
+                loControlError[index].LsMensaje = e.Message;
+                loControlError[index].LdFechaMail = null;
+                loControlError[index].LoExcepcion = e;
+            }
+
+            if (lbEnviaCorreo)
+            {
+                mensaje += ("INFO|ControlError|Tratando de enviar correo de error, index=" + index) + Environment.NewLine;
+
+                //revisar  en el llamado cargan config y tienen la logica de tomar de  _TEST o del aDB
+                if (string.IsNullOrEmpty(_configuracion.CorreoParaDefault) || string.IsNullOrEmpty(_configuracion.CorreoDeDefault))
+                {
+                    mensaje += ("INFO|ControlError|EnviarCorreo No se identifican datos para enviar correo, index=" + index) + Environment.NewLine;
+
+                }
+                else
+                {
+                    correoDeDefault = _configuracion.CorreoDeDefault;
+                    correoParaDefault = _configuracion.CorreoParaDefault;
+                    sujetoDefault = _configuracion.SujetoDefault;
+                }
+
+                if (!string.IsNullOrEmpty(correoParaDefault) || !string.IsNullOrEmpty(correoDeDefault))
+                {
+                    try
+                    {
+                        mensaje += ("INFO|ControlError|EnviarCorreo Inicia Proceso enviar Correo, index=" + index) + Environment.NewLine;
+                        var respuesta = await CorreoHelper.EnviarCorreoAsync(new MensajeCorreo
+                        {
+                            CorreoOrigen = correoDeDefault,
+                            NombreOrigen = ConstantesServicio.NombreOrigen,
+                            Para = correoParaDefault,
+                            Asunto = sujetoDefault,
+                            Mensaje = ConstantesServicio.MensajeDB + loControlError[index].LoExcepcion
+                        });
+
+                        if (respuesta)
+                        {
+                            loControlError[index].LdFechaMail = DateTime.Now;
+                            mensaje += ("INFO|ControlError|EnviarCorreo Correo enviado, index=" + index) + Environment.NewLine;
+                        }
+                        else
+                        {
+                            mensaje += ("INFO|ControlError|Error al enviar Correo , index=" + index) + Environment.NewLine;
+
+                        }
+                    }
+                    catch (Exception exMail)
+                    {                        
+                        mensaje = ("INFO|ControlError|Error|Ocurre exception: " + exMail.Message) + Environment.NewLine;
+                        return mensaje;
+                    }
+                }
+                else
+                {
+                    mensaje += ("INFO|ControlError|Correo sin parametros para enviar, index=" + index) + Environment.NewLine;
+                }
+                return mensaje;
+            }
+            return mensaje;
+        }
+    }
+}
+using AplicacionGPH_ArchivosSalida.Comunes;
+using AplicacionGPH_ArchivosSalida.DTOs;
+using AplicacionGPH_ArchivosSalida.Enums;
+using AplicacionGPH_ArchivosSalida.Interfaces;
+using AplicacionGPH_ArchivosSalida.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace InfraestructuraGPH_ArchivosSalida.Repositorio
+{
+      
+
+    /// <summary>
+    /// Repositorio InterfacesT24 (TOMI) y VistasT24
+    /// </summary>
+    public class RepositorioTomi : RepositorioMaestro,               
+        IRepositorioTomi
+    {
+        private readonly Configuracion _configuracion;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public RepositorioTomi(Configuracion configuracion)
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            _configuracion = configuracion;
+        }
+
+        #region l1
+
+        /// <summary>
+        /// Metodo para recupera información de nivel 1
+        /// </summary>
+        /// <param name="fecha"></param>
+        /// <returns></returns>
+        public async Task<List<OperacionL1DTO>> RecuperarOperacionLevel1Async()
+        {
+            var FechaSistema = Conversion.StringToDate(_configuracion.FechaSistema);
+            var resultado = await EjecutarStoredProcedureQuery<OperacionL1DTO>(ConstantesServicio.usp_ObtenerOperacionesGPH_AS_Level1, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaSistema", FechaSistema)); 
+            });
+            return resultado.Data;
+        }
+
+
+        /// <summary>
+        /// Metodo para marcar operacion de nivel 1
+        /// </summary>
+        /// <param name="L1"></param>
+        /// <returns></returns>
+        public async Task<bool> MarcarOperacionProcesadaLevel1Async(ActualizaL1 L1)
+        {
+            var resultado = await EjecutarStoredProceduredNonQuery(ConstantesServicio.usp_ActualizarOperacionesGPH_AS_Level1, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tipo", L1.Tipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", L1.Folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@ArchivoNew", L1.ArchivoNew)); 
+            });
+            return resultado.Exito;
+        }
+
+        #endregion
+
+        #region L3
+        /// <summary>
+        /// Método para recupear operaciones nivel 3
+        /// </summary>
+        /// <param name="L3"></param>
+        /// <returns></returns>
+        public async Task<List<OperacionL3DTO>> RecuperarOperacionLevel3Async(ActualizaL3Archivo L3)        
+        {
+            var FechaSistema = Conversion.StringToDate(_configuracion.FechaSistema);
+            var resultado = await EjecutarStoredProcedureQuery<OperacionL3DTO>(ConstantesServicio.usp_ObtenerOperacionesGPH_AS_Level3, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tipo", L3.Tipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio",L3.Folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaSistema", FechaSistema)); 
+            });
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Méetodo para marcar operación de nivel 3
+        /// </summary>
+        /// <param name="L3"></param>
+        /// <returns></returns>
+        public async Task<bool> MarcarOperacionProcesadaLevel3Async(ActualizaL3Archivo L3)
+        {
+            var resultado = await EjecutarStoredProceduredNonQuery(ConstantesServicio.usp_ActualizarOperacionesGPH_AS_Level3, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tipo", L3.Tipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", L3.Folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@ArchivoNew", L3.ArchivoNew));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@num_operaciones_aceptadas", L3.Num_operaciones_aceptadas));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@num_operaciones_rechazadas", L3.Num_operaciones_rechazadas));
+
+            });
+            return resultado.Exito;
+        }
+
+        #endregion
+
+        #region DetFileStsatus
+
+
+        /// <summary>
+        /// Método para recuperar los detalles de operacion nivel 3
+        /// </summary>
+        /// <param name="L3"></param>
+        /// <returns></returns>
+        public async Task<List<OperacionL3DetalleDTO>> RecuperarOperacionLevel3DetalleAsync(ActualizaL3Archivo L3)
+        {
+            var FechaSistema = Conversion.StringToDate(_configuracion.FechaSistema);
+            var resultado = await EjecutarStoredProcedureQuery<OperacionL3DetalleDTO>(ConstantesServicio.usp_ObtenerOperacionesGPH_AS_Level3, cmd =>
+            {
+
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tipo", L3.Tipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", L3.Folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaSistema", FechaSistema));
+
+
+            });
+            return resultado.Data;
+        }
+
+
+        /// <summary>
+        /// Método para recuperar los detalles de archivo
+        /// </summary>
+        /// <param name="DetFileStatus"></param>
+        /// <returns></returns>
+        public async Task<List<OperacionDetailFileStatusDTO>> RecuperarOperacionDetailFileStatusAsync(DetailFileStatus DetFileStatus)
+
+        {
+            var resultado = await EjecutarStoredProcedureQuery<OperacionDetailFileStatusDTO>(ConstantesServicio.usp_ObtenerDetailFileStatus, cmd =>
+            {
+
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", DetFileStatus.Folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FolioOperacion", DetFileStatus.FolioOperacion));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Pmt_Inf_Id", DetFileStatus.Pmt_Inf_Id));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@EndToEndId", DetFileStatus.EndToEndId));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@WorkTable", DetFileStatus.WorkTable));
+
+
+            });
+            return resultado.Data;
+        }
+        #endregion
+
+        #region Encrypta
+
+
+        /// <summary>
+        /// Método para recuperar operaciones encriptadas
+        /// </summary>
+        /// <param name="FechaSistema"></param>
+        /// <returns></returns>
+        public async Task<List<OperacionEncryptaDTO>> RecuperarOperacionEncryptaAsync()
+        {
+
+            var FechaSistema = Conversion.StringToDate(_configuracion.FechaSistema);
+            var resultado = await EjecutarStoredProcedureQuery<OperacionEncryptaDTO>(ConstantesServicio.usp_ObtenerOperacionesGPH_AS_Encrypta, cmd =>
+            { 
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaSistema", FechaSistema));
+            });
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Método para marcar operación procesada
+        /// </summary>
+        /// <param name="Encry"></param>
+        /// <returns></returns>
+        public async Task<bool> MarcarOperacionProcesadaEncryptaAsync(ActualizaEncrypta Encry)
+        {
+            var resultado = await EjecutarStoredProceduredNonQuery(ConstantesServicio.usp_ActualizarOperacionesGPH_AS_Encrypta, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tipo", Encry.Tipo));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Encry.Folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@ErroDesc", Encry.ErroDesc));
+            });
+            return resultado.Exito;    
+
+        }
+
+        #endregion
+
+        #region EnviaSFTP
+
+
+        /// <summary>
+        /// Método para recuperar operación a enviar
+        /// </summary>
+        /// <param name="FechaSistema"></param>
+        /// <returns></returns>
+        public async Task<List<OperacionEnviaDTO>> RecuperarOperacionEnviarAsync()
+        {
+            var FechaSistema = Conversion.StringToDate(_configuracion.FechaSistema);
+            var resultado = await EjecutarStoredProcedureQuery<OperacionEnviaDTO>(ConstantesServicio.usp_ObtenerOperacionesGPH_AS_Envia, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaSistema", FechaSistema));
+            });
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Método para marcar operación enviada
+        /// </summary>
+        /// <param name="Folio"></param>
+        /// <returns></returns>
+        public async Task<bool> MarcarOperacionProcesadaEnviarAsync(Int64 Folio)
+        {
+            var resultado = await EjecutarStoredProceduredNonQuery(ConstantesServicio.usp_ActualizarOperacionesGPH_AS_Envia, cmd =>
+            { 
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Folio));
+            });
+            return resultado.Exito;
+
+             
+        }
+
+         
+        #endregion
+
+
+    }
+
+}
+namespace AplicacionGPH_ArchivosSalida.DTOs
+{
+    /// <summary>
+    /// Propiedades para la operacion L3
+    /// </summary>
+    public class OperacionL3DTO
+    {
+        public long Folio { get; set; }
+        public string Nombre { get; set; }
+        public string estatus { get; set; }
+
+        public int Total_operaciones { get; set; }
+        public int Num_operaciones_aceptadas { get; set; }
+        public int Num_operaciones_rechazadas { get; set; }
+
+        public string Msg_id { get; set; }        
+
+        public string FOLIO_FILE { get; set; }
+
+         public string GROUP_HEADER { get; set; }
+ 
+
+    }
+
+
+   
+}
